@@ -118,3 +118,28 @@ Short ADR entries. Newest at the bottom. "Brief" means `BUILD_BRIEF.md`. An entr
 - **Publishing:** `api` publishes `${BIND_ADDRESS}:${HTTP_PORT}` in both modes. The server template defaults to `0.0.0.0` with a note to set the LXC's LAN IP and firewall the port to the proxy.
 - **Profiles:** `server` adds only the worker; `caddy` is its own optional profile; `proxytest` runs nginx at `http://localhost:8088` with another app at `/` and Opsis at `/opsis/`. `deploy/proxytest/nginx.conf` is the reference for the real proxy.
 - **Healthcheck:** `python -m opsis healthcheck` calls `{base}/healthz`.
+- **Several cookies with one name (found in M2 testing):** browsers do not separate cookies by port, so a laptop that has run Opsis at `localhost:8080/` and at `localhost:8088/opsis/` sends two `opsis_csrf` cookies. The CSRF check therefore accepts a header that matches any of them (`cookies.cookie_values`). The session cookie lookup in M6 must do the same.
+
+## ADR-017: Data ingestion choices
+- **Status:** accepted, M2
+- **Connector ids:** `file` (CSV and Excel upload), `postgres`, `mysql`. The brief's layout calls the first folder `csv/`; `file` is used because it also reads Excel.
+- **Registry:** a built-in connector is a package under `opsis/connectors/` that exports `CONNECTOR`. Drop-in connectors live in `plugins/connectors/<id>/__init__.py` (copied to `/app/plugins`), and installed packages can use the `opsis.connectors` entry point. A broken plugin is logged and skipped.
+- **CSV reading uses DuckDB**, with dialect and type detection over the whole file, so a column that turns into text on row 90,000 does not break the load. Excel uses openpyxl; a column with mixed value types is stored as text.
+- **SQL connectors** share `connectors/sql_base.py`. Table and column names come only from the connector's own discovery, are quoted per database, and cursor values are bound parameters. Sessions are read-only. Rows are streamed with a server-side cursor.
+- **Type mapping:** eight logical types (ADR-008). Decimals keep their scale (`decimal128(38, s)`); a numeric with no declared scale is stored as float. Timestamps with a zone are stored as UTC. JSON and unknown types are stored as text.
+- **Row estimates** are shown only when trustworthy: exact for files, the planner estimate for Postgres when it has one, never for MySQL (its figure was 0 for a 5,000 row table in testing).
+- **Snapshots:** see `docs/ARCHITECTURE.md` for full, append and merge. Append hard-links the previous files, so it costs no extra disk for old rows. A source whose columns changed fails an incremental refresh with a message asking for a full rebuild; the current data stays in place.
+- **One transaction:** the refresh handler does not commit. `run_one` commits the snapshot row, the dataset pointer, the cursor state and the job status together. Pruning runs after that commit and cannot fail the job.
+- **Runner recovery:** v1 has one job runner per install. At start it marks any job still "running" as failed ("Interrupted by a restart") and deletes half-built `.tmp` snapshot directories.
+- **Retention:** `SNAPSHOT_RETENTION` (default 3, minimum 2) applies to every dataset. A per-dataset setting can come with the scheduling UI in M8.
+- **Uploads** go to `/data/uploads/<id>/<name>`, limited by `MAX_UPLOAD_MB` and to `.csv .tsv .txt .xlsx .xlsm`. File names are flattened to a safe name, and the connector refuses any path outside the uploads folder. An upload is deleted with its connection. Uploads from an abandoned form are not cleaned up yet.
+- **Permissions:** admins manage connections and uploads (`connections:manage`). Editors can list connections and tables and manage datasets (`datasets:edit`). Per-dataset access control arrives in M6.
+- **Sample data:** the `sample` Compose profile starts a MySQL 8.4 container with `donors` and `gifts` tables. It is a demo and test source only, with a published throwaway password; MySQL itself is not a dependency of Opsis.
+
+## ADR-018: Connection forms use a small built-in schema form, not react-jsonschema-form
+- **Status:** accepted for M2. **Deviation**, to revisit in M4.
+- **Decision:** `frontend/src/components/SchemaForm.tsx` renders a connector's `config_schema()` (text, number, boolean, enum, secret and upload fields). Validation is done by the backend with `jsonschema`, which returns one message per JSON path, and the form shows each under its field.
+- **Why:** rjsf validates in the browser with ajv, which compiles validators using `new Function`. The brief requires a strict CSP with no inline or evaluated script on a domain shared with other apps, and that blocks ajv's compiler. The alternatives were to weaken the CSP with `unsafe-eval` or to precompile validators at build time, which does not work for schemas that arrive at runtime from plugins.
+- **Cost:** only flat schemas are supported. That covers connectors. Visual config panels in M4 may need nested objects and arrays.
+- **To decide in M4:** keep extending the built-in form, or use rjsf with a validator that does not need `eval` (for example a non-compiling JSON Schema validator behind rjsf's validator interface). The same question applies to validating dashboard specs in the browser with ajv.
+- **Also deferred:** shadcn/ui. The M2 screens use a handful of Tailwind components in `components/ui.tsx`. shadcn/ui is worth adding when dialogs, menus and popovers are needed (the M4 editor).

@@ -30,7 +30,7 @@ def cookie_attrs(settings: Settings, *, http_only: bool) -> dict[str, Any]:
 
 
 def ensure_csrf_cookie(request: Request, response: Response, settings: Settings) -> None:
-    if CSRF_COOKIE not in request.cookies:
+    if not cookie_values(request, CSRF_COOKIE):
         response.set_cookie(
             CSRF_COOKIE, secrets.token_urlsafe(32), **cookie_attrs(settings, http_only=False)
         )
@@ -45,6 +45,23 @@ def csrf_ok(request: Request) -> bool:
     """
     if request.headers.get("authorization", "").lower().startswith("bearer "):
         return True
-    cookie = request.cookies.get(CSRF_COOKIE, "")
     header = request.headers.get(CSRF_HEADER, "")
-    return bool(cookie) and secrets.compare_digest(cookie, header)
+    return bool(header) and any(
+        secrets.compare_digest(value, header) for value in cookie_values(request, CSRF_COOKIE)
+    )
+
+
+def cookie_values(request: Request, name: str) -> list[str]:
+    """Every value sent for a cookie name.
+
+    A browser can hold several cookies with one name and different paths, for
+    example from an Opsis at "/" and another at "/opsis" on the same host
+    (cookies ignore the port). It sends them all, so the first one is not
+    necessarily ours. Callers must try each value.
+    """
+    values = []
+    for part in request.headers.get("cookie", "").split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name and value:
+            values.append(value)
+    return values

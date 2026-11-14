@@ -11,9 +11,9 @@ flowchart LR
     agent["Claude Code, Claude Desktop, claude.ai"]
   end
 
-  subgraph edge["server profile only"]
+  subgraph edge["reverse proxy"]
     cloudflared["cloudflared (tunnel profile)"]
-    caddy["Caddy: TLS, security headers"]
+    caddy["Your existing proxy, or the bundled Caddy (caddy profile)"]
   end
 
   subgraph api["api container (FastAPI, one process)"]
@@ -87,8 +87,14 @@ sequenceDiagram
 ```
 
 - The pointer swap and the cursor state commit in the same transaction, so a failed refresh changes nothing that readers or the next refresh can see.
-- Snapshots are immutable. Readers resolve the snapshot id at query start and keep reading those files even if a swap happens mid-query. Pruning skips snapshots newer than a grace period so in-flight queries are safe.
-- Both runner modes execute the same `run_job()` function. Only the loop that claims jobs differs.
+- Snapshots are immutable. Readers resolve the snapshot id at query start and keep reading those files even if a swap happens mid-query. `SNAPSHOT_RETENTION` is at least 2, so the snapshot a reader started on always survives the next swap.
+- Both runner modes execute the same `run_one()` function in `opsis/jobs/worker.py`. Only the loop around it differs: a thread in the api (`inline`) or the worker container's main loop (`worker`).
+- How each mode builds the new snapshot (`opsis/storage/snapshots.py`):
+  - **full**: the rows read are the snapshot.
+  - **append**: the previous files are hard-linked into the new directory and the new rows are added as extra files. Only rows with a cursor value above the saved one are read.
+  - **merge**: rows changed since the saved cursor are read, then DuckDB combines them with the previous snapshot, keeping the newest row per primary key. Rows deleted in the source are not removed; a full rebuild does that.
+- The first refresh of any dataset, and a "full rebuild", read everything.
+- Secrets: connection settings are split by the connector's schema. Fields marked `x-secret` are encrypted with Fernet (`ENCRYPTION_KEY`) into one column; the rest is plain JSON. The API returns only the names of secret fields that have a value.
 
 ## 3. Data flow: query
 

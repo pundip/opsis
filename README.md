@@ -2,7 +2,7 @@
 
 A self-hosted, AI-native business intelligence platform. Open source, Docker-based, and built so that a person and an AI agent edit the same dashboards.
 
-**Status:** early development. The application shell, configuration system and database baseline exist. Connectors, the semantic layer, dashboards and the MCP server are being built milestone by milestone. See [PROGRESS.md](PROGRESS.md).
+**Status:** early development. You can connect to CSV or Excel files, PostgreSQL and MySQL, pull tables into local storage, refresh them and preview the rows. The semantic layer, dashboards, the MCP server and sign-in are being built milestone by milestone. See [PROGRESS.md](PROGRESS.md).
 
 ## Quick start
 
@@ -17,28 +17,69 @@ docker compose up -d
 
 (On macOS or Linux use `cp` in place of `copy`.) Open http://localhost:8080. There is no sign-in in local mode: you are the built-in admin, and the app only listens on your own machine.
 
+### Try it with sample data
+
+Set `COMPOSE_PROFILES=sample` in `.env` and run `docker compose up -d` again. This adds a small MySQL database with `donors` and `gifts` tables. Then, in Opsis:
+
+1. **Connections, New connection.** Type MySQL, host `sample-mysql`, database `sample`, user `reader`, password `reader-sample-pw`. Press Test, then Save.
+2. **Datasets, New dataset.** Choose the connection and the `gifts` table, then Create and refresh.
+3. The dataset page shows a preview, the refresh history and the snapshots kept. Refresh now makes a new snapshot.
+
+To use your own data, add a connection of type CSV or Excel file (upload it in the form), PostgreSQL or MySQL.
+
 ### Server
 
 ```
 cp .env.server.example .env
 ```
 
-Edit `.env` and change every value marked `CHANGE`, then:
+Edit `.env` and set every value marked `CHANGE` (public URL, trusted proxy, database password, encryption key). Generate the encryption key with:
+
+```
+docker compose run --rm --no-deps api generate-key
+```
+
+Then:
 
 ```
 docker compose up -d
 ```
 
-Server mode adds a worker and a Caddy reverse proxy. Sign-in (local accounts and Google) is part of a later milestone, so a server install currently shows a sign-in notice and nothing else.
+The stack refuses to start while a `CHANGE` value is still a placeholder. Server mode adds a worker container. Sign-in (local accounts and Google) is part of a later milestone, so a server install currently shows a sign-in notice and nothing else.
+
+### Behind a reverse proxy at a sub-path
+
+Opsis can live at a path such as `https://example.com/opsis` next to other apps on the same domain. Set `PUBLIC_BASE_URL` to that address and `TRUSTED_PROXIES` to your proxy's IP. The proxy must forward the path unchanged (do not strip the prefix). [deploy/proxytest/nginx.conf](deploy/proxytest/nginx.conf) is a working nginx example with the settings needed for streaming and uploads.
+
+To try this on a laptop, put these in `.env` and open http://localhost:8088/opsis/:
+
+```
+COMPOSE_PROFILES=proxytest
+PUBLIC_BASE_URL=http://localhost:8088/opsis
+TRUSTED_PROXIES=172.16.0.0/12
+```
 
 ### Useful commands
 
 | Command | What it does |
 |---|---|
-| `docker compose ps` | Show the running services and their health |
-| `docker compose logs api` | Show the API log, including configuration errors |
+| `docker compose ps -a` | Show the services and their health |
+| `docker compose logs config-check` | Show why the configuration was rejected |
+| `docker compose logs api` | Show the API log |
 | `docker compose down` | Stop the stack (data is kept in named volumes) |
 | `docker compose up -d --build` | Rebuild after pulling new code |
+
+### Compose profiles
+
+| Profile | Adds |
+|---|---|
+| (none) | `api` and `postgres` |
+| `server` | `worker`, needed for `JOB_RUNNER=worker` |
+| `caddy` | A bundled Caddy proxy with TLS, for installs with no reverse proxy of their own |
+| `tunnel` | Cloudflare Tunnel |
+| `ollama` | An Ollama container |
+| `proxytest` | nginx serving Opsis at `http://localhost:8088/opsis/`, to test sub-path hosting |
+| `sample` | A MySQL database with sample data |
 
 ## Configuration
 
@@ -57,14 +98,20 @@ Everything is set in `.env`. The two templates document each value. After a chan
 | `ASSISTANT_PROVIDER` | `anthropic` or `ollama` | `ollama` | `anthropic` |
 | `FEATURE_SQL_LAB` | Admin-only read-only SQL | `true` | `false` |
 | `FEATURE_BACKUPS` | Nightly backup job | `false` | `true` |
-| `BIND_ADDRESS`, `HTTP_PORT` | Where the api container is published on the host | `127.0.0.1`, `8080` | `127.0.0.1`, `8080` |
-| `PUBLIC_BASE_URL` | The address users type | `http://localhost:8080` | your https address |
+| `BIND_ADDRESS`, `HTTP_PORT` | Where the api container is published on the host | `127.0.0.1`, `8080` | the server's LAN IP, `8080` |
+| `PUBLIC_BASE_URL` | The address users type. A path becomes the app's base path | `http://localhost:8080` | your https address |
+| `TRUSTED_PROXIES` | IPs or CIDR ranges allowed to set forwarded headers | empty | your proxy's IP |
 | `WORKSPACE_TIMEZONE` | Timezone for relative dates such as "this month" | `Australia/Melbourne` | same |
 | `WEEK_START` | `monday` or `sunday` | `monday` | same |
 | `FISCAL_YEAR_START_MONTH` | First month of the financial year, 1 to 12 | `7` | same |
+| `FISCAL_YEAR_LABEL` | `fy_end_year` ("FY2027") or `year_span` ("2026-27") | `fy_end_year` | same |
+| `MAX_UPLOAD_MB` | Largest CSV or Excel upload | `200` | same |
+| `SNAPSHOT_RETENTION` | Snapshots kept per dataset (minimum 2) | `3` | same |
+| `ENCRYPTION_KEY` | Encrypts saved connection passwords | empty (generated and kept in the data volume) | required |
+| `POSTGRES_PASSWORD` | Password of the internal metadata database | template value | required, 12 characters or more |
 | `APP_NAME` | Product name shown in the UI | `Opsis` | same |
 
-Unsafe or contradictory settings stop the api container at startup with a message that names the variable and the fix. For example, `AUTH_MODE=none` with `BIND_ADDRESS=0.0.0.0` is refused. To check a config without starting anything:
+Unsafe or contradictory settings stop the stack once, before anything else starts, with a message that names the variable and the fix. For example, `AUTH_MODE=none` with `BIND_ADDRESS=0.0.0.0` is refused, and so is a server install with a placeholder password. To check a config without starting anything:
 
 ```
 docker compose run --rm --no-deps api check-config
@@ -81,7 +128,7 @@ The only tools needed on the host are Docker and Node.js (for the frontend tests
 | Command | What it does |
 |---|---|
 | `npm run dev` | Hot reload: API with auto-restart, Vite dev server on http://localhost:5173 |
-| `npm run test:backend` | pytest in the dev image, against a throwaway `opsis_test` database |
+| `npm run test:backend` | pytest in the dev image, against a throwaway `opsis_test` database and the sample MySQL |
 | `npm run lint:backend` | ruff and mypy (strict) |
 | `npm run test:frontend` | TypeScript, ESLint and Vitest |
 | `npm run lock:backend` | Regenerate `backend/uv.lock` after editing `pyproject.toml` |

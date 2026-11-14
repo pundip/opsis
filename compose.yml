@@ -124,6 +124,25 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # A small MySQL database with sample data (donors, gifts) to try connections with.
+  # Reach it from Opsis at host "sample-mysql", port 3306, database "sample",
+  # user "reader", password "reader-sample-pw". Data is rebuilt on every start.
+  sample-mysql:
+    image: mysql:8.4
+    profiles: ["sample", "tools"]
+    environment:
+      MYSQL_DATABASE: sample
+      MYSQL_ROOT_PASSWORD: root-sample-pw
+    volumes:
+      - ./deploy/sample/mysql-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -ureader -preader-sample-pw -e 'SELECT 1 FROM sample.gifts LIMIT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
 volumes:
   pgdata:
   opsisdata:

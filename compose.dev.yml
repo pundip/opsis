@@ -48,6 +48,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       OPSIS_REPO_ROOT: /repo
+      OPSIS_TEST_MYSQL_HOST: sample-mysql
     volumes:
       - ./backend/opsis:/app/opsis:ro
       - ./backend/tests:/app/tests:ro
@@ -57,6 +58,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      sample-mysql:
+        condition: service_healthy
+    tmpfs:
+      - /data
 
 volumes:
   web_node_modules:

@@ -35,6 +35,7 @@ RUN uv sync --frozen --no-dev
 COPY backend/alembic.ini ./
 COPY backend/opsis ./opsis
 COPY spec ./spec
+COPY plugins ./plugins
 COPY branding.json ./
 COPY --from=frontend /out/visuals ./visuals
 COPY --from=frontend /src/frontend/dist ./static

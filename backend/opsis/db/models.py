@@ -102,6 +102,76 @@ class AuditLog(Base):
     ip: Mapped[str | None] = mapped_column(String(45))
 
 
+class Connection(Base):
+    """A configured source. Secret fields are stored encrypted, apart from the rest."""
+
+    __tablename__ = "connections"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(200), unique=True)
+    connector_id: Mapped[str] = mapped_column(String(50))
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default=EMPTY_JSON)
+    secrets: Mapped[str | None] = mapped_column(Text)  # Fernet token, never returned by the API
+    last_test_ok: Mapped[bool | None] = mapped_column()
+    last_test_message: Mapped[str | None] = mapped_column(Text)
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class Dataset(Base):
+    """One stream of a connection, pulled into local Parquet snapshots."""
+
+    __tablename__ = "datasets"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # Identifier used in semantic queries ("gifts"), see spec/semantic-query.schema.json.
+    name: Mapped[str] = mapped_column(String(63), unique=True)
+    label: Mapped[str] = mapped_column(String(200))
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("connections.id", ondelete="RESTRICT"), index=True
+    )
+    stream: Mapped[str] = mapped_column(String(300))
+    refresh_mode: Mapped[str] = mapped_column(String(20))  # full | append | merge
+    cursor_field: Mapped[str | None] = mapped_column(String(200))
+    primary_key: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb")
+    )
+    columns: Mapped[list[str] | None] = mapped_column(JSONB)  # None means all columns
+    state: Mapped[dict[str, Any] | None] = mapped_column(JSONB)  # connector cursor state
+    # Points at the snapshot readers use. Updated in one transaction with `state`.
+    current_snapshot_id: Mapped[uuid.UUID | None] = mapped_column()
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class Snapshot(Base):
+    """An immutable Parquet directory on the data volume."""
+
+    __tablename__ = "snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    dataset_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("datasets.id", ondelete="CASCADE"), index=True
+    )
+    row_count: Mapped[int] = mapped_column(BigInteger)
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    columns: Mapped[list[dict[str, str]]] = mapped_column(JSONB)  # [{name, type}]
+    mode: Mapped[str] = mapped_column(String(20))  # how this snapshot was built
+    job_id: Mapped[uuid.UUID | None] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Job(Base):
     """Job queue row, claimed with SELECT ... FOR UPDATE SKIP LOCKED."""
 

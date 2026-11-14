@@ -216,6 +216,25 @@ def test_unsafe_requests_need_the_csrf_header(client_for: ClientFor) -> None:
     assert client.get("/api/config").status_code == 200
 
 
+def test_csrf_accepts_any_cookie_with_the_name(client_for: ClientFor) -> None:
+    """Two installs on one host (ports do not separate cookies) send two cookies."""
+    client = client_for(csrf=False)
+    add_probe(client, "/api/_probe/write", ["POST"])
+    client.cookies.clear()
+
+    def post(cookie: str, header: str) -> int:
+        headers = {"Cookie": cookie, "X-CSRF-Token": header}
+        return client.post("/api/_probe/write", headers=headers).status_code
+
+    both = "other=1; opsis_csrf=from-root-install; opsis_csrf=from-subpath-install"
+    assert post(both, "from-root-install") == 200
+    assert post(both, "from-subpath-install") == 200
+    assert post(both, "neither") == 403
+    assert post(both, "") == 403
+    assert post("opsis_csrf=", "") == 403
+    assert post("xopsis_csrf=abc", "abc") == 403
+
+
 # ---- Streaming helper ---------------------------------------------------------
 
 

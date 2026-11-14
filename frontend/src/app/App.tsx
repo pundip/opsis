@@ -2,7 +2,11 @@ import { useEffect } from "react";
 import { Route, Routes } from "react-router-dom";
 import { useConfig, useMe } from "../lib/config";
 import { navItems } from "../lib/nav";
+import { Connections } from "../pages/Connections";
+import { DatasetDetail } from "../pages/DatasetDetail";
+import { Datasets } from "../pages/Datasets";
 import { Home } from "../pages/Home";
+import { Jobs } from "../pages/Jobs";
 import { Placeholder } from "../pages/Placeholder";
 import { Layout } from "./Layout";
 
@@ -47,14 +51,37 @@ export function App() {
     );
   }
 
-  const items = navItems(config.data, me.data);
+  const appConfig = config.data;
+  const user = me.data;
+  const items = navItems(appConfig, user);
+  const allowed = (path: string) => items.some((item) => item.path === path);
+  // Pages that exist so far. Other navigation entries show a placeholder.
+  const built = (path: string) => {
+    switch (path) {
+      case "/connections":
+        return <Connections config={appConfig} me={user} />;
+      case "/datasets":
+        return <Datasets />;
+      case "/jobs":
+        return <Jobs config={appConfig} />;
+      default:
+        return null;
+    }
+  };
   return (
     <Layout config={config.data} me={me.data} items={items}>
       <Routes>
         <Route path="/" element={<Home config={config.data} me={me.data} />} />
         {items.map((item) => (
-          <Route key={item.path} path={item.path} element={<Placeholder title={item.label} />} />
+          <Route
+            key={item.path}
+            path={item.path}
+            element={built(item.path) ?? <Placeholder title={item.label} />}
+          />
         ))}
+        {allowed("/datasets") && (
+          <Route path="/datasets/:id" element={<DatasetDetail config={config.data} />} />
+        )}
         <Route path="*" element={<Placeholder title="Page not found" missing />} />
       </Routes>
     </Layout>

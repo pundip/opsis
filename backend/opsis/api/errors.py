@@ -9,16 +9,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from opsis.connectors.base import ConnectorError
+from opsis.errors import ApiError
+from opsis.services.crypto import SecretsError
 
-class ApiError(Exception):
-    def __init__(
-        self, status: int, code: str, message: str, details: list[dict[str, Any]] | None = None
-    ) -> None:
-        self.status = status
-        self.code = code
-        self.message = message
-        self.details = details or []
-        super().__init__(message)
+__all__ = ["ApiError", "install_error_handlers"]
 
 
 def _body(code: str, message: str, details: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -29,6 +24,14 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
         return JSONResponse(_body(exc.code, exc.message, exc.details), status_code=exc.status)
+
+    @app.exception_handler(ConnectorError)
+    async def _connector_error(_: Request, exc: ConnectorError) -> JSONResponse:
+        return JSONResponse(_body("connector_error", str(exc)), status_code=400)
+
+    @app.exception_handler(SecretsError)
+    async def _secrets_error(_: Request, exc: SecretsError) -> JSONResponse:
+        return JSONResponse(_body("secrets_unreadable", str(exc)), status_code=409)
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:

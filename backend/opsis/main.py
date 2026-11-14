@@ -21,9 +21,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from opsis import __version__
-from opsis.api import system
+from opsis.api import ingestion, system
 from opsis.api.errors import ApiError, install_error_handlers
 from opsis.auth import cookies
+from opsis.jobs.worker import InlineRunner
 from opsis.services import users
 from opsis.settings import Settings, load_settings
 
@@ -58,8 +59,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.job_runner,
             base,
         )
-        yield
-        engine.dispose()
+        runner = InlineRunner(settings) if settings.job_runner == "inline" else None
+        if runner is not None:
+            runner.start()
+        try:
+            yield
+        finally:
+            if runner is not None:
+                runner.stop()
+            engine.dispose()
 
     app = FastAPI(
         title=settings.app_name,
@@ -117,7 +125,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 def register_feature_routers(api: APIRouter) -> None:
-    """Routers added by later milestones are included here."""
+    """Every feature router is included here, under the base path."""
+    api.include_router(ingestion.router)
 
 
 def render_index(settings: Settings) -> str | None:

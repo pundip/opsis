@@ -68,6 +68,21 @@ def claim_next(db: Session, worker_id: str) -> Job | None:
     return job
 
 
+def fail_stale(db: Session) -> int:
+    """Fail jobs left in "running" by a process that stopped. Called at runner start.
+
+    v1 has a single job runner (inline thread or one worker), so any job that
+    is "running" when the runner starts cannot still be alive.
+    """
+    stale = db.scalars(select(Job).where(Job.status == "running").with_for_update()).all()
+    for job in stale:
+        job.status = "failed"
+        job.error = "Interrupted by a restart. Run it again."
+        job.finished_at = datetime.now(UTC)
+    db.commit()
+    return len(stale)
+
+
 def finish(
     db: Session, job: Job, *, result: dict[str, Any] | None = None, error: str | None = None
 ) -> None:

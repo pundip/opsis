@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from opsis.auth.principal import ROLE_PERMISSIONS, Permission, Principal, Role
 from opsis.db.models import AuditLog, Base, User
+from opsis.errors import JobError
 from opsis.jobs import queue, worker
 from opsis.services import users
 from opsis.settings import Settings
@@ -76,21 +77,36 @@ def test_queue_dedupes_active_jobs(db: Session) -> None:
     assert c.id != a.id and claimed.status == "succeeded"
 
 
-def test_worker_runs_handlers_and_records_failures(db: Session) -> None:
-    def boom(_: Session, __: object) -> None:
+def test_worker_runs_handlers_and_records_failures(db: Session, migrated_db: Settings) -> None:
+    cleaned: list[str] = []
+
+    def boom(_db: Session, _job: object, _settings: Settings) -> None:
         raise RuntimeError("source is down")
 
-    worker.HANDLERS.update(ok=lambda _db, _job: {"done": True}, boom=boom)
+    def expected(_db: Session, _job: object, _settings: Settings) -> None:
+        raise JobError("The source table is gone.")
+
+    worker.HANDLERS.update(
+        ok=lambda _db, _job, _settings: {"done": True}, boom=boom, expected=expected
+    )
+    worker.AFTER_COMMIT.update(
+        ok=lambda _db, job, _settings: cleaned.append(job.type),
+        boom=lambda _db, job, _settings: cleaned.append(job.type),
+    )
     try:
-        jobs = [queue.enqueue(db, t) for t in ("ok", "boom", "unknown")]
-        while worker.run_one(db, "w1"):
+        jobs = [queue.enqueue(db, t) for t in ("ok", "boom", "expected", "unknown")]
+        while worker.run_one(db, "w1", migrated_db):
             pass
     finally:
-        worker.HANDLERS.clear()
+        for name in ("ok", "boom", "expected"):
+            worker.HANDLERS.pop(name, None)
+            worker.AFTER_COMMIT.pop(name, None)
     for job in jobs:
         db.refresh(job)
-    assert [j.status for j in jobs] == ["succeeded", "failed", "failed"]
+    assert [j.status for j in jobs] == ["succeeded", "failed", "failed", "failed"]
     assert jobs[0].result == {"done": True}
-    assert jobs[1].error == "RuntimeError: source is down"
-    assert "No handler" in (jobs[2].error or "")
-    assert worker.run_one(db, "w1") is False
+    assert jobs[1].error == "Unexpected error (RuntimeError): source is down"
+    assert jobs[2].error == "The source table is gone."  # shown to the user as written
+    assert "No handler" in (jobs[3].error or "")
+    assert cleaned == ["ok"]  # cleanup runs only after a successful commit
+    assert worker.run_one(db, "w1", migrated_db) is False

@@ -54,6 +54,7 @@ class ColumnSpec:
     type: ColumnType
     nullable: bool = True
     source_type: str | None = None  # native type name, for display only
+    scale: int | None = None  # digits after the point, for DECIMAL columns
 
 
 @dataclass(frozen=True)
@@ -122,7 +123,10 @@ class Connector(Protocol):
     def __init__(self, config: dict[str, Any]) -> None:
         """Receives the validated config with secrets already decrypted.
 
-        Must not open network connections here: do that lazily.
+        Must not open network connections here: do that lazily. The host adds
+        one reserved key, "_uploads_dir": the directory that holds uploaded
+        files, for connectors whose schema has fields marked "x-upload": true
+        (their value is a path relative to that directory).
         """
         ...
 
@@ -145,7 +149,8 @@ class Connector(Protocol):
 
         `state` is the value returned by final_state() on the previous
         successful refresh, or None on the first run or after a full reset.
-        In FULL mode the connector ignores `state`.
+        In FULL mode the connector ignores `state`. The result must contain at
+        least one batch, even an empty one, so the schema is always known.
         """
         ...
 
