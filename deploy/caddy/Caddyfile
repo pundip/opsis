@@ -1,0 +1,15 @@
+# SITE_ADDRESS comes from .env.
+#   :80              plain HTTP, for use behind Cloudflare Tunnel or another TLS proxy
+#   bi.example.com   automatic HTTPS from Let's Encrypt (ports 80 and 443 must be reachable)
+{$SITE_ADDRESS::80} {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy same-origin
+		-Server
+	}
+
+	reverse_proxy api:8080
+}

@@ -118,6 +118,13 @@ sequenceDiagram
 - A user with no matching value for an RLS attribute gets a predicate that is false (deny by default).
 - The engine opens a short-lived DuckDB connection per query, read-only over Parquet, with a memory limit and a watchdog that interrupts at the timeout.
 
+### Calendar and financial years
+
+Relative ranges (`last_12_months`, `this_fiscal_year`) and grains (`week`, `fiscal_quarter`) depend on three workspace settings: `WORKSPACE_TIMEZONE`, `WEEK_START` and `FISCAL_YEAR_START_MONTH`. The rules are defined once in `opsis/semantic/calendar.py` (ADR-012):
+
+- The compiler resolves a relative range to literal dates using "today" in the workspace timezone, so the SQL and the cache key contain real dates.
+- Every grain returns the start date of its period. A fiscal year is named after the year it ends in (July start: FY2027 is 1 July 2026 to 30 June 2027). The frontend formats labels from the date plus the `calendar` block of `/api/config`.
+
 ## 4. Dashboard writes and live updates
 
 1. A write arrives as a full spec (UI) or as JSON Patch plus `base_version` (agent).

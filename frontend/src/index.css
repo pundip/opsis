@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+/* Brand colours are set at runtime from /api/config (branding.json). */
+:root {
+  --brand: #2f5fd0;
+  --brand-dark: #8fb0ff;
+  color-scheme: light dark;
+}
+
+@theme inline {
+  --color-brand: var(--brand-active);
+}
+
+:root {
+  --brand-active: var(--brand);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --brand-active: var(--brand-dark);
+  }
+}
+
+body {
+  @apply bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100;
+  font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand-active);
+  outline-offset: 2px;
+}

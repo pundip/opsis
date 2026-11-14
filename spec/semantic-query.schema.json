@@ -66,7 +66,8 @@
       "description": "<dataset>.<field>, for example gifts.total_amount."
     },
     "grain": {
-      "enum": ["day", "week", "month", "quarter", "year"]
+      "enum": ["day", "week", "month", "quarter", "year", "fiscal_month", "fiscal_quarter", "fiscal_year"],
+      "description": "Every grain returns the start date of its period. Weeks start on the workspace WEEK_START. Fiscal grains follow FISCAL_YEAR_START_MONTH: fiscal_year and fiscal_quarter are aligned to that month; fiscal_month has the same buckets as month and is labelled as a fiscal period."
     },
     "scalar": {
       "type": ["string", "number", "boolean"]
@@ -81,8 +82,8 @@
           "properties": {
             "relative": {
               "type": "string",
-              "pattern": "^(today|yesterday|all_time|(this|last)_(week|month|quarter|year)|last_[1-9][0-9]{0,3}_(days|weeks|months|quarters|years)|(week|month|quarter|year)_to_date)$",
-              "description": "Examples: last_12_months, this_quarter, year_to_date, last_30_days."
+              "pattern": "^(today|yesterday|all_time|(this|last)_(week|month|quarter|year|fiscal_quarter|fiscal_year)|last_[1-9][0-9]{0,3}_(days|weeks|months|quarters|years|fiscal_quarters|fiscal_years)|(week|month|quarter|year|fiscal_quarter|fiscal_year)_to_date)$",
+              "description": "Examples: last_12_months, this_quarter, year_to_date, last_30_days, this_fiscal_year, last_fiscal_year, fiscal_year_to_date. this_<unit> is the whole current period. last_<unit> is the previous complete period. last_N_<units> is N periods ending with the current one. <unit>_to_date runs from the start of the current period to today."
             }
           }
         },

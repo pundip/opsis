@@ -55,7 +55,40 @@ Short ADR entries. Newest at the bottom. "Brief" means `BUILD_BRIEF.md`. An entr
 - **Why:** the result cache and the SSE channels are in-process, and agent writes (MCP, assistant) happen in `api`, so live updates need no cross-process bus. The worker only reports job status, which the UI polls.
 - **Revisit when:** more than one api process is needed. The likely answer is Postgres `LISTEN/NOTIFY`.
 
-## ADR-011: Verification tooling runs in containers
-- **Status:** accepted, M0
-- **Decision:** the dev machine has Git, Docker and Node, but no Python or uv. Backend lint, type checks and tests run inside containers (the app image from M1 onward). `tasks.py` will wrap these as `docker compose run` commands.
+## ADR-011: Verification tooling runs in containers, tasks are npm scripts
+- **Status:** accepted, M0, revised M1
+- **Decision:** the dev machine has Git, Docker and Node, but no Python or uv. Backend lint, type checks and tests run in the `dev` image target through the `tools` service in `compose.dev.yml`. The task runner is the root `package.json` (no dependencies), not `tasks.py`, because Node is on the host and Python is not. `uv.lock` is generated in a container (`npm run lock:backend`).
 - **Why:** nothing extra to install on the laptop, and the same commands work on the server.
+
+## ADR-012: Financial-year calendar
+- **Status:** accepted, M1 (requested in the M0 review)
+- **Decision:**
+  - Three workspace settings: `WORKSPACE_TIMEZONE` (default `Australia/Melbourne`), `WEEK_START` (default `monday`) and `FISCAL_YEAR_START_MONTH` (default `7`). They are exposed in `/api/config` under `calendar`.
+  - Three extra grains: `fiscal_year`, `fiscal_quarter`, `fiscal_month`. Every grain, fiscal or not, returns the **start date of its period**, so results sort correctly and the engine needs no label logic. `fiscal_month` has the same buckets as `month`; it differs only in its label (period 1 to 12).
+  - A fiscal year is named after the calendar year it **ends** in: with a July start, FY2027 is 1 July 2026 to 30 June 2027. With a January start, fiscal and calendar grains are identical.
+  - Relative ranges gain `this_fiscal_year`, `last_fiscal_year`, `this_fiscal_quarter`, `last_fiscal_quarter`, `fiscal_year_to_date`, `fiscal_quarter_to_date` and `last_N_fiscal_years` / `last_N_fiscal_quarters`.
+  - Meaning of relative ranges, for all units: `this_<unit>` is the whole current period (including its future part); `last_<unit>` is the previous complete period; `last_N_<units>` is N periods ending with the current one, up to today; `<unit>_to_date` runs from the start of the current period to today.
+  - The rules live in one pure module, `opsis/semantic/calendar.py`, with tests. The M3 compiler resolves relative ranges to literal dates with it and emits date truncation that matches `period_start`. Labels such as "FY2027" or "Q2 FY2027" are formatted in the frontend from the period start date plus the `calendar` config.
+- **Why:** one definition of the calendar for the compiler, the UI and the agent. Returning dates keeps the engine contract simple.
+- **Not included:** 4-4-5 or week-based fiscal calendars, and a fiscal year that does not start on the first of a month.
+
+## ADR-013: The api container is published on loopback in server mode
+- **Status:** accepted, M1. **Deviation.**
+- **Decision:** `compose.yml` always publishes `api` on `${BIND_ADDRESS}:${HTTP_PORT}`. The server template sets `BIND_ADDRESS=127.0.0.1`, so the api is reachable only from the server itself and Caddy remains the only public entry. The brief says server mode publishes only Caddy's ports.
+- **Why:** Compose cannot drop a `ports` entry based on `.env`, and the brief requires one `compose.yml` with all differences in `.env`. A loopback publish exposes nothing and is handy for diagnostics.
+- **Guard:** `AUTH_MODE=none` and `MCP_AUTH=none` are rejected in server mode regardless of the bind address.
+
+## ADR-014: What fails fast in M1, and what waits
+- **Status:** accepted, M1
+- **Decision:** startup rejects: `AUTH_MODE=none` or `MCP_AUTH=none` off loopback or in server mode; public share links without sign-in or outside server mode; a non-https `PUBLIC_BASE_URL` in server mode (localhost excepted); `JOB_RUNNER=worker` without the `server` Compose profile; malformed URL, timezone, week start or fiscal month. All problems are reported together.
+- **Deferred on purpose:** checks that need credentials (`GOOGLE_CLIENT_ID` for `AUTH_MODE=full`, `ANTHROPIC_API_KEY` for the assistant, SMTP for email, `ENCRYPTION_KEY`) arrive with the milestone that uses them. Until then the server template boots as shipped, which the M1 acceptance test requires.
+- **Open point for M6:** whether a missing Google client id should stop startup or only disable the Google button.
+
+## ADR-015: Smaller M1 choices
+- **Status:** accepted, M1
+- **Migrations** run in the `api` entrypoint before Uvicorn starts. The worker waits for `api` to be healthy, so only one process migrates.
+- **Entrypoint** is `python -m opsis <api|worker|migrate|check-config>`, in Python for cross-platform parity.
+- **Image tags:** base images are pinned to a release line (`python:3.12-slim-bookworm`, `node:24-bookworm-slim`, `postgres:16-bookworm`, `caddy:2-alpine`, uv `0.13.8`); Python and npm packages are pinned exactly by lockfiles. `cloudflared` and `ollama` use `latest` until the milestones that exercise them (M6, M7) pin a tested version.
+- **Test HTTP client:** the dev dependency is `httpx2`, which the installed Starlette test client now asks for in place of `httpx`. The brief's `httpx` remains the choice for runtime HTTP calls when they arrive.
+- **Frontend:** Tailwind v4 through its Vite plugin. shadcn/ui components and the other listed libraries are added when the first screen needs them (M2 forms), not before.
+- **Errors:** every API error is `{"error": {"code", "message", "details"}}`; validation details carry JSON pointer paths.

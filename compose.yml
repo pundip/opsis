@@ -1,0 +1,111 @@
+# Opsis: one Compose file for the laptop and the server.
+# Copy .env.local.example or .env.server.example to .env, then: docker compose up -d
+# COMPOSE_PROFILES inside .env decides which optional services start.
+name: opsis
+
+x-app: &app
+  image: opsis/app:${OPSIS_VERSION:-dev}
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+    target: runtime
+  env_file: .env
+  environment:
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  volumes:
+    - opsisdata:/data
+    - backups:/backups
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Copy .env.local.example or .env.server.example to .env first}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-opsis}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    <<: *app
+    command: ["api"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # Local mode: this is the app. Server mode: keep BIND_ADDRESS=127.0.0.1 so
+      # only Caddy is reachable from outside (see ADR-013).
+      - "${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
+      start_interval: 2s
+
+  worker:
+    <<: *app
+    profiles: ["server"]
+    command: ["worker"]
+    depends_on:
+      api:
+        condition: service_healthy # api runs the migrations
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["server"]
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    ports:
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      caddy:
+        condition: service_started
+        required: false
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  opsisdata:
+  backups:
+  caddy_data:
+  caddy_config:
+  ollama:

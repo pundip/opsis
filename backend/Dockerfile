@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1
+# Build context is the repository root:
+#   docker build -f backend/Dockerfile -t opsis/app .
+# One image serves both the api and the worker.
+
+# ---- Stage 1: build the frontend and collect visual manifests -------------
+FROM node:24-bookworm-slim AS frontend
+WORKDIR /src/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build \
+    && mkdir -p /out/visuals \
+    && cd src/visuals \
+    && for dir in */; do \
+         mkdir -p "/out/visuals/$dir" && cp "${dir}manifest.json" "/out/visuals/$dir"; \
+       done
+
+# ---- Stage 2: Python dependencies and application code ---------------------
+FROM python:3.12-slim-bookworm AS base
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
+    PATH=/opt/venv/bin:$PATH
+COPY --from=ghcr.io/astral-sh/uv:0.13.8 /uv /usr/local/bin/uv
+RUN groupadd --gid 10001 opsis \
+    && useradd --uid 10001 --gid opsis --create-home opsis \
+    && mkdir -p /app /data /backups \
+    && chown opsis:opsis /data /backups
+WORKDIR /app
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev
+COPY backend/alembic.ini ./
+COPY backend/opsis ./opsis
+COPY spec ./spec
+COPY branding.json ./
+COPY --from=frontend /out/visuals ./visuals
+COPY --from=frontend /src/frontend/dist ./static
+EXPOSE 8080
+ENTRYPOINT ["python", "-m", "opsis"]
+CMD ["api"]
+
+# ---- Dev and test image: adds pytest, ruff and mypy ------------------------
+FROM base AS dev
+RUN uv sync --frozen
+COPY backend/tests ./tests
+USER opsis
+
+# ---- Runtime image (default target) ----------------------------------------
+FROM base AS runtime
+USER opsis

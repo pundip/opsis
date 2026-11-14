@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "opsis",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["compose", "up", "--build"],
+      "port": 8080
+    },
+    {
+      "name": "opsis-dev",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["compose", "-f", "compose.yml", "-f", "compose.dev.yml", "up", "--build"],
+      "port": 5173
+    }
+  ]
+}

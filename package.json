@@ -1,0 +1,18 @@
+{
+  "name": "opsis-tasks",
+  "private": true,
+  "description": "Cross-platform task runner. No dependencies: every script calls Docker or the frontend package.",
+  "scripts": {
+    "up": "docker compose up -d --build",
+    "down": "docker compose down",
+    "logs": "docker compose logs -f api",
+    "dev": "docker compose -f compose.yml -f compose.dev.yml up --build",
+    "test": "npm run test:backend && npm run test:frontend",
+    "test:backend": "docker compose -f compose.yml -f compose.dev.yml run --rm --build tools pytest",
+    "test:frontend": "npm --prefix frontend run typecheck && npm --prefix frontend run lint && npm --prefix frontend test",
+    "lint:backend": "docker compose -f compose.yml -f compose.dev.yml run --rm --build tools sh -c \"ruff check --no-cache opsis tests && ruff format --no-cache --check opsis tests && mypy --cache-dir=/tmp/mypy\"",
+    "format:backend": "docker run --rm -v ./backend:/app -w /app python:3.12-slim-bookworm sh -c \"pip install -q --root-user-action=ignore ruff && ruff format --no-cache opsis tests && ruff check --no-cache --fix opsis tests\"",
+    "lock:backend": "docker run --rm -v ./backend:/app -w /app -e UV_LINK_MODE=copy python:3.12-slim-bookworm sh -c \"pip install -q --root-user-action=ignore uv==0.13.8 && uv lock\"",
+    "check-config": "docker compose run --rm --no-deps api check-config"
+  }
+}

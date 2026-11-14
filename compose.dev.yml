@@ -1,0 +1,62 @@
+# Development overlay: hot reload for the API and the Vite dev server.
+#   docker compose -f compose.yml -f compose.dev.yml up
+# Open http://localhost:5173 (Vite proxies /api to the api container).
+# On Windows, file watching uses polling. It is faster if the repo lives inside WSL.
+services:
+  api:
+    image: opsis/app-dev:local
+    build:
+      target: dev
+    command: ["api", "--reload"]
+    environment:
+      WATCHFILES_FORCE_POLLING: "true"
+      # New visual folders show up without rebuilding the image.
+    volumes:
+      - ./backend/opsis:/app/opsis
+      - ./frontend/src/visuals:/app/visuals:ro
+      - ./spec:/app/spec:ro
+      - ./branding.json:/app/branding.json:ro
+
+  web:
+    image: node:24-bookworm-slim
+    working_dir: /app
+    command: ["sh", "-c", "npm ci --no-audit --no-fund && npm run dev"]
+    environment:
+      VITE_API_PROXY: http://api:8080
+      VITE_USE_POLLING: "1"
+    ports:
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - ./frontend:/app
+      - web_node_modules:/app/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # One-off backend commands: tests, lint, type checks. See package.json scripts.
+  tools:
+    image: opsis/app-dev:local
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: dev
+    profiles: ["tools"]
+    entrypoint: []
+    command: ["pytest"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      OPSIS_REPO_ROOT: /repo
+    volumes:
+      - ./backend/opsis:/app/opsis:ro
+      - ./backend/tests:/app/tests:ro
+      - ./backend/pyproject.toml:/app/pyproject.toml:ro
+      - ./.env.local.example:/repo/.env.local.example:ro
+      - ./.env.server.example:/repo/.env.server.example:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  web_node_modules:
