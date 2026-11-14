@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { ApiError } from "../lib/api";
 import { periodLabel } from "../lib/calendar";
 import type { AppConfig, Me } from "../lib/config";
-import { formatCell, formatMeasure, formatNumber } from "../lib/format";
+import { formatCell, formatMeasure, formatNumber, timeAgo } from "../lib/format";
 import { url } from "../lib/runtime";
 import {
   type Field as ModelField,
@@ -16,6 +16,8 @@ import {
   RELATIVE_RANGES,
   type SemanticQuery,
   useModel,
+  useModelVersions,
+  useRestoreModelVersion,
   useRunQuery,
   useSaveModel,
   useStarterModel,
@@ -49,9 +51,53 @@ function ProblemList({ problems }: { problems: Problem[] }) {
   );
 }
 
+function Versions({ model, canEdit }: { model: Model; canEdit: boolean }) {
+  const name = model.dataset.name;
+  const versions = useModelVersions(name);
+  const restore = useRestoreModelVersion(name);
+  const details = restore.error instanceof ApiError ? (restore.error.details as Problem[]) : [];
+  return (
+    <Card className="p-4">
+      <h2 className="mb-3 text-base font-semibold">Version history</h2>
+      <ProblemList problems={details} />
+      {!details.length && <ErrorNote error={versions.error ?? restore.error} />}
+      <ul className="max-h-72 divide-y divide-zinc-200 overflow-auto dark:divide-zinc-800">
+        {versions.data?.map((version) => (
+          <li key={version.version} className="flex flex-wrap items-center gap-2 py-2 text-sm">
+            <span className="font-medium">Version {version.version}</span>
+            {version.current && <Badge tone="good">Current</Badge>}
+            <span className="text-zinc-600 dark:text-zinc-400">
+              {version.authorName}, {timeAgo(version.createdAt)}
+              {version.message && `: ${version.message}`}
+            </span>
+            {canEdit && !version.current && (
+              <Button
+                variant="ghost"
+                className="ml-auto"
+                busy={restore.isPending && restore.variables === version.version}
+                onClick={() => {
+                  if (window.confirm(`Restore version ${version.version}? It becomes a new version.`)) {
+                    restore.mutate(version.version);
+                  }
+                }}
+              >
+                Restore
+              </Button>
+            )}
+          </li>
+        ))}
+        {versions.data?.length === 0 && (
+          <li className="py-2 text-sm text-zinc-500">No saved versions yet.</li>
+        )}
+      </ul>
+    </Card>
+  );
+}
+
 function Editor({ model, canEdit }: { model: Model; canEdit: boolean }) {
   const name = model.dataset.name;
   const [text, setText] = useState(model.yaml);
+  const [message, setMessage] = useState("");
   const save = useSaveModel(name);
   const validate = useValidateModel(name);
   const starter = useStarterModel(name);
@@ -109,13 +155,32 @@ function Editor({ model, canEdit }: { model: Model; canEdit: boolean }) {
             Saved.
           </p>
         )}
+        {canEdit && dirty && (
+          <Input
+            aria-label="Note for the version history (optional)"
+            placeholder="Note for the version history (optional)"
+            maxLength={500}
+            value={message}
+            onChange={(event) => setMessage(event.target.value)}
+          />
+        )}
         {canEdit && (
           <div className="flex flex-wrap gap-2">
             <Button
               variant="primary"
               busy={save.isPending}
               disabled={!dirty}
-              onClick={() => save.mutate(text, { onSuccess: (saved) => setText(saved.yaml) })}
+              onClick={() =>
+                save.mutate(
+                  { yaml: text, baseVersion: model.version, message: message || undefined },
+                  {
+                    onSuccess: (saved) => {
+                      setText(saved.yaml);
+                      setMessage("");
+                    },
+                  },
+                )
+              }
             >
               Save model
             </Button>
@@ -190,7 +255,12 @@ function Results({ result, config }: { result: QueryResult; config: AppConfig })
       <p className="mb-2 text-xs text-zinc-500" role="status">
         {formatNumber(result.rowCount)} row{result.rowCount === 1 ? "" : "s"}
         {result.truncated && " (more rows exist; raise the limit to see them)"},{" "}
-        {result.cacheHit ? "from cache" : `${Math.round(result.elapsedMs)} ms`}
+        {result.cacheHit ? "from cache" : `${Math.round(result.elapsedMs)} ms`}{" "}
+        {result.rlsBypassed && (
+          <span title="This dataset has row-level security rules that do not apply to the role this query ran as.">
+            <Badge tone="bad">RLS bypassed</Badge>
+          </span>
+        )}
       </p>
       <div className="max-h-96 overflow-auto rounded-md border border-zinc-200 dark:border-zinc-800">
         <table className="w-full border-separate border-spacing-0 text-sm">
@@ -476,6 +546,7 @@ export function ModelDetail({ config, me }: { config: AppConfig; me: Me }) {
         <div className="space-y-5">
           <QueryBuilder key={data.updatedAt ?? "new"} model={data} config={config} me={me} />
           <Editor model={data} canEdit={me.permissions.includes("models:edit")} />
+          <Versions model={data} canEdit={me.permissions.includes("models:edit")} />
         </div>
       )}
     </div>

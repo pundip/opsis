@@ -37,7 +37,17 @@ export interface ModelDetail {
   fields: Field[];
   isStarter: boolean;
   saved: boolean;
+  version: number;
   updatedAt: string | null;
+}
+
+export interface ModelVersion {
+  version: number;
+  authorType: "user" | "agent" | "system";
+  authorName: string;
+  message: string | null;
+  createdAt: string;
+  current: boolean;
 }
 
 export interface Problem {
@@ -72,6 +82,7 @@ export interface QueryResult {
   truncated: boolean;
   elapsedMs: number;
   cacheHit: boolean;
+  rlsBypassed: boolean;
   sql?: string;
 }
 
@@ -94,10 +105,32 @@ export function useModel(dataset: string) {
 export function useSaveModel(dataset: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (yaml: string) => apiPut<ModelDetail>(`/api/models/${dataset}`, { yaml }),
+    mutationFn: (input: { yaml: string; baseVersion: number; message?: string }) =>
+      apiPut<ModelDetail>(`/api/models/${dataset}`, input),
     onSuccess: (saved) => {
       client.setQueryData(["models", dataset], saved);
       void client.invalidateQueries({ queryKey: ["models"] });
+      void client.invalidateQueries({ queryKey: ["model-versions", dataset] });
+    },
+  });
+}
+
+export function useModelVersions(dataset: string) {
+  return useQuery({
+    queryKey: ["model-versions", dataset],
+    queryFn: () => apiGet<ModelVersion[]>(`/api/models/${dataset}/versions`),
+  });
+}
+
+export function useRestoreModelVersion(dataset: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (version: number) =>
+      apiPost<ModelDetail>(`/api/models/${dataset}/versions/${version}/restore`),
+    onSuccess: (saved) => {
+      client.setQueryData(["models", dataset], saved);
+      void client.invalidateQueries({ queryKey: ["models"] });
+      void client.invalidateQueries({ queryKey: ["model-versions", dataset] });
     },
   });
 }

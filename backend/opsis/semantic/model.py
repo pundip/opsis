@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
@@ -46,6 +47,9 @@ class Dimension:
     expr: str | None
     grains: tuple[str, ...]
     label: str
+    # Time dimensions: the zone a naive timestamp was written in (IANA name).
+    # None means the workspace timezone. Ignored for columns that hold instants.
+    timezone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,7 @@ class Measure:
     expr: str | None
     format: str | None
     label: str
+    filter: str | None = None  # condition of a conditional measure
 
 
 @dataclass(frozen=True)
@@ -108,6 +113,7 @@ def parse_model(dataset: str, definition: Mapping[str, Any]) -> Model:
                 expr=d.get("expr"),
                 grains=tuple(d.get("grains") or ALL_GRAINS) if d["type"] == "time" else (),
                 label=str(d.get("label") or humanize(name)),
+                timezone=d.get("timezone"),
             )
             for name, d in (definition.get("dimensions") or {}).items()
         },
@@ -119,6 +125,7 @@ def parse_model(dataset: str, definition: Mapping[str, Any]) -> Model:
                 expr=m.get("expr"),
                 format=m.get("format"),
                 label=str(m.get("label") or humanize(name)),
+                filter=m.get("filter"),
             )
             for name, m in (definition.get("measures") or {}).items()
         },
@@ -236,10 +243,36 @@ def validate(
             problems.append(
                 {"path": f"{base}/grains", "message": "Only time dimensions have grains."}
             )
+        if "timezone" in dim:
+            if dim["type"] != "time":
+                problems.append(
+                    {"path": f"{base}/timezone", "message": "Only time dimensions have a timezone."}
+                )
+            else:
+                try:
+                    ZoneInfo(dim["timezone"])
+                except (ZoneInfoNotFoundError, ValueError):
+                    problems.append(
+                        {
+                            "path": f"{base}/timezone",
+                            "message": f"{dim['timezone']!r} is not a timezone name. "
+                            "Use one such as UTC or Australia/Melbourne.",
+                        }
+                    )
 
     for name, measure in measures.items():
         base = f"/measures/{name}"
         if "agg" in measure:
+            if "filter" in measure:
+                segment_filters = {
+                    n: s["filter"] for n, s in (definition.get("segments") or {}).items()
+                }
+                check_expression(
+                    f"{base}/filter",
+                    lambda m=measure, s=segment_filters: expressions.filter_expression(
+                        m["filter"], "t", names, s
+                    ),
+                )
             agg, column = measure["agg"], measure.get("column")
             if column is None:
                 if agg != "count":

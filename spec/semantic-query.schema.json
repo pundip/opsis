@@ -70,7 +70,8 @@
       "description": "Every grain returns the start date of its period. Weeks start on the workspace WEEK_START. Fiscal grains follow FISCAL_YEAR_START_MONTH: fiscal_year and fiscal_quarter are aligned to that month; fiscal_month has the same buckets as month and is labelled as a fiscal period."
     },
     "scalar": {
-      "type": ["string", "number", "boolean"]
+      "type": ["string", "number", "boolean"],
+      "maxLength": 1000
     },
     "range": {
       "description": "Either a relative range, resolved in the workspace timezone at query time, or absolute dates. Absolute ranges are inclusive of both ends and either end may be omitted.",

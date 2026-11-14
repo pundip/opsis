@@ -25,6 +25,8 @@ class ModelIn(BaseModel):
 
     definition: dict[str, Any] | None = None
     yaml: str | None = None
+    baseVersion: int | None = None  # the version you started from; a stale one gives 409
+    message: str | None = None  # a note for the version history
 
 
 class QueryIn(BaseModel):
@@ -56,7 +58,42 @@ def save_model(
     actor: Principal = Depends(write),
 ) -> dict[str, Any]:
     target = models.dataset_by_name(db, dataset)
-    models.save(db, settings, actor, target, models.resolve_input(body.definition, body.yaml))
+    models.save(
+        db,
+        settings,
+        actor,
+        target,
+        models.resolve_input(body.definition, body.yaml),
+        base_version=body.baseVersion,
+        message=body.message,
+    )
+    return models.describe(db, target)
+
+
+@router.get("/models/{dataset}/versions")
+def list_model_versions(
+    dataset: str, db: Session = Depends(get_db), _: Principal = Depends(read)
+) -> list[dict[str, Any]]:
+    return models.list_versions(db, models.dataset_by_name(db, dataset))
+
+
+@router.get("/models/{dataset}/versions/{version}")
+def get_model_version(
+    dataset: str, version: int, db: Session = Depends(get_db), _: Principal = Depends(read)
+) -> dict[str, Any]:
+    return models.get_version(db, models.dataset_by_name(db, dataset), version)
+
+
+@router.post("/models/{dataset}/versions/{version}/restore")
+def restore_model_version(
+    dataset: str,
+    version: int,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    actor: Principal = Depends(write),
+) -> dict[str, Any]:
+    target = models.dataset_by_name(db, dataset)
+    models.restore(db, settings, actor, target, version)
     return models.describe(db, target)
 
 

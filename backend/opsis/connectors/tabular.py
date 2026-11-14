@@ -27,7 +27,7 @@ def arrow_type(column: ColumnSpec) -> pa.DataType:
         case ColumnType.DATE:
             return pa.date32()
         case ColumnType.TIMESTAMP:
-            return pa.timestamp("us")
+            return pa.timestamp("us", tz="UTC") if column.tz_aware else pa.timestamp("us")
         case _:
             return pa.string()
 
@@ -78,11 +78,14 @@ def _coerce(value: Any, column: ColumnSpec) -> Any:
                 return value not in (b"\x00", b"")
             return bool(value)
         case ColumnType.TIMESTAMP:
-            if isinstance(value, datetime) and value.tzinfo is not None:
-                return value.astimezone(UTC).replace(tzinfo=None)  # stored as UTC
             if isinstance(value, date) and not isinstance(value, datetime):
-                return datetime(value.year, value.month, value.day)
-            return value
+                value = datetime(value.year, value.month, value.day)
+            if not isinstance(value, datetime):
+                return value
+            if column.tz_aware:  # an instant: keep it, in UTC
+                return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+            # Wall-clock time: drop any offset rather than shifting the clock.
+            return value.replace(tzinfo=None)
         case ColumnType.DATE:
             return value.date() if isinstance(value, datetime) else value
     return value

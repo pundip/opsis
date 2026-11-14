@@ -222,12 +222,20 @@ def build_snapshot(
         schema = pq.read_schema(files[0])
         row_count = sum(pq.read_metadata(f).num_rows for f in files)
         size = sum(f.stat().st_size for f in files)
-        columns = [{"name": f.name, "type": column_type_of(f.type).value} for f in schema]
+        columns = [column_info(f) for f in schema]
         os.replace(tmp, final)
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     return BuiltSnapshot(snapshot_id, final, row_count, size, columns)
+
+
+def column_info(field: pa.Field) -> dict[str, str]:
+    """How a stored column is described: {"name", "type"} plus "tz" for instants."""
+    info = {"name": field.name, "type": column_type_of(field.type).value}
+    if pa.types.is_timestamp(field.type) and field.type.tz:
+        info["tz"] = "UTC"  # timezone-aware values are always stored in UTC
+    return info
 
 
 def distinct_names(names: list[str]) -> list[str]:

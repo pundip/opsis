@@ -118,6 +118,7 @@ class PostgresConnector(SqlConnector):
                         nullable=nullable == "YES",
                         source_type=data_type,
                         scale=scale if ctype == ColumnType.DECIMAL else None,
+                        tz_aware=data_type == "timestamp with time zone",
                     )
                 )
             keys: dict[tuple[str, str], list[str]] = {}

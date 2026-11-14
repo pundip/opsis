@@ -9,7 +9,8 @@ Last updated: 2026-11-14 (end of Milestone 3)
 | M0 Plan | Done, reviewed |
 | M1 Skeleton and modes | Done, reviewed, catch-up to the revised brief done |
 | M2 Data ingestion | Done, reviewed |
-| M3 Semantic layer and queries | Done, awaiting review |
+| M3 Semantic layer and queries | Done, reviewed |
+| M3.5 Timezones, conditional measures, model versions, benchmark | Done |
 | M4 Dashboards and visuals | Not started |
 | M5 MCP | Not started |
 | M6 Auth and sharing | Not started |
@@ -51,6 +52,51 @@ Run: `copy .env.local.example .env`, `docker compose up -d`, open http://localho
 - Migration `0003`: `semantic_models`.
 - A starter model is generated at a dataset's first refresh and follows its columns until someone edits it.
 - Frontend: Semantic models list; a model page with a query builder (measures, group by, date grain and range, one filter, segments, limit, "Run as" for RLS) and a YAML editor with Check, Save, Discard, Regenerate and Download.
+
+## M3.5 (from the M3 review)
+
+Built (details in ADR-020):
+
+- **Timezones:** timezone-aware timestamps are stored as UTC instants and converted to `WORKSPACE_TIMEZONE` before grouping, ranges and filters. Naive timestamps are workspace-local unless the dimension sets `timezone`.
+- **Conditional measures:** `filter` on an aggregate measure, compiled to `agg(...) FILTER (WHERE ...)`, with segments usable by name.
+- **Model version history:** immutable versions, author and message, restore, and `baseVersion` conflict detection. A "Version history" panel on the model page.
+- **Values:** every query value is type-checked before rendering; new injection tests with quotes, backslashes, comment markers, unicode and null bytes (21 hostile strings, each matched exactly as data and as an RLS attribute).
+- **Concurrency:** queries run in the thread pool, at most `QUERY_MAX_CONCURRENT` (default 4) at a time.
+- **RLS exemptions:** reported as `rlsBypassed`, with a badge in the query builder; `may_be_exempt=False` for future share links.
+
+Verified: 204 backend tests pass (12 new), lint and strict types clean; 17 frontend tests pass. Checked in the Browser pane at http://localhost:8080 and at http://localhost:8088/opsis/ (save with a note, version list, restore, stale save refused with 409, conditional measure equal to the filtered total, timezone conversion present in the SQL).
+
+### Benchmark, 5 million rows
+
+`node scripts/benchmark.mjs --rows 5000000`, on this laptop: Docker Desktop with 16 CPUs and 15.4 GB of memory available to containers, default settings (`QUERY_MAX_CONCURRENT=4`, `QUERY_THREADS=4`, `QUERY_MEMORY_LIMIT_MB=1024`), inline job runner. Source: a synthetic `gifts` table (8 columns, 3 years of dates, 200,000 donors) in Postgres, plus a 200,000 row `donors` table.
+
+| Step | Result |
+|---|---|
+| Ingestion, 5.2 million rows from Postgres to Parquet | 18.5 s (about 300,000 rows/s); snapshot 74 MB |
+| Peak api memory during ingestion | 264 MB |
+
+| Query | Cold | Warm (cached) | Rows |
+|---|---|---|---|
+| KPI: total, count, distinct donors, last 12 months | 138 ms | 11 ms | 1 |
+| Bar: total by fund, two regions | 77 ms | 12 ms | 8 |
+| Line: total by month and channel, 3 years | 96 ms | 13 ms | 148 |
+| Join: total and conditional total by donor tier and financial quarter | 250 ms | 13 ms | 39 |
+| Table: top 100 of 200,000 donors by total | 197 ms | 14 ms | 100 |
+
+Times are wall-clock for the HTTP request. All are well inside the brief's target of 1.5 s warm for a typical dashboard, at half the brief's 10 million rows.
+
+| 10 different uncached queries at once | Round 1 | Round 2 |
+|---|---|---|
+| All ten finished in | 3.6 s | 3.4 s |
+| Per request: fastest, median, slowest | 1.4, 2.7, 3.6 s | 1.3, 2.6, 3.4 s |
+| Longest single engine time | 1.4 s | 1.4 s |
+| `/healthz` during the burst: median, worst | 20 ms, 104 ms | 29 ms, 93 ms |
+
+- Peak api memory during the query phases: 1,138 MB (four queries running at once).
+- The health check stayed fast during the bursts, which confirms the queries are not blocking the event loop. Requests beyond the four slots waited their turn, which is why the slowest request took as long as the whole burst.
+- Each concurrent query was slower than the same kind of query alone (about 1.4 s against 0.1 to 0.25 s), because four queries each using four threads compete for CPU, and these burst queries are heavier (week grain, distinct donors, a HAVING filter).
+
+Not measured: 10 million rows, the Proxmox LXC (fewer cores and less memory than this laptop), slow disks, and worker mode.
 
 ## How M3 was verified
 

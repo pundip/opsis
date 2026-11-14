@@ -121,6 +121,8 @@ class Settings(BaseSettings):
     query_memory_limit_mb: int = Field(default=1024, ge=64, le=1_000_000)
     query_threads: int = Field(default=4, ge=1, le=64)
     query_cache_entries: int = Field(default=200, ge=0, le=10_000)
+    # Queries that may run at once in this process. Others wait their turn.
+    query_max_concurrent: int = Field(default=4, ge=1, le=64)
 
     # Paths inside the container
     data_dir: Path = Path("/data")
@@ -270,6 +272,7 @@ class Settings(BaseSettings):
             week_start=self.week_start,
             fiscal_year_start_month=self.fiscal_year_start_month,
             fiscal_year_label=self.fiscal_year_label,
+            timezone=self.workspace_timezone,
         )
 
     def today(self) -> date:

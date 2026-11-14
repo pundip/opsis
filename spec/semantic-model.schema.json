@@ -63,6 +63,11 @@
           "uniqueItems": true,
           "minItems": 1
         },
+        "timezone": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Time dimensions only. The IANA timezone a timestamp without an offset was written in, for example UTC for Salesforce. Defaults to the workspace timezone. Timestamps are converted to the workspace timezone before grouping and filtering. Not needed for columns that already carry an offset (they are stored as instants) or for dates."
+        },
         "label": { "type": "string", "maxLength": 200 },
         "description": { "type": "string", "maxLength": 1000 }
       }
@@ -72,7 +77,10 @@
       "additionalProperties": false,
       "oneOf": [
         { "required": ["agg"], "not": { "required": ["expr"] } },
-        { "required": ["expr"], "not": { "anyOf": [{ "required": ["agg"] }, { "required": ["column"] }] } }
+        {
+          "required": ["expr"],
+          "not": { "anyOf": [{ "required": ["agg"] }, { "required": ["column"] }, { "required": ["filter"] }] }
+        }
       ],
       "properties": {
         "agg": { "enum": ["sum", "count", "count_distinct", "avg", "min", "max"] },
@@ -87,6 +95,10 @@
           "minLength": 1,
           "maxLength": 2000,
           "description": "Arithmetic over other measures of this dataset, written in braces: {total_amount} / NULLIF({gift_count}, 0)."
+        },
+        "filter": {
+          "$ref": "#/$defs/expression",
+          "description": "Makes an aggregation conditional: only rows matching this condition are counted. A boolean expression over the dataset's columns; a segment can be used by name in braces. Examples: channel = 'Online', or {large} AND region = 'VIC'. Only for measures with `agg`."
         },
         "format": {
           "type": "string",

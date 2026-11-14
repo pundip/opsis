@@ -39,6 +39,9 @@ class CompiledQuery:
     tables: tuple[TableRef, ...]
     row_limit: int  # the SQL asks for row_limit + 1 rows so truncation can be detected
     timeout_s: float
+    # Set by the compiler when a row-level security rule existed but did not
+    # apply to this user's role. Not used by the engine; shown to the user.
+    rls_bypassed: bool = False
 
     def cache_key(self) -> str:
         """Identifies the result. The SQL already contains everything that can

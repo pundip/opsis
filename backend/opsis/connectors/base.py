@@ -55,6 +55,10 @@ class ColumnSpec:
     nullable: bool = True
     source_type: str | None = None  # native type name, for display only
     scale: int | None = None  # digits after the point, for DECIMAL columns
+    # TIMESTAMP columns only: the source values identify an instant (for example
+    # Postgres timestamptz). They are stored in UTC and converted to the
+    # workspace timezone when queried. False means wall-clock time as written.
+    tz_aware: bool = False
 
 
 @dataclass(frozen=True)

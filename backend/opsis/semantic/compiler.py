@@ -18,8 +18,10 @@ Shape of the result:
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
@@ -36,6 +38,9 @@ from opsis.semantic.model import SAFE_JOINS, Dimension, Measure, Model
 
 DIALECT = "duckdb"
 DEFAULT_LIMIT = 500
+MAX_TEXT_VALUE = expressions.MAX_TEXT_VALUE
+MAX_INTEGER = 2**63 - 1
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 COMPARISONS = {
     "eq": exp.EQ,
     "neq": exp.NEQ,
@@ -61,6 +66,8 @@ class Source:
     model: Model
     columns: Mapping[str, str]  # column name -> logical type
     table: TableRef
+    # Timestamp columns that hold instants, and the zone they are stored in (UTC).
+    timezones: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -68,6 +75,9 @@ class UserContext:
     role: str
     email: str = ""
     attributes: Mapping[str, Any] | None = None
+    # False for share links and any anonymous access: every RLS rule then
+    # applies whatever its role list says, even if the link's owner is an admin.
+    may_be_exempt: bool = True
 
     def values(self) -> dict[str, Any]:
         values: dict[str, Any] = {"role": self.role, "email": self.email}
@@ -92,6 +102,16 @@ def _fail(path: str, message: str) -> ApiError:
     return ApiError(
         422, "invalid_query", "The query is not valid.", [{"path": path, "message": message}]
     )
+
+
+def _parse_date(value: Any) -> date | None:
+    """A date written exactly as YYYY-MM-DD, or None. Nothing looser is accepted."""
+    if not isinstance(value, str) or not DATE_RE.fullmatch(value):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _col(alias: str, name: str) -> exp.Column:
@@ -165,6 +185,7 @@ class _Compiler:
             )
         self.base = sources[base_name]
         self.used: list[str] = [base_name]
+        self.rls_bypassed = False
 
     # ---- field lookup --------------------------------------------------------------
 
@@ -223,9 +244,41 @@ class _Compiler:
     def dimension_sql(self, source: Source, dim: Dimension) -> exp.Expr:
         alias = source.model.dataset
         if dim.column is not None:
-            return _col(alias, dim.column)
-        assert dim.expr is not None
-        return exp.Paren(this=expressions.column_expression(dim.expr, alias, list(source.columns)))
+            value: exp.Expr = _col(alias, dim.column)
+        else:
+            assert dim.expr is not None
+            value = exp.Paren(
+                this=expressions.column_expression(dim.expr, alias, list(source.columns))
+            )
+        return self._to_workspace_time(source, dim, value) if dim.type == "time" else value
+
+    def _to_workspace_time(self, source: Source, dim: Dimension, value: exp.Expr) -> exp.Expr:
+        """Express a timestamp as wall-clock time in the workspace timezone.
+
+        Grains, ranges and filters all work on the result, so "by day" means
+        the workspace's days. Three cases:
+        - a column that holds instants (stored in UTC): convert;
+        - a naive timestamp whose model says which zone it was written in
+          (`timezone: UTC` for Salesforce): interpret it there, then convert;
+        - any other naive timestamp, and every date: already workspace-local.
+        """
+        target = self.calendar.timezone
+        if target is None:
+            return value
+        if dim.column is not None and source.columns.get(dim.column) == "date":
+            return value
+
+        def to_local(v: exp.Expr) -> exp.Expr:
+            return exp.Anonymous(this="timezone", expressions=[exp.Literal.string(target), v])
+
+        if dim.column is not None and dim.column in source.timezones:
+            return to_local(value)  # TIMESTAMPTZ -> local TIMESTAMP
+        if dim.timezone and dim.timezone != target:
+            as_instant = exp.Anonymous(
+                this="timezone", expressions=[exp.Literal.string(dim.timezone), value]
+            )
+            return to_local(as_instant)
+        return value
 
     def measure_sql(
         self, source: Source, measure: Measure, stack: tuple[str, ...] = ()
@@ -242,19 +295,46 @@ class _Compiler:
                 return self.measure_sql(source, other, (*stack, measure.name))
 
             return expressions.measure_expression(measure.expr, resolve)
+        aggregate: exp.Expr
         if measure.agg == "count":
-            return exp.Count(this=_col(alias, measure.column) if measure.column else exp.Star())
-        assert measure.column is not None
-        column = _col(alias, measure.column)
-        if measure.agg == "count_distinct":
-            return exp.Count(this=exp.Distinct(expressions=[column]))
-        return AGGREGATES[str(measure.agg)](this=column)
+            aggregate = exp.Count(
+                this=_col(alias, measure.column) if measure.column else exp.Star()
+            )
+        else:
+            assert measure.column is not None
+            column = _col(alias, measure.column)
+            if measure.agg == "count_distinct":
+                aggregate = exp.Count(this=exp.Distinct(expressions=[column]))
+            else:
+                aggregate = AGGREGATES[str(measure.agg)](this=column)
+        if measure.filter is None:
+            return aggregate
+        # A conditional measure: agg(...) FILTER (WHERE condition).
+        condition = expressions.filter_expression(
+            measure.filter,
+            alias,
+            list(source.columns),
+            {name: segment.filter for name, segment in source.model.segments.items()},
+        )
+        return exp.Filter(this=aggregate, expression=exp.Where(this=condition))
 
     def _value(self, path: str, value: Any, kind: str) -> exp.Expr | None:
-        """A literal of the right type for a dimension or measure, or a problem."""
+        """A literal of the right type for a dimension or measure, or a problem.
+
+        Every value from a query passes through here before it is rendered:
+        numbers must be finite numbers, dates must parse as dates, booleans
+        must be booleans, and text is length-capped and free of null bytes.
+        sqlglot then escapes the literal. Nothing is ever spliced in as text.
+        """
         if kind == "number":
             if isinstance(value, bool) or not isinstance(value, int | float):
                 self.problems.add(path, f"Expected a number, got {value!r}.")
+                return None
+            if isinstance(value, float) and not math.isfinite(value):
+                self.problems.add(path, "Expected a finite number.")
+                return None
+            if isinstance(value, int) and abs(value) > MAX_INTEGER:
+                self.problems.add(path, "The number is too large.")
                 return None
             return exp.Literal.number(value)
         if kind == "boolean":
@@ -263,23 +343,32 @@ class _Compiler:
                 return None
             return exp.Boolean(this=value)
         if kind == "time":
-            try:
-                return _date(date.fromisoformat(str(value)))
-            except ValueError:
+            parsed = _parse_date(value)
+            if parsed is None:
                 self.problems.add(path, f"Expected a date such as 2026-01-31, got {value!r}.")
                 return None
+            return _date(parsed)
         if isinstance(value, bool):
             return exp.Literal.string("true" if value else "false")
-        return exp.Literal.string(str(value))
+        if isinstance(value, float) and not math.isfinite(value):
+            self.problems.add(path, "Expected text or a finite number.")
+            return None
+        text = str(value)
+        if len(text) > MAX_TEXT_VALUE:
+            self.problems.add(path, f"The value is longer than {MAX_TEXT_VALUE} characters.")
+            return None
+        if "\x00" in text:
+            self.problems.add(path, "The value contains a null character.")
+            return None
+        return exp.Literal.string(text)
 
     def _range(self, path: str, target: exp.Expr, spec: Mapping[str, Any]) -> list[exp.Expr]:
         if "relative" in spec:
             start, end = resolve_relative_range(str(spec["relative"]), self.today, self.calendar)
         else:
-            try:
-                start = date.fromisoformat(spec["from"]) if "from" in spec else None
-                end = date.fromisoformat(spec["to"]) if "to" in spec else None
-            except ValueError:
+            start = _parse_date(spec["from"]) if "from" in spec else None
+            end = _parse_date(spec["to"]) if "to" in spec else None
+            if ("from" in spec and start is None) or ("to" in spec and end is None):
                 self.problems.add(path, "Dates must look like 2026-01-31.")
                 return []
             if start and end and start > end:
@@ -376,7 +465,8 @@ class _Compiler:
         table.set("alias", exp.TableAlias(this=exp.to_identifier(alias, quoted=True)))
         conditions = []
         for index, rule in enumerate(source.model.rls):
-            if self.user.role not in rule.roles:
+            if self.user.role not in rule.roles and self.user.may_be_exempt:
+                self.rls_bypassed = True  # reported to the user, never silent
                 continue
             try:
                 conditions.append(
@@ -560,7 +650,8 @@ class _Compiler:
 
         text = statement.sql(dialect=DIALECT, comments=False)
         tables = tuple(self.sources[name].table for name in self.used)
-        return CompiledQuery(text, (), tables, limit, timeout_s), tuple(columns)
+        compiled = CompiledQuery(text, (), tables, limit, timeout_s, self.rls_bypassed)
+        return compiled, tuple(columns)
 
 
 def _dimension_type(source: Source, dim: Dimension) -> ColumnType:

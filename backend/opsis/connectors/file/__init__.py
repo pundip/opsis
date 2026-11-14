@@ -153,7 +153,15 @@ class FileConnector:
                 ctype = ColumnType.TIMESTAMP
             else:
                 ctype = ColumnType.STRING
-            columns.append(ColumnSpec(name=name, type=ctype, source_type=kind.lower()))
+            columns.append(
+                ColumnSpec(
+                    name=name,
+                    type=ctype,
+                    source_type=kind.lower(),
+                    # Values written with an offset ("...+10:00") identify an instant.
+                    tz_aware=kind == "TIMESTAMP WITH TIME ZONE",
+                )
+            )
         return columns
 
     def _read_csv(self, options: ReadOptions) -> Iterator[pa.RecordBatch]:
@@ -171,8 +179,11 @@ class FileConnector:
             columns = self._csv_types(relation)
             if options.columns:
                 columns = [c for c in columns if c.name in options.columns]
+            conn.execute("SET TimeZone = 'UTC'")
             projection = ", ".join(
-                'CAST("{0}" AS {1}) AS "{0}"'.format(c.name.replace('"', '""'), casts[c.type])
+                'CAST("{0}" AS {1}) AS "{0}"'.format(
+                    c.name.replace('"', '""'), "TIMESTAMPTZ" if c.tz_aware else casts[c.type]
+                )
                 for c in columns
             )
             schema = arrow_schema(columns)

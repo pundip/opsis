@@ -40,6 +40,9 @@ class CalendarConfig:
     week_start: WeekStart = "monday"
     fiscal_year_start_month: int = 7
     fiscal_year_label: FiscalYearLabel = "fy_end_year"
+    # IANA name of the workspace timezone. Timestamps are converted to it before
+    # grouping and filtering. None means "leave timestamps as stored".
+    timezone: str | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= self.fiscal_year_start_month <= 12:

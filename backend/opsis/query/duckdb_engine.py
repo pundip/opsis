@@ -46,6 +46,8 @@ class DuckDBEngine:
         # Queries only read local Parquet. Nothing may be fetched or installed.
         conn.execute("SET autoinstall_known_extensions = false")
         conn.execute("SET autoload_known_extensions = false")
+        # Timezone conversions are always explicit in the SQL; never ambient.
+        conn.execute("SET TimeZone = 'UTC'")
         return conn
 
     def execute(self, query: CompiledQuery) -> QueryResult:

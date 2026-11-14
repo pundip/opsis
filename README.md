@@ -56,6 +56,12 @@ rls:
 
 The rule above lets viewers and editors see only the funds listed in their `funds` attribute. A user with no such attribute sees no rows. The full format is in [spec/semantic-model.schema.json](spec/semantic-model.schema.json).
 
+More that a model can say:
+
+- **Conditional measures:** `online_amount: {agg: sum, column: amount, filter: "channel = 'online'"}` counts only matching rows. A segment can be used by name: `filter: "{large} AND region = 'VIC'"`.
+- **Timezones:** timestamps that carry an offset in the source are stored as instants and shown in `WORKSPACE_TIMEZONE`. A timestamp without one is taken as workspace-local time; if the source keeps it in another zone, say so on the dimension: `created: {column: created, type: time, timezone: UTC}`.
+- **Version history:** every save is a version, with who and when. The model page lists them and can restore any of them.
+
 ### Server
 
 ```
@@ -139,6 +145,7 @@ Everything is set in `.env`. The two templates document each value. After a chan
 | `QUERY_TIMEOUT_SECONDS` | A query running longer than this is stopped | `30` | same |
 | `QUERY_MAX_ROWS` | Most rows one query may return | `10000` | same |
 | `QUERY_MEMORY_LIMIT_MB` | Memory one query may use before spilling to disk | `1024` | same |
+| `QUERY_MAX_CONCURRENT` | Queries that run at once; others wait | `4` | same |
 | `ENCRYPTION_KEY` | Encrypts saved connection passwords | empty (generated and kept in the data volume) | required |
 | `POSTGRES_PASSWORD` | Password of the internal metadata database | template value | required, 12 characters or more |
 | `APP_NAME` | Product name shown in the UI | `Opsis` | same |
@@ -164,6 +171,7 @@ The only tools needed on the host are Docker and Node.js (for the frontend tests
 | `npm run lint:backend` | ruff and mypy (strict) |
 | `npm run test:frontend` | TypeScript, ESLint and Vitest |
 | `npm run lock:backend` | Regenerate `backend/uv.lock` after editing `pyproject.toml` |
+| `node scripts/benchmark.mjs --rows 5000000` | Load a synthetic dataset into the running stack and time ingestion and queries |
 
 Run `npm install` inside `frontend/` once before the frontend commands.
 

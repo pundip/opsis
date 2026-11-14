@@ -20,6 +20,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Text,
+    UniqueConstraint,
     false,
     func,
     text,
@@ -184,6 +185,8 @@ class SemanticModel(Base):
     # JSON, not JSONB: JSONB re-sorts keys, and a model must keep the order its
     # author wrote (fields are listed and exported to YAML in that order).
     definition: Mapped[dict[str, Any]] = mapped_column(JSON)
+    # Number of the newest row in semantic_model_versions for this dataset.
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     # True until someone edits it: a generated starter can be regenerated safely.
     is_starter: Mapped[bool] = mapped_column(default=True, server_default=true())
     updated_by: Mapped[uuid.UUID | None] = mapped_column(
@@ -193,6 +196,28 @@ class SemanticModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class SemanticModelVersion(Base):
+    """An immutable copy of a model, written on every save.
+
+    The same pattern as dashboard versions: rows are never updated, the author
+    is a user, the agent or the system, and restoring makes a new version.
+    """
+
+    __tablename__ = "semantic_model_versions"
+    __table_args__ = (UniqueConstraint("dataset_id", "version"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    dataset_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("datasets.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    definition: Mapped[dict[str, Any]] = mapped_column(JSON)
+    author_type: Mapped[str] = mapped_column(String(20))  # user | agent | system
+    author_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    message: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Job(Base):

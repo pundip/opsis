@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import re
+import uuid
 from typing import Any
 
 import yaml
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from opsis.auth.principal import Principal
-from opsis.db.models import Dataset, SemanticModel, Snapshot
+from opsis.db.models import Dataset, SemanticModel, SemanticModelVersion, Snapshot, User
 from opsis.errors import ApiError
 from opsis.semantic import model as semantic
 from opsis.services import audit
@@ -77,10 +79,43 @@ def ensure_starter(db: Session, dataset: Dataset, columns: dict[str, str]) -> No
     Called by the refresh job inside its transaction. Does not commit.
     """
     existing = db.scalar(select(SemanticModel).where(SemanticModel.dataset_id == dataset.id))
+    generated = starter(dataset, columns)
     if existing is None:
-        db.add(SemanticModel(dataset_id=dataset.id, definition=starter(dataset, columns)))
-    elif existing.is_starter:
-        existing.definition = starter(dataset, columns)
+        record = SemanticModel(dataset_id=dataset.id, definition=generated, version=0)
+        db.add(record)
+        _write_version(db, record, generated, "system", None, "Generated from the columns")
+    elif existing.is_starter and _dumps(existing.definition) != _dumps(generated):
+        _write_version(db, existing, generated, "system", None, "Regenerated: the columns changed")
+
+
+def _dumps(definition: dict[str, Any]) -> str:
+    return json.dumps(definition, sort_keys=False)
+
+
+def _write_version(
+    db: Session,
+    record: SemanticModel,
+    definition: dict[str, Any],
+    author_type: str,
+    author_id: uuid.UUID | None,
+    message: str | None,
+) -> None:
+    """Make `definition` the current model and add it to the history. Does not commit."""
+    record.version = (record.version or 0) + 1
+    record.definition = definition
+    # Dicts compare equal whatever their key order, so a pure reordering
+    # would otherwise not be written.
+    flag_modified(record, "definition")
+    db.add(
+        SemanticModelVersion(
+            dataset_id=record.dataset_id,
+            version=record.version,
+            definition=definition,
+            author_type=author_type,
+            author_id=author_id,
+            message=(message or "").strip()[:500] or None,
+        )
+    )
 
 
 def get_record(db: Session, dataset: Dataset) -> SemanticModel | None:
@@ -174,6 +209,7 @@ def describe(db: Session, dataset: Dataset) -> dict[str, Any]:
         "fields": fields,
         "isStarter": record.is_starter if record else True,
         "saved": record is not None,
+        "version": record.version if record else 0,
         "updatedAt": record.updated_at.isoformat() if record else None,
     }
 
@@ -234,30 +270,118 @@ def resolve_input(definition: Any | None, yaml_text: str | None) -> Any:
 
 
 def save(
-    db: Session, settings: Settings, actor: Principal, dataset: Dataset, definition: Any
+    db: Session,
+    settings: Settings,
+    actor: Principal,
+    dataset: Dataset,
+    definition: Any,
+    *,
+    base_version: int | None = None,
+    message: str | None = None,
+    author_type: str = "user",
 ) -> SemanticModel:
+    """Validate and store a model as a new version.
+
+    `base_version` is the version the author started from. If someone else has
+    saved since, the save is refused with 409 so nothing is silently overwritten
+    (the agent re-reads and retries; a person sees the message).
+    """
+    record = db.scalar(
+        select(SemanticModel).where(SemanticModel.dataset_id == dataset.id).with_for_update()
+    )
+    current = record.version if record else 0
+    if base_version is not None and base_version != current:
+        raise ApiError(
+            409,
+            "version_conflict",
+            f"The model has changed since version {base_version} (it is now version {current}). "
+            "Load the latest version and apply your change again.",
+            [{"path": "/baseVersion", "message": f"Current version is {current}."}],
+        )
     found = problems(db, settings, dataset, definition)
     if found:
         raise ApiError(422, "invalid_model", "The model is not valid.", found)
     stored = {k: v for k, v in definition.items() if k != "dataset"}
-    record = get_record(db, dataset)
     if record is None:
-        record = SemanticModel(dataset_id=dataset.id, definition=stored)
+        # Continue after any history that already exists for this dataset.
+        latest = db.scalar(
+            select(func.max(SemanticModelVersion.version)).where(
+                SemanticModelVersion.dataset_id == dataset.id
+            )
+        )
+        record = SemanticModel(dataset_id=dataset.id, definition=stored, version=latest or 0)
         db.add(record)
-    else:
-        record.definition = stored
-        # Dicts compare equal whatever their key order, so a pure reordering
-        # would otherwise not be written.
-        flag_modified(record, "definition")
+    _write_version(db, record, stored, author_type, actor.user_id, message)
     record.is_starter = False
     record.updated_by = actor.user_id
     audit.record(
         db,
         action="model.updated",
         actor=actor,
+        actor_type=author_type,
         target_type="dataset",
         target_id=str(dataset.id),
-        detail={"dataset": dataset.name, "rls_rules": len(stored.get("rls") or [])},
+        detail={
+            "dataset": dataset.name,
+            "version": record.version,
+            "rls_rules": len(stored.get("rls") or []),
+        },
     )
     db.commit()
     return record
+
+
+def _version_dict(
+    version: SemanticModelVersion, author: str | None, current: int
+) -> dict[str, Any]:
+    return {
+        "version": version.version,
+        "authorType": version.author_type,
+        "authorName": author
+        or {"system": "System", "agent": "Assistant"}.get(version.author_type, "Deleted user"),
+        "message": version.message,
+        "createdAt": version.created_at.isoformat(),
+        "current": version.version == current,
+    }
+
+
+def list_versions(db: Session, dataset: Dataset) -> list[dict[str, Any]]:
+    record = get_record(db, dataset)
+    rows = db.execute(
+        select(SemanticModelVersion, User.display_name)
+        .outerjoin(User, User.id == SemanticModelVersion.author_id)
+        .where(SemanticModelVersion.dataset_id == dataset.id)
+        .order_by(SemanticModelVersion.version.desc())
+        .limit(200)
+    ).all()
+    current = record.version if record else 0
+    return [_version_dict(version, name, current) for version, name in rows]
+
+
+def get_version(db: Session, dataset: Dataset, number: int) -> dict[str, Any]:
+    row = db.execute(
+        select(SemanticModelVersion, User.display_name)
+        .outerjoin(User, User.id == SemanticModelVersion.author_id)
+        .where(
+            SemanticModelVersion.dataset_id == dataset.id, SemanticModelVersion.version == number
+        )
+    ).first()
+    if row is None:
+        raise ApiError(404, "not_found", f"There is no version {number} of this model.")
+    version, name = row
+    record = get_record(db, dataset)
+    return {
+        **_version_dict(version, name, record.version if record else 0),
+        "definition": version.definition,
+        "yaml": to_yaml(dataset.name, version.definition),
+    }
+
+
+def restore(
+    db: Session, settings: Settings, actor: Principal, dataset: Dataset, number: int
+) -> SemanticModel:
+    """Make an old version current again, as a new version. History is never rewritten."""
+    old = get_version(db, dataset, number)
+    return save(
+        db, settings, actor, dataset, old["definition"], message=f"Restored version {number}"
+    )

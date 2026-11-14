@@ -11,6 +11,7 @@ unknown functions) is rejected with a message that names the problem.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -21,6 +22,8 @@ from sqlglot.errors import SqlglotError
 
 MAX_LENGTH = 2000
 MAX_NODES = 400
+MAX_TEXT_VALUE = 1000  # longest text value accepted from a query or a user attribute
+_SEGMENT_PREFIX = "__opsis_s_"
 
 ALLOWED_NODES: tuple[type[exp.Expr], ...] = (
     exp.Column, exp.Identifier, exp.Literal, exp.Null, exp.Boolean, exp.Paren, exp.Tuple,
@@ -167,13 +170,48 @@ def user_references(text: str) -> list[str]:
 
 
 def _literal(value: Any) -> exp.Expr | None:
+    """A user attribute as a literal, or None if it cannot safely be one."""
     if isinstance(value, bool):
         return exp.Boolean(this=value)
-    if isinstance(value, int | float):
-        return exp.Literal.number(value) if value == value else None
+    if isinstance(value, int):
+        return exp.Literal.number(value) if abs(value) < 2**63 else None
+    if isinstance(value, float):
+        return exp.Literal.number(value) if math.isfinite(value) else None
     if isinstance(value, str):
+        if len(value) > MAX_TEXT_VALUE or "\x00" in value:
+            return None
         return exp.Literal.string(value)
     return None
+
+
+def segment_references(text: str) -> list[str]:
+    return MEASURE_REF.findall(text)
+
+
+def filter_expression(
+    text: str, alias: str, columns: Sequence[str], segments: Mapping[str, str]
+) -> exp.Expr:
+    """The condition of a conditional measure.
+
+    A boolean expression over the dataset's columns. A segment may be used by
+    name in braces: `{online} AND amount > 100`. Checked by the same
+    allow-list as every other model expression.
+    """
+    prepared = MEASURE_REF.sub(lambda m: f"({_SEGMENT_PREFIX}{m.group(1)})", text)
+    if "{" in prepared or "}" in prepared:
+        raise ExpressionError("Reference segments as {segment_name}.")
+    tree = _resolve_columns(parse(prepared), alias, columns, skip_prefix=_SEGMENT_PREFIX)
+    for node in list(tree.find_all(exp.Column)):
+        if not node.name.startswith(_SEGMENT_PREFIX):
+            continue
+        name = node.name.removeprefix(_SEGMENT_PREFIX)
+        if name not in segments:
+            raise ExpressionError(f"There is no segment called {name!r}.")
+        replacement = exp.Paren(this=column_expression(segments[name], alias, columns))
+        if node is tree:
+            return replacement
+        node.replace(replacement)
+    return tree
 
 
 def rls_expression(

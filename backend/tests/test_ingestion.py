@@ -434,7 +434,7 @@ def test_postgres_discovery_types_and_full_refresh(
         "ratio": 0.5,
         "paid": True,
         "ordered_on": "2026-01-05",
-        "updated_at": "2026-01-05T10:00:00",
+        "updated_at": "2026-01-05T10:00:00+00:00",  # timestamptz: stored as a UTC instant
         "meta": '{"a": 1}',
         "ref": "11111111-1111-1111-1111-111111111111",
     }

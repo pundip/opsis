@@ -88,6 +88,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             temp_dir=settings.data_dir / "tmp" / "duckdb",
         ),
         cache=ResultCache(settings.query_cache_entries),
+        max_concurrent=settings.query_max_concurrent,
     )
     install_error_handlers(app)
 

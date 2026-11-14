@@ -183,4 +183,36 @@ Short ADR entries. Newest at the bottom. "Brief" means `BUILD_BRIEF.md`. An entr
 **Other**
 - DuckDB treats column names case-insensitively, so columns that differ only by case are stored under distinct names at ingestion (`Fund`, `fund_2`).
 - Reading models and running queries needs `dashboards:edit`; saving a model needs `models:edit`. Viewers will query through published dashboards (M4), not through `/api/query`.
-- **Known limit, timezones:** timestamps are grouped as stored. A `timestamptz` from Postgres is stored in UTC, so "by day" means UTC days, not `WORKSPACE_TIMEZONE` days. Date columns are unaffected. See the question in `PROGRESS.md`.
+- **Timezones:** resolved in ADR-020.
+
+## ADR-020: M3.5 additions to the semantic layer
+- **Status:** accepted, M3.5 (from the M3 review)
+
+**Timezones**
+- A source value that identifies an instant (Postgres `timestamptz`, a CSV timestamp written with an offset) is stored as a UTC instant: the Parquet column is `timestamp[us, tz=UTC]` and the snapshot's column list carries `"tz": "UTC"`.
+- A timestamp without a zone is wall-clock time and is taken to be in `WORKSPACE_TIMEZONE`. A model can override that per dimension with `timezone: <IANA name>` (for example `timezone: UTC` for Salesforce datetimes that arrive without an offset).
+- The compiler converts both kinds to workspace wall-clock time in `dimension_sql`, before anything else uses the value, so grains, date ranges, filters and plain selection all agree. Dates are never shifted.
+- The conversion is explicit in the SQL (`TIMEZONE('Australia/Melbourne', col)`), the engine's session timezone is pinned to UTC, and the zone name is part of the SQL text, so it is part of the cache key.
+- Datasets refreshed before this change stored `timestamptz` as naive UTC. They convert correctly after their next full refresh. An incremental refresh of such a dataset reports "the columns have changed, run a full refresh".
+- MySQL `DATETIME` and `TIMESTAMP` are both read as wall-clock time. Set `timezone` on the dimension if the server keeps them in UTC.
+
+**Conditional measures**
+- A measure with `agg` may have a `filter`: a boolean expression over the dataset's columns, in which a segment can be used by name in braces (`{large} AND region = 'VIC'`). It compiles to `agg(...) FILTER (WHERE ...)` and goes through the same allow-list as every other model expression. Formula measures cannot have a filter; they combine measures that already do.
+
+**Model version history**
+- `semantic_model_versions` holds an immutable row per save: definition, version number, author type (user, agent or system), author, optional message. `semantic_models` keeps the current definition and its version number.
+- Restore copies an old version into a new one after validating it against today's columns. History is never rewritten.
+- `PUT /api/models/{dataset}` accepts `baseVersion`. A stale value returns 409 `version_conflict`. This is what the agent will use in M5; the UI sends it too.
+- Starter models are versions as well: version 1 when generated, and a new version only when a refresh actually changes the generated model.
+
+**Values in queries**
+- sqlglot literals are kept (not bound parameters). Every value is checked in one place, `compiler._value`, before it becomes a literal: numbers must be finite `int` or `float` (not strings, booleans, NaN or infinity, and within 64 bits); dates must match `YYYY-MM-DD` exactly and be real dates; booleans must be booleans; text is capped at 1,000 characters and may not contain a null byte. The query schema also caps text at 1,000 characters. RLS attribute values get the same checks and deny when they fail.
+
+**Concurrency**
+- Query endpoints are plain `def` functions, so FastAPI runs them in its worker thread pool and DuckDB never runs on the event loop. `QueryRuntime` holds a semaphore of `QUERY_MAX_CONCURRENT` slots (default 4); other queries wait, and get 503 `busy` if they wait longer than the query timeout. Cached results need no slot.
+- Worst-case query memory is therefore about `QUERY_MAX_CONCURRENT` times `QUERY_MEMORY_LIMIT_MB`. Measured figures are in `PROGRESS.md`.
+
+**RLS exemptions (decided at the M3 review)**
+- Admins stay exempt by default. The compiler reports when an exemption applied (`rlsBypassed` in every query result) and the UI shows an "RLS bypassed" badge.
+- `UserContext.may_be_exempt = False` makes every rule apply whatever its role list says. Share links and any anonymous access will use it (M6), so they never inherit an owner's exemption.
+- "View as" a specific user or role on a dashboard is planned for M6.
