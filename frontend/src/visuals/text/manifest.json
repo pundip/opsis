@@ -1,0 +1,18 @@
+{
+  "id": "text",
+  "name": "Text",
+  "version": "1.0.0",
+  "description": "A heading, note or explanation written in Markdown.",
+  "roles": {},
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "markdown": { "title": "Text (Markdown)", "type": "string", "maxLength": 20000, "default": "## Heading\n\nSome text." }
+    }
+  },
+  "aiHints": "Use for section headings and short explanations. Supports headings, bold, italic, lists and links. It has no data bindings.",
+  "defaultSize": { "w": 12, "h": 2 },
+  "minSize": { "w": 2, "h": 1 },
+  "capabilities": { "crossFilter": false, "drillDown": false }
+}

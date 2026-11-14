@@ -1,0 +1,27 @@
+{
+  "id": "kpi",
+  "name": "KPI card",
+  "version": "1.0.0",
+  "description": "One headline number, optionally compared with an earlier period.",
+  "roles": {
+    "value": { "kind": "measure", "min": 1, "max": 1, "label": "Value" }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "comparison": {
+        "title": "Compare with",
+        "description": "Needs a date range filter on the dashboard.",
+        "enum": ["none", "previous_period", "previous_year"],
+        "default": "none"
+      },
+      "upIsGood": { "title": "An increase is good", "type": "boolean", "default": true },
+      "compact": { "title": "Shorten large numbers (12.9K)", "type": "boolean", "default": true }
+    }
+  },
+  "aiHints": "Use for the few numbers a dashboard leads with. Put KPI cards in the top row, 3 columns wide and 3 rows tall. Comparison only works when the dashboard has a dateRange filter that applies to this card.",
+  "defaultSize": { "w": 3, "h": 3 },
+  "minSize": { "w": 2, "h": 2 },
+  "capabilities": { "crossFilter": false, "drillDown": false }
+}

@@ -130,6 +130,7 @@ class Settings(BaseSettings):
     branding_file: Path = Path("/app/branding.json")
     plugins_dir: Path = Path("/app/plugins")
     spec_dir: Path = Path("/app/spec")
+    visuals_dir: Path = Path("/app/visuals")
 
     log_level: Literal["debug", "info", "warning", "error"] = "info"
 

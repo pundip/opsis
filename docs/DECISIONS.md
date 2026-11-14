@@ -144,6 +144,8 @@ Short ADR entries. Newest at the bottom. "Brief" means `BUILD_BRIEF.md`. An entr
 - **To decide in M4:** keep extending the built-in form, or use rjsf with a validator that does not need `eval` (for example a non-compiling JSON Schema validator behind rjsf's validator interface). The same question applies to validating dashboard specs in the browser with ajv.
 - **Also deferred:** shadcn/ui. The M2 screens use a handful of Tailwind components in `components/ui.tsx`. shadcn/ui is worth adding when dialogs, menus and popovers are needed (the M4 editor).
 - **M2 review:** keep the built-in form for connections. At the start of M4, prototype rjsf with a validator that works under the strict CSP, then decide.
+- **Decided in M4:** visual config panels use rjsf (`@rjsf/core` 6) with our own validator, `frontend/src/lib/schemaValidator.ts`, built on `@cfworker/json-schema`, which interprets a schema instead of compiling it. The prototype and the finished editor run under the strict CSP with no violations. ajv is not used anywhere in the browser: rjsf's own `@rjsf/validator-ajv8` import is aliased to our validator in `vite.config.ts` so it is never bundled. Connection forms keep the built-in `SchemaForm` (flat schemas, secret and upload fields, errors from the backend). Dashboard specs are validated by the backend only (`POST /api/dashboards/validate`); the JSON tab gets inline hints from Monaco's JSON worker using the same schema files.
+- **Still deferred:** shadcn/ui. The editor is built from the existing Tailwind components; no dialog or popover library was needed.
 
 ## ADR-019: Semantic layer and query compiler
 - **Status:** accepted, M3
@@ -216,3 +218,42 @@ Short ADR entries. Newest at the bottom. "Brief" means `BUILD_BRIEF.md`. An entr
 - Admins stay exempt by default. The compiler reports when an exemption applied (`rlsBypassed` in every query result) and the UI shows an "RLS bypassed" badge.
 - `UserContext.may_be_exempt = False` makes every rule apply whatever its role list says. Share links and any anonymous access will use it (M6), so they never inherit an owner's exemption.
 - "View as" a specific user or role on a dashboard is planned for M6.
+
+## ADR-021: Dashboards, the editor and the v1 visuals
+- **Status:** accepted, M4
+
+**Storage and versions**
+- `dashboards` holds the title, the latest version number and the published version number. `dashboard_versions` holds one immutable row per save: the full spec, author type (user, agent or system), author and an optional note. Specs are stored as JSON, not JSONB, so key order survives (same reason as models, ADR-019).
+- The draft is the latest version. Published is a pointer to one version. Restore copies an old version into a new one after validating it against today's models; history is never rewritten.
+- `PUT /api/dashboards/{id}` takes the full spec and `baseVersion`. A stale value returns 409 `version_conflict`. JSON Patch writes for the agent arrive with MCP in M5.
+
+**Validation**
+- Two phases (ADR-004). Phase one is `spec/dashboard.schema.json`. Phase two checks unique ids, that the visual exists, that bindings satisfy the manifest's roles (count and field kind), that `config` matches the manifest's `configSchema`, that every field is reachable from the item's dataset, that sorts and filters refer to real fields, and that items fit the grid. Every problem carries a JSON pointer path, for example `/items/0/bindings/value/0`.
+- Invalid specs are never stored. The JSON tab applies nothing unless the whole document is valid.
+
+**Queries**
+- The browser never sends a query for a dashboard item. It sends the item id and the view state (filter values, cross-filter selections, drill grains) to `POST /api/dashboards/{id}/data`, and the backend derives the semantic query from the stored spec. A viewer can therefore only ask the questions the dashboard author defined.
+- Editors may send an unsaved spec inline (`source: "inline"`) so the editor can preview changes; it is validated the same way and needs `dashboards:edit`. Editors also get the derived query back for the "show query" use; viewers do not.
+- Viewers read the published version only. Row-level security applies as in ADR-019, and `rlsBypassed` is passed through so each tile shows an "RLS bypassed" badge when an exemption applied.
+- Filter option lists come from `POST /api/dashboards/{id}/filter-options`, which runs a distinct-values query on the filter's field under the same RLS.
+
+**Filters, cross-filtering and drill-down**
+- Filter controls: single select, multi-select, date range (relative ranges including financial years, or fixed dates) and text search. A filter applies to every item whose dataset can reach its field, or to the items listed in `targets`.
+- Clicking a mark on a chart, or a row value in a table, sets a cross-filter on that field for the other items. It is view state, not part of the spec, shown as a removable chip. A dashboard can switch it off (`interactions.crossFilter`).
+- Drill-down through time grains is a per-tile grain selector (year, quarter, month, week, day, and the fiscal grains when the binding uses them). It is also view state.
+- KPI comparison (`previous_period` or `previous_year`) runs a second query with the date range shifted.
+
+**Visuals**
+- Each visual is a folder in `frontend/src/visuals/<id>/` with `manifest.json` (roles, `configSchema`, minimum size) and `Render.tsx`. The frontend finds them with `import.meta.glob`; the backend reads the same manifests from `VISUALS_DIR` to validate specs. v1: table, KPI, bar, line, area, combo, pie or donut, scatter, text.
+- Charts use ECharts 6 with the canvas renderer, loaded as a lazy chunk. Text is a small safe Markdown subset rendered as React elements (no HTML pass-through; links limited to http, https and mailto).
+- Chart rules, fixed in code rather than left to each dashboard: an eight-colour categorical palette checked for colour-blind separation in light and dark; colours assigned by series name in a fixed order so a filter never repaints the survivors; a ninth and later series folded into "Other"; bars at most 24px wide with a rounded data end; 2px lines; a legend whenever there are two or more series; text in ink colours, never the series colour; every chart can be switched to a table of the same data.
+- **Deviation:** the combo chart draws bars and lines on one value axis. A second y-axis is not offered, because two scales on one chart invite false comparisons. Measures of very different size belong in two charts.
+- Scatter plots colour at most three groups plus "Other".
+- Themes: `theme.mode` (auto, light, dark) and an optional palette override in the spec. Named presets beyond "default" wait for branding in M6.
+
+**Editor**
+- react-grid-layout 2 for drag and resize. Only a finished drag or resize is recorded as an edit; the grid's own re-packing after a removal or an undo is not, otherwise it buried the real step in the undo history.
+- Selection is on an element inside each tile, because the grid library owns the tile's own mouse handlers. Tiles can also be selected from the keyboard.
+- **Deviation:** field wells are role lists with an "Add a field" selector and remove buttons, not drag-and-drop of fields. It is keyboard accessible and was much quicker to build; drag-and-drop can be added on top later.
+- Undo and redo keep up to 100 states in memory. Version history shows a line diff of the JSON between a version and what is on screen.
+- Monaco is bundled locally (no CDN) as a lazy chunk with its JSON worker, so it works under the CSP and offline. It is about 3.4 MB (0.9 MB gzipped) and loads only when the JSON tab is opened.

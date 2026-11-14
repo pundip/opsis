@@ -21,7 +21,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from opsis import __version__
-from opsis.api import ingestion, semantic, system
+from opsis.api import dashboards, ingestion, semantic, system
 from opsis.api.errors import ApiError, install_error_handlers
 from opsis.auth import cookies
 from opsis.jobs.worker import InlineRunner
@@ -139,6 +139,7 @@ def register_feature_routers(api: APIRouter) -> None:
     """Every feature router is included here, under the base path."""
     api.include_router(ingestion.router)
     api.include_router(semantic.router)
+    api.include_router(dashboards.router)
 
 
 def render_index(settings: Settings) -> str | None:

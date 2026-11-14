@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
@@ -9,6 +10,12 @@ export default defineConfig({
   // Relative asset URLs: the backend injects <base href> at request time (brief 3.1).
   base: "./",
   plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      // Keep ajv (which needs `unsafe-eval`) out of the bundle. See the aliased file.
+      "@rjsf/validator-ajv8": fileURLToPath(new URL("./src/lib/rjsfValidatorAlias.ts", import.meta.url)),
+    },
+  },
   build: { outDir: "dist", sourcemap: false },
   server: {
     host: "0.0.0.0",

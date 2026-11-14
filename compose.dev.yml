@@ -54,6 +54,7 @@ services:
       - ./backend/tests:/app/tests:ro
       - ./backend/pyproject.toml:/app/pyproject.toml:ro
       - ./spec:/app/spec:ro
+      - ./frontend/src/visuals:/app/visuals:ro
       - ./.env.local.example:/repo/.env.local.example:ro
       - ./.env.server.example:/repo/.env.server.example:ro
     depends_on:

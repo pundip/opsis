@@ -6,7 +6,7 @@
   "roles": {
     "category": { "kind": "dimension", "min": 1, "max": 1, "label": "Category" },
     "value": { "kind": "measure", "min": 1, "max": 5, "label": "Values" },
-    "series": { "kind": "dimension", "min": 0, "max": 1, "label": "Series" }
+    "series": { "kind": "dimension", "min": 0, "max": 1, "label": "Split by" }
   },
   "configSchema": {
     "type": "object",
@@ -17,8 +17,8 @@
       "showLabels": { "title": "Show value labels", "type": "boolean", "default": false }
     }
   },
-  "aiHints": "Best for comparing up to about 20 categories. For time series prefer line. Use horizontal orientation for long category names. Sort by the measure descending and set a limit for ranked lists.",
-  "defaultSize": { "w": 6, "h": 6 },
-  "minSize": { "w": 3, "h": 3 },
+  "aiHints": "Best for comparing up to about 20 categories. For time series prefer line. Use horizontal orientation for long category names. Sort by the measure descending and set a limit for ranked lists. Split by adds one more dimension as colour; keep it under 8 values.",
+  "defaultSize": { "w": 6, "h": 7 },
+  "minSize": { "w": 3, "h": 4 },
   "capabilities": { "crossFilter": true, "drillDown": true }
 }

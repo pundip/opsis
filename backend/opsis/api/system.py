@@ -79,6 +79,18 @@ def get_config(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     return public_config(settings)
 
 
+@router.get("/schemas")
+def get_schemas(
+    settings: Settings = Depends(get_settings), _: Principal = Depends(get_principal)
+) -> dict[str, Any]:
+    """The JSON Schemas in spec/, by file name. The editor's JSON tab uses them
+    for inline checks, and the agent will read them through MCP."""
+    return {
+        path.name: json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(settings.spec_dir.glob("*.schema.json"))
+    }
+
+
 @router.get("/me")
 def get_me(principal: Principal = Depends(get_principal)) -> dict[str, Any]:
     return {

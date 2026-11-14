@@ -2,7 +2,7 @@
 
 A self-hosted, AI-native business intelligence platform. Open source, Docker-based, and built so that a person and an AI agent edit the same dashboards.
 
-**Status:** early development. You can connect to CSV or Excel files, PostgreSQL and MySQL, pull tables into local storage, define a semantic model for each dataset (dimensions, measures, joins, row-level security) and run queries against it. Dashboards, the MCP server and sign-in are being built milestone by milestone. See [PROGRESS.md](PROGRESS.md).
+**Status:** early development. You can connect to CSV or Excel files, PostgreSQL and MySQL, pull tables into local storage, define a semantic model for each dataset (dimensions, measures, joins, row-level security) run queries against it, and build dashboards on top with a drag-and-resize editor. The MCP server and sign-in are being built milestone by milestone. See [PROGRESS.md](PROGRESS.md).
 
 ## Quick start
 
@@ -61,6 +61,20 @@ More that a model can say:
 - **Conditional measures:** `online_amount: {agg: sum, column: amount, filter: "channel = 'online'"}` counts only matching rows. A segment can be used by name: `filter: "{large} AND region = 'VIC'"`.
 - **Timezones:** timestamps that carry an offset in the source are stored as instants and shown in `WORKSPACE_TIMEZONE`. A timestamp without one is taken as workspace-local time; if the source keeps it in another zone, say so on the dimension: `created: {column: created, type: time, timezone: UTC}`.
 - **Version history:** every save is a version, with who and when. The model page lists them and can restore any of them.
+
+### Dashboards
+
+Open **Dashboards**, name a new one, and you are in the editor:
+
+- **Add** a visual from the toolbar: table, KPI card, bar, line, area, combo, pie or donut, scatter, or text. Drag a tile to move it and pull its corner to resize it.
+- Click a tile to select it. The **Visual** tab picks its dataset, puts fields into the visual's roles (for example Category, Values, Split by), sets sort and row limit, and shows the visual's own options.
+- **Filters** adds controls above the dashboard: a dropdown, a multi-select, a date range (including "This financial year") or a text search.
+- **Dashboard** holds the title, grid and theme (auto, light or dark). **History** lists every saved version, shows what changed, and can restore one. **JSON** is the whole dashboard as text; Apply checks it first and reports each problem with its path.
+- **Undo** and **Redo** (Ctrl+Z, Ctrl+Y) cover everything since you opened the editor. **Save** makes a new version. **Publish** makes the saved version the one viewers see.
+
+When viewing, click a bar, slice, point or table value to filter the other visuals by it, change the time grain on a time chart (year to day), and switch any chart to a table of the same data. A tile shows "RLS bypassed" when row-level security rules exist on its data but do not apply to your role.
+
+The format is [spec/dashboard.schema.json](spec/dashboard.schema.json). Each visual declares its roles and options in `frontend/src/visuals/<id>/manifest.json`.
 
 ### Server
 

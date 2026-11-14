@@ -159,6 +159,10 @@ Relative ranges (`last_12_months`, `this_fiscal_year`) and grains (`week`, `fisc
 
 Draft is the latest version. Published is a pointer to one version. Viewers and share links only read the published pointer.
 
+**Built so far (M4):** full-spec writes from the UI with `baseVersion` and the 409, two-phase validation, versions, restore, publish and unpublish. JSON Patch writes, the audit entry for agent writes and the SSE `version_created` event arrive with MCP in M5.
+
+**Reading a dashboard.** The browser asks for one item at a time: `POST /api/dashboards/{id}/data` with the item id and the view state (filter values, cross-filter selections, drill grains). The backend loads the spec (published for viewers, draft or an inline unsaved spec for editors), derives the semantic query from the item's bindings and the state, and runs it through the path in section 3, so RLS, the cache and the concurrency limit all apply. The browser never writes a query for a dashboard. Details are in ADR-021.
+
 ## 5. Auth flows
 
 All modes resolve every request to a `Principal` (user id, role, groups, attributes, scopes) and run the same permission checks.

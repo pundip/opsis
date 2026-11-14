@@ -220,6 +220,44 @@ class SemanticModelVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Dashboard(Base):
+    """A dashboard. Its content lives in dashboard_versions.
+
+    Draft is always the newest version (`version`). Published is a pointer to
+    one specific version; viewers and share links only ever read that one.
+    """
+
+    __tablename__ = "dashboards"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    title: Mapped[str] = mapped_column(String(200))  # copied from the newest spec, for lists
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    published_version: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DashboardVersion(Base):
+    """An immutable dashboard spec (spec/dashboard.schema.json), one row per save."""
+
+    __tablename__ = "dashboard_versions"
+    __table_args__ = (UniqueConstraint("dashboard_id", "version"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    dashboard_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("dashboards.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSON)  # JSON keeps the author's key order
+    author_type: Mapped[str] = mapped_column(String(20))  # user | agent | system
+    author_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    message: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Job(Base):
     """Job queue row, claimed with SELECT ... FOR UPDATE SKIP LOCKED."""
 

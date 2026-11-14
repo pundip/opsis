@@ -3,14 +3,16 @@ import { Route, Routes } from "react-router-dom";
 import { useConfig, useMe } from "../lib/config";
 import { navItems } from "../lib/nav";
 import { Connections } from "../pages/Connections";
+import { DashboardEditor } from "../pages/DashboardEditor";
+import { DashboardPage } from "../pages/DashboardPage";
+import { Dashboards } from "../pages/Dashboards";
 import { DatasetDetail } from "../pages/DatasetDetail";
 import { Datasets } from "../pages/Datasets";
 import { Home } from "../pages/Home";
 import { Jobs } from "../pages/Jobs";
 import { ModelDetail } from "../pages/ModelDetail";
 import { Models } from "../pages/Models";
-import { Placeholder } from "../pages/Placeholder";
-import { Layout } from "./Layout";
+import { Placeholder } from "../pages/Placeholder";import { Layout } from "./Layout";
 
 function FullPage({ title, children }: { title: string; children?: React.ReactNode }) {
   return (
@@ -68,6 +70,8 @@ export function App() {
         return <Jobs config={appConfig} />;
       case "/models":
         return <Models />;
+      case "/dashboards":
+        return <Dashboards me={user} />;
       default:
         return null;
     }
@@ -85,6 +89,12 @@ export function App() {
         ))}
         {allowed("/datasets") && (
           <Route path="/datasets/:id" element={<DatasetDetail config={config.data} />} />
+        )}
+        {allowed("/dashboards") && (
+          <>
+            <Route path="/dashboards/:id" element={<DashboardPage config={appConfig} />} />
+            <Route path="/dashboards/:id/edit" element={<DashboardEditor config={appConfig} />} />
+          </>
         )}
         {allowed("/models") && (
           <Route path="/models/:dataset" element={<ModelDetail config={appConfig} me={user} />} />
