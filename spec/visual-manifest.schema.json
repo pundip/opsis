@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opsis.invalid/spec/visual-manifest.schema.json",
+  "title": "Opsis visual manifest",
+  "description": "Describes one visual plugin at frontend/src/visuals/<id>/manifest.json. The editor builds field wells from roles and the config panel from configSchema. The backend and MCP server use the same file to list visuals and validate dashboard items.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "version", "description", "roles", "configSchema"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$",
+      "description": "Must equal the folder name. Referenced by items[].visual in a dashboard spec."
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 60 },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "description": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "roles": {
+      "type": "object",
+      "description": "Field wells. Keys are role names used in items[].bindings. Use an empty object for visuals with no data (text).",
+      "propertyNames": { "pattern": "^[a-z][a-zA-Z0-9]{0,31}$" },
+      "additionalProperties": { "$ref": "#/$defs/role" }
+    },
+    "configSchema": {
+      "type": "object",
+      "description": "A JSON Schema (type object) for items[].config. Rendered with rjsf, so keep it flat and give every property a default.",
+      "required": ["type"],
+      "properties": { "type": { "const": "object" } }
+    },
+    "aiHints": {
+      "type": "string",
+      "maxLength": 600,
+      "description": "Guidance passed to the agent: when to pick this visual and its sensible limits."
+    },
+    "defaultSize": { "$ref": "#/$defs/size" },
+    "minSize": { "$ref": "#/$defs/size" },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "crossFilter": {
+          "type": "boolean",
+          "default": false,
+          "description": "Clicking a mark can emit a cross-filter on the bound dimension."
+        },
+        "drillDown": {
+          "type": "boolean",
+          "default": false,
+          "description": "Supports drilling through time grains on a time dimension."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "min", "max"],
+      "properties": {
+        "kind": {
+          "enum": ["dimension", "measure", "any"],
+          "description": "What may be bound. A time dimension counts as a dimension."
+        },
+        "min": { "type": "integer", "minimum": 0 },
+        "max": { "type": "integer", "minimum": 1 },
+        "label": { "type": "string", "maxLength": 40 },
+        "description": { "type": "string", "maxLength": 200 },
+        "types": {
+          "type": "array",
+          "description": "Optional restriction on the dimension type, for example [\"time\"] for a line chart x axis.",
+          "items": { "enum": ["string", "number", "boolean", "time"] },
+          "uniqueItems": true,
+          "minItems": 1
+        }
+      }
+    },
+    "size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["w", "h"],
+      "properties": {
+        "w": { "type": "integer", "minimum": 1, "maximum": 24 },
+        "h": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    }
+  }
+}

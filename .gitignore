@@ -1,0 +1,31 @@
+# Secrets and local config
+.env
+.env.*
+!.env.local.example
+!.env.server.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+playwright-report/
+test-results/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude desktop app local settings (launch.json stays tracked)
+.claude/settings.local.json
+.claude/worktrees/

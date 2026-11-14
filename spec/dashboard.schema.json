@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opsis.invalid/spec/dashboard.schema.json",
+  "title": "Opsis dashboard spec",
+  "description": "The single source of truth for a dashboard. Edited by the UI (full save) and by the agent (JSON Patch). This schema checks structure only. The backend then runs semantic checks: unique ids, the visual exists, bindings satisfy the manifest roles, config matches the manifest configSchema, fields exist in the semantic model, and positions fit the grid. Shared shapes come from semantic-query.schema.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["specVersion", "title", "layout", "items"],
+  "properties": {
+    "specVersion": { "const": 1 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "description": { "type": "string", "maxLength": 2000 },
+    "theme": { "$ref": "#/$defs/theme" },
+    "filters": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/filterControl" },
+      "maxItems": 30
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns", "rowHeight"],
+      "properties": {
+        "columns": { "type": "integer", "minimum": 1, "maximum": 24, "default": 12 },
+        "rowHeight": { "type": "integer", "minimum": 10, "maximum": 200, "default": 40 }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/item" },
+      "maxItems": 100
+    },
+    "interactions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "crossFilter": { "type": "boolean", "default": false }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+      "description": "Unique within the dashboard across filters and items."
+    },
+    "theme": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preset": {
+          "type": "string",
+          "default": "default",
+          "description": "A named theme. \"default\" comes from branding.json."
+        },
+        "mode": { "enum": ["auto", "light", "dark"], "default": "auto" },
+        "palette": {
+          "type": "array",
+          "description": "Overrides the categorical palette of the preset.",
+          "items": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+          "minItems": 2,
+          "maxItems": 20
+        }
+      }
+    },
+    "filterControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "field"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "type": { "enum": ["select", "multiSelect", "dateRange", "search"] },
+        "field": { "$ref": "semantic-query.schema.json#/$defs/fieldRef" },
+        "label": { "type": "string", "maxLength": 80 },
+        "default": {},
+        "targets": {
+          "type": "array",
+          "description": "Item ids this filter applies to. When omitted it applies to every item whose dataset can reach the field.",
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "dateRange" } } },
+          "then": { "properties": { "default": { "$ref": "semantic-query.schema.json#/$defs/range" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "multiSelect" } } },
+          "then": {
+            "properties": {
+              "default": {
+                "type": "array",
+                "items": { "$ref": "semantic-query.schema.json#/$defs/scalar" },
+                "maxItems": 1000
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "select" } } },
+          "then": { "properties": { "default": { "$ref": "semantic-query.schema.json#/$defs/scalar" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "search" } } },
+          "then": { "properties": { "default": { "type": "string", "maxLength": 200 } } }
+        }
+      ]
+    },
+    "binding": {
+      "description": "A field reference, or an object when a time dimension needs a grain.",
+      "oneOf": [
+        { "$ref": "semantic-query.schema.json#/$defs/fieldRef" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["field"],
+          "properties": {
+            "field": { "$ref": "semantic-query.schema.json#/$defs/fieldRef" },
+            "grain": { "$ref": "semantic-query.schema.json#/$defs/grain" }
+          }
+        }
+      ]
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "visual", "position"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "visual": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,31}$",
+          "description": "A visual manifest id, for example bar or kpi."
+        },
+        "title": { "type": "string", "maxLength": 200 },
+        "position": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y", "w", "h"],
+          "properties": {
+            "x": { "type": "integer", "minimum": 0 },
+            "y": { "type": "integer", "minimum": 0 },
+            "w": { "type": "integer", "minimum": 1 },
+            "h": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "dataset": {
+          "$ref": "semantic-query.schema.json#/$defs/identifier",
+          "description": "Required when the visual has data roles."
+        },
+        "bindings": {
+          "type": "object",
+          "description": "Role name to bound fields. The backend derives the semantic query from these plus the filters.",
+          "propertyNames": { "pattern": "^[a-z][a-zA-Z0-9]{0,31}$" },
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/binding" },
+            "maxItems": 20
+          }
+        },
+        "filters": {
+          "type": "array",
+          "description": "Fixed filters for this item only.",
+          "items": { "$ref": "semantic-query.schema.json#/$defs/filter" },
+          "maxItems": 20
+        },
+        "segments": {
+          "type": "array",
+          "items": { "$ref": "semantic-query.schema.json#/$defs/fieldRef" },
+          "uniqueItems": true
+        },
+        "sort": {
+          "type": "array",
+          "items": { "$ref": "semantic-query.schema.json#/$defs/sort" },
+          "maxItems": 10
+        },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "config": {
+          "type": "object",
+          "description": "Validated against the configSchema of the visual manifest."
+        }
+      }
+    }
+  }
+}
