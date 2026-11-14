@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opsis.invalid/spec/semantic-model.schema.json",
+  "title": "Opsis semantic model",
+  "description": "One model per dataset. Defines the dimensions, measures, joins, segments and row-level security rules that semantic queries may use. The same shape is used for YAML import and export (models/<dataset>.yml), where a top-level `dataset` key names the dataset. This schema checks structure; the backend then checks that columns exist, expressions are safe, and references resolve.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "dataset": { "$ref": "semantic-query.schema.json#/$defs/identifier" },
+    "label": { "type": "string", "maxLength": 200 },
+    "description": { "type": "string", "maxLength": 2000 },
+    "dimensions": {
+      "type": "object",
+      "propertyNames": { "$ref": "semantic-query.schema.json#/$defs/identifier" },
+      "additionalProperties": { "$ref": "#/$defs/dimension" },
+      "maxProperties": 500
+    },
+    "measures": {
+      "type": "object",
+      "propertyNames": { "$ref": "semantic-query.schema.json#/$defs/identifier" },
+      "additionalProperties": { "$ref": "#/$defs/measure" },
+      "maxProperties": 500
+    },
+    "segments": {
+      "type": "object",
+      "description": "Named filters, usable in a query's `segments` list.",
+      "propertyNames": { "$ref": "semantic-query.schema.json#/$defs/identifier" },
+      "additionalProperties": { "$ref": "#/$defs/segment" },
+      "maxProperties": 200
+    },
+    "joins": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/join" },
+      "maxItems": 50
+    },
+    "rls": {
+      "type": "array",
+      "description": "Row-level security. Every rule that applies to the user's role is ANDed. A rule whose user attribute is missing or empty denies all rows.",
+      "items": { "$ref": "#/$defs/rlsRule" },
+      "maxItems": 50
+    }
+  },
+  "$defs": {
+    "expression": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "description": "A single SQL expression. Only plain column names of this dataset, literals, operators, CASE, CAST and a fixed list of scalar functions are allowed. No subqueries, no table functions, no aggregates."
+    },
+    "dimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "oneOf": [{ "required": ["column"] }, { "required": ["expr"] }],
+      "properties": {
+        "column": { "type": "string", "minLength": 1, "maxLength": 300, "description": "A column of the dataset." },
+        "expr": { "$ref": "#/$defs/expression" },
+        "type": { "enum": ["string", "number", "boolean", "time"] },
+        "grains": {
+          "type": "array",
+          "description": "Time dimensions only. Defaults to every grain.",
+          "items": { "$ref": "semantic-query.schema.json#/$defs/grain" },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "label": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 1000 }
+      }
+    },
+    "measure": {
+      "type": "object",
+      "additionalProperties": false,
+      "oneOf": [
+        { "required": ["agg"], "not": { "required": ["expr"] } },
+        { "required": ["expr"], "not": { "anyOf": [{ "required": ["agg"] }, { "required": ["column"] }] } }
+      ],
+      "properties": {
+        "agg": { "enum": ["sum", "count", "count_distinct", "avg", "min", "max"] },
+        "column": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "Required for every aggregation except count, where omitting it counts rows."
+        },
+        "expr": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "description": "Arithmetic over other measures of this dataset, written in braces: {total_amount} / NULLIF({gift_count}, 0)."
+        },
+        "format": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "A format name for display, for example number, percent or currency_aud."
+        },
+        "label": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 1000 }
+      }
+    },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filter"],
+      "properties": {
+        "filter": { "$ref": "#/$defs/expression" },
+        "label": { "type": "string", "maxLength": 200 }
+      }
+    },
+    "join": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["to", "on"],
+      "properties": {
+        "to": { "$ref": "semantic-query.schema.json#/$defs/identifier", "description": "The dataset to join to." },
+        "type": { "enum": ["left", "inner"], "default": "left" },
+        "on": {
+          "type": "object",
+          "description": "Column of this dataset to column of the other dataset.",
+          "minProperties": 1,
+          "maxProperties": 8,
+          "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 300 }
+        },
+        "relationship": {
+          "enum": ["many_to_one", "one_to_one", "one_to_many"],
+          "default": "many_to_one",
+          "description": "Only many_to_one and one_to_one joins can be used in queries, because the others would double-count measures."
+        }
+      }
+    },
+    "rlsRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filter"],
+      "properties": {
+        "filter": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "description": "A boolean expression over this dataset's columns. May reference {{ user.attributes.<name> }}, {{ user.email }} and {{ user.role }}. Example: region IN {{ user.attributes.regions }}"
+        },
+        "applies_to_roles": {
+          "type": "array",
+          "items": { "enum": ["viewer", "editor", "admin"] },
+          "uniqueItems": true,
+          "minItems": 1,
+          "default": ["viewer", "editor"]
+        }
+      }
+    }
+  }
+}

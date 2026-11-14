@@ -172,6 +172,7 @@ def build_snapshot(
     incremental = previous is not None and previous.is_dir() and bool(parts(previous))
     if not incremental:
         mode = RefreshMode.FULL
+    batches = _with_distinct_names(batches)
     try:
         if mode == RefreshMode.MERGE:
             assert previous is not None
@@ -227,6 +228,30 @@ def build_snapshot(
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     return BuiltSnapshot(snapshot_id, final, row_count, size, columns)
+
+
+def distinct_names(names: list[str]) -> list[str]:
+    """Column names that differ by more than letter case.
+
+    The query engine treats "Fund" and "fund" as the same column, so the second
+    one is stored as "fund_2". Sources rarely have such columns, but a
+    spreadsheet can.
+    """
+    seen: set[str] = set()
+    result = []
+    for name in names:
+        candidate, n = name, 2
+        while candidate.lower() in seen:
+            candidate, n = f"{name}_{n}", n + 1
+        seen.add(candidate.lower())
+        result.append(candidate)
+    return result
+
+
+def _with_distinct_names(batches: Iterator[pa.RecordBatch]) -> Iterator[pa.RecordBatch]:
+    for batch in batches:
+        names = distinct_names(batch.schema.names)
+        yield batch if names == batch.schema.names else batch.rename_columns(names)
 
 
 def _schema_changed() -> str:

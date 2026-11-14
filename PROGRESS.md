@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-14 (end of Milestone 2)
+Last updated: 2026-11-14 (end of Milestone 3)
 
 ## Milestone status
 
@@ -8,8 +8,8 @@ Last updated: 2026-11-14 (end of Milestone 2)
 |---|---|
 | M0 Plan | Done, reviewed |
 | M1 Skeleton and modes | Done, reviewed, catch-up to the revised brief done |
-| M2 Data ingestion | Done, awaiting review |
-| M3 Semantic layer and queries | Not started |
+| M2 Data ingestion | Done, reviewed |
+| M3 Semantic layer and queries | Done, awaiting review |
 | M4 Dashboards and visuals | Not started |
 | M5 MCP | Not started |
 | M6 Auth and sharing | Not started |
@@ -18,8 +18,10 @@ Last updated: 2026-11-14 (end of Milestone 2)
 
 ## Review outcomes so far
 
-- M0: keep psycopg; `Australia/Melbourne`, Monday weeks, financial years in v1 (ADR-012); Apache 2.0; deviations ADR-005, 006 and 007 approved.
-- M1: brief replaced with the current version (sub-path hosting, section 3.1); ADR-013 superseded by ADR-016; `FISCAL_YEAR_LABEL` added; one-shot config check; placeholder secrets refused in server mode; `httpx2` kept.
+- **M0:** keep psycopg; `Australia/Melbourne`, Monday weeks, financial years in v1 (ADR-012); Apache 2.0; deviations ADR-005, 006 and 007 approved.
+- **M1:** brief replaced with the current version (sub-path hosting, section 3.1); ADR-013 superseded by ADR-016; `FISCAL_YEAR_LABEL` added; one-shot config check; placeholder secrets refused in server mode; `httpx2` kept.
+- **M2:** keep the built-in schema form for connections; at the start of M4 prototype rjsf with a CSP-safe validator and decide then (ADR-018). `BIND_ADDRESS` stays `0.0.0.0` in the server template and is not a required value. Editors may see connections and their non-secret settings.
+- **For the LXC work (noted at the M2 review):** the server will use port forwarding to the LXC. Check then what source address the api sees for proxied requests, because that is the address `TRUSTED_PROXIES` must list (it may be the forwarder or the Docker gateway, not the reverse proxy itself).
 
 ## What exists
 
@@ -30,73 +32,88 @@ Run: `copy .env.local.example .env`, `docker compose up -d`, open http://localho
 - `opsis/settings.py`: all flags, fail-fast rules (ADR-014), `base_path` derived from `PUBLIC_BASE_URL`, `TRUSTED_PROXIES`.
 - `opsis/main.py`: everything mounted under the base path; `index.html` served with a runtime `<base href>` and JSON config block; security headers; CSRF check (`opsis/auth/cookies.py`).
 - `opsis/auth/principal.py`: `Principal`, roles, permissions. `AUTH_MODE=none` uses a built-in admin. Other modes return 401 until M6.
-- `opsis/semantic/calendar.py`: grains, relative ranges, fiscal years and labels.
 - `opsis/api/sse.py`: SSE helper for use behind proxies (first real stream in M5).
 
 **Data ingestion (M2)**
 - Connectors: `opsis/connectors/file` (CSV, Excel), `postgres`, `mysql`, with `registry.py`, `sql_base.py` and `tabular.py`. Drop-in connectors go in `plugins/connectors/<id>/`.
-- `opsis/services/`: `connections.py` (validation, encrypted secrets, test, discover), `datasets.py`, `refresh.py` (the refresh job), `crypto.py` (Fernet).
+- `opsis/services/`: `connections.py`, `datasets.py`, `refresh.py` (the refresh job), `crypto.py` (Fernet).
 - `opsis/storage/snapshots.py`: Parquet snapshots for full, append and merge refresh; preview; cleanup.
-- `opsis/jobs/`: `queue.py` and `worker.py` (`run_one`, the worker loop, and `InlineRunner` for `JOB_RUNNER=inline`).
-- `opsis/api/ingestion.py`: `/api/connectors`, `/api/connections` (+ `/test`, `/{id}/test`, `/{id}/streams`), `/api/uploads`, `/api/datasets` (+ `/refresh`, `/preview`, `/snapshots`), `/api/jobs`.
-- Migration `0002`: `connections`, `datasets`, `snapshots`.
-- Frontend: Connections (schema-generated form, test, edit, delete), Datasets (create from a table, refresh), dataset page (preview, refresh history, snapshots), Jobs. Live status by polling.
+- `opsis/jobs/`: `queue.py` and `worker.py` (`run_one`, the worker loop, and `InlineRunner`).
+- `opsis/api/ingestion.py`: connectors, connections, uploads, datasets, jobs.
+- Frontend: Connections, Datasets, dataset page, Jobs.
 
-## How M2 and the catch-up were verified
+**Semantic layer (M3)**
+- `spec/semantic-model.schema.json`: the model format (a fourth spec file).
+- `opsis/semantic/`: `model.py` (parse, validate, starter models), `expressions.py` (the allow-list for author-written SQL), `compiler.py` (semantic query to DuckDB SQL through a sqlglot tree, with RLS), `calendar.py` (grains, ranges, fiscal years).
+- `opsis/query/duckdb_engine.py`: `DuckDBEngine` (per-query connection, memory limit, timeout) and `ResultCache` (LRU).
+- `opsis/services/models.py` (storage, YAML import and export, field lists) and `query.py` (validate, compile, run through the cache).
+- `opsis/api/semantic.py`: `GET /api/models`, `GET|PUT /api/models/{dataset}`, `/validate`, `/starter`, `/export`, and `POST /api/query` (with `previewAs` for admins and `includeSql`).
+- Migration `0003`: `semantic_models`.
+- A starter model is generated at a dataset's first refresh and follows its columns until someone edits it.
+- Frontend: Semantic models list; a model page with a query builder (measures, group by, date grain and range, one filter, segments, limit, "Run as" for RLS) and a YAML editor with Check, Save, Discard, Regenerate and Download.
+
+## How M3 was verified
 
 All on the Windows laptop with Docker Desktop.
 
-- **Backend:** 119 pytest tests pass; `ruff check`, `ruff format --check` and `mypy --strict` pass. The tests run against real Postgres and MySQL 8.4 containers and cover: every fail-fast rule and both env templates; sub-path routing, base href injection, cookie scope and CSRF; connector discovery and type mapping for both databases; CSV and Excel; full, append and merge refresh; the atomic swap, retention and a failed refresh leaving data untouched; encrypted secrets never returned, logged in errors or written to the audit log; upload limits and path tricks; awkward and hostile identifiers; both job runner modes; restart recovery.
-- **Frontend:** `tsc`, ESLint and 14 Vitest tests pass; the production build succeeds.
-- **M2 acceptance, in the Browser pane at http://localhost:8080:** created a MySQL connection through the form (Test reported "Connection works"), created a dataset from `gifts`, saw 5,000 rows and the preview, pressed Refresh now and saw a second snapshot marked Current with the first one kept. The Jobs page listed both runs.
-- **Worker mode:** with `JOB_RUNNER=worker` and the `server` profile, a refresh was claimed and completed by the worker container (`locked_by` began `worker:`). Inline mode was the default for the browser run (`inline:`).
-- **Sub-path, with the `proxytest` profile at http://localhost:8088/opsis/:** another app answers at `/`; `/opsis` redirects to `/opsis/`; deep links and refresh load; assets and API calls stay under `/opsis`; `/healthz` and `/api/config` outside the prefix are 404; the cookie is `opsis_csrf` with `Path=/opsis`; a CSV upload, connection, dataset and refresh all worked through the proxy; a POST without the CSRF header was refused.
-- **Root hosting:** the same image served the app at `/` with `<base href="/">` and `Path=/`.
-- **Forwarded headers:** with `TRUSTED_PROXIES` set to the proxy's IP only, a spoofed `X-Forwarded-For` sent straight to the api was ignored, and a request through the proxy was attributed to the real client.
-- **Config check:** the server template as shipped stopped once with three named problems (trusted proxies, database password, encryption key) and no restart loop. With those filled in, server mode started with the worker, `Secure` cookies and `Path=/opsis`.
+- **Backend:** 192 pytest tests pass; `ruff check`, `ruff format --check` and `mypy --strict` pass. New in M3 (73 tests):
+  - Every aggregation, expression measures and nested formulas, compared with results computed in plain Python over 400 generated rows.
+  - All eight grains against the calendar rules, plus a sweep of 900 consecutive dates across both week starts and six fiscal start months, for date and timestamp columns.
+  - Relative and absolute ranges, every filter operator, measure filters, segments, sort, limit, offset, truncation and the server row cap.
+  - Joins, and refusal of fan-out joins, missing joins and measures from a joined dataset.
+  - RLS: per attribute, lists and scalars, several rules, roles, `user.email` and `user.role`, rules on joined datasets, eight ways an attribute can be missing or unusable (all deny), and a broken rule blocking instead of failing open.
+  - Injection: 23 rejected expressions (subqueries, `read_csv`, `getenv`, semicolons, window and aggregate functions, parameters, unsafe casts and more), SQL inside filter values and inside user attributes, hostile field references, unsafe YAML tags.
+  - Model validation paths, starter models, engine timeout, cache keys and eviction.
+- **Acceptance, automated (`tests/test_query_api.py`):** datasets loaded from a real Postgres source through the API; semantic query results equal hand-written SQL run on the source for (1) measures by dimension with a filter and a segment, (2) financial quarters joined to another dataset over a date range, (3) a relative financial-year range. RLS preview returns exactly the rows for each attribute set.
+- **Acceptance, in the Browser pane:** on the sample `gifts` dataset I edited the model as YAML (the editor reported three deliberate mistakes with their paths, then saved the corrected model with a join and an RLS rule), ran total amount and gift count by fund, and got the same five totals as `SELECT fund_name, SUM(amount), COUNT(*) ... GROUP BY fund_name` on the MySQL source. A query grouped by donor region and financial quarter for "Last financial year" returned Q1 to Q4 FY2026. "Run as a viewer" with `{"funds": ["Library", "Sport"]}` returned those two funds only, and with `{}` returned no rows.
+- **Frontend:** `tsc`, ESLint and 17 Vitest tests pass; the production build succeeds.
 
-A bug found and fixed during this testing: two `opsis_csrf` cookies on one host (root and sub-path installs on different ports) made the CSRF check fail. See ADR-016.
+Three bugs were found by this testing and fixed: YAML reading `on:` as a boolean; the database column type re-sorting model keys; and a save that only reordered fields being skipped.
 
 Not verified:
 
-- The Proxmox LXC target and the real reverse proxy. Sub-path hosting was only tested behind the local nginx stand-in, over plain http.
-- https end to end (a `Secure` cookie through a TLS-terminating proxy). Unit tests cover the cookie attributes only.
-- The `caddy`, `tunnel` and `ollama` profiles after the profile split.
-- SSE through the proxy. The helper has a unit test; there is no stream endpoint until M5.
-- Large data. The biggest refresh run was 5,000 rows. Memory and speed at millions of rows are untested (M8 has the performance check).
-- Uploading a file by clicking through the browser form. The upload API and the form's other fields were tested; the file was sent from the page with a script.
-- A MySQL or Postgres server other than the test containers (MySQL 8.4, Postgres 16), including MariaDB and `ssl=verify`.
-- Dev mode (`compose.dev.yml`) after the M2 changes, and hot reload itself.
-- The Mermaid diagrams in a renderer, and the JSON Schemas in ajv (see ADR-018).
+- Query speed or memory on large data. The largest query ran over 5,000 rows. The 10M-row target is an M8 check.
+- The query builder at the `proxytest` sub-path. The pages use the same API client and router as the M2 screens that were tested there, but I did not repeat the browser run under `/opsis`.
+- Queries in worker mode specifically (queries run in the api process in both modes, so nothing differs, but it was only exercised in inline mode).
+- Concurrent queries under load.
+- Everything already listed as unverified for M1 and M2: the Proxmox LXC and real proxy, https end to end, the `caddy`, `tunnel` and `ollama` profiles, dev mode after recent changes, MariaDB and other server versions, and the Mermaid diagrams in a renderer.
 
 ## Deviations from the brief
 
 - ADR-005, 006, 007 (approved).
-- ADR-016: CSRF protection brought forward from M6, because M2 adds write endpoints.
+- ADR-016: CSRF protection brought forward from M6.
 - ADR-017: the CSV and Excel connector id is `file`, not `csv`.
-- ADR-018: connection forms use a small built-in schema form, not react-jsonschema-form, because ajv's compiler conflicts with the strict CSP. shadcn/ui is also not added yet. **Needs a decision before M4.**
+- ADR-018: connection forms use a small built-in schema form, not react-jsonschema-form; shadcn/ui not added yet. To be decided by a prototype at the start of M4.
+- ADR-019: a fourth spec file (`semantic-model.schema.json`); query values are SQL literals rendered by sqlglot, not bound parameters; the model editor is a plain text area (Monaco arrives with the dashboard editor in M4).
 - ADR-015: the task runner is npm scripts, not `tasks.py`; `httpx2` for the test client (approved).
 
 ## Open issues and notes
 
-- A server install is not usable until M6: `AUTH_MODE=local` or `full` shows a sign-in notice only.
+- **Timezones:** timestamps are grouped as stored. A Postgres `timestamptz` is stored in UTC, so "by day" on it means UTC days, not Melbourne days. Date columns are unaffected. See Q1.
+- Joins are one hop from the query's dataset. A dimension two joins away cannot be used yet.
+- No conditional measures (`sum(amount) where channel = 'online'`). A segment or a filter applies to the whole query.
+- No model version history. Saving replaces the model; the audit log records who and when.
+- No bulk import or export of a `models/` folder. See Q2.
+- The query builder has one filter row. The API accepts any number.
+- A server install is not usable until M6 (sign-in).
 - Merge refresh does not remove rows deleted in the source. A full rebuild does.
-- Uploads from an abandoned connection form stay on disk.
-- A connection's snapshot columns show JSON source columns as `string` (the logical JSON type is not kept in Parquet).
-- One job runs at a time per install. A long refresh delays the others.
-- There is no cancel button for a running job, and no progress figure while it runs.
-- Datasets cannot be edited after creation (mode, cursor, columns). Delete and recreate.
+- One job runs at a time per install. No cancel or progress for a running job.
+- Datasets cannot be edited after creation.
 - `cloudflared` and `ollama` images are on `latest` until M6 and M7.
-- `deploy/proxmox/README.md` and `deploy/windows/README.md` are not written yet (M6 and M8 in the brief). `deploy/proxytest/nginx.conf` is the reference proxy config meanwhile.
-- No `.mcp.json` yet (M5).
-- Risks from M0 still open: R2 (DuckDB memory in the api process), R3 (incremental refresh rewrites or relinks whole snapshots), R4 (model expressions are the main injection surface, M3), R5 (single api process), R6 (MCP mounting, M5), R8 (hot reload on the Windows filesystem), R10 (share links on RLS datasets).
+- `deploy/proxmox/README.md` and `deploy/windows/README.md` are not written yet. No `.mcp.json` yet (M5).
+- Risks still open: R2 (DuckDB memory in the api process; a per-query limit is now set), R3 (snapshot rewrite cost), R5 (single api process), R6 (MCP mounting), R8 (hot reload on the Windows filesystem), R10 (share links on RLS datasets). R4 (model expressions as an injection surface) is addressed by the allow-list and its tests.
 
 ## Questions for review
 
-- **Q1.** ADR-018: are you happy to keep the built-in schema form for connections? For M4 visual config panels, should I (a) extend it, or (b) use rjsf with a validator that works under the strict CSP? I recommend deciding after I prototype (b) at the start of M4.
-- **Q2.** Server template: `BIND_ADDRESS` defaults to `0.0.0.0` with a note to set the LXC's LAN IP. Do you want it to be a required CHANGE value that fails the config check until set?
-- **Q3.** Editors can see the list of connections and their non-secret settings (host, database, user) so they can create datasets. Should that be admin only?
+- **Q1. Timezones.** Should timestamp columns that came from a timezone-aware source be converted to `WORKSPACE_TIMEZONE` before grouping by day, week or month? I recommend yes, done in M4: record at ingestion which columns were timezone-aware, and convert those in the compiler. Timestamps without a zone (MySQL `DATETIME`, CSV) would stay as written.
+- **Q2. Models in version control.** Do you want a command that exports every model to a `models/` folder and imports from it, so models can live in git? It is small; I left it out because per-model export and import cover the brief.
+- **Q3. Admins and RLS.** Admins are exempt from row-level security unless a rule lists `admin`. Is that the default you want?
 
 ## Exact next step
 
-After review, start **M3 (Semantic layer and queries)**: tables for semantic models; model CRUD with validation; YAML import and export (`models/*.yml`); starter-model generation from a dataset's snapshot columns; the sqlglot compiler from semantic query to DuckDB SQL (dimensions, measures, expression measures, time grains including fiscal, relative ranges through `opsis/semantic/calendar.py`, filters, segments, joins, sort, limit); RLS injection with deny by default; an allow-list for model expressions; `DuckDBEngine` implementing `QueryEngine` with timeout, memory limit and row cap; the LRU result cache; `POST /api/query`; and the compiler test suite including RLS and injection attempts. A minimal UI to edit a model and run a query is enough for the M3 acceptance check.
+After review, start **M4 (Dashboards and visuals)**:
+
+1. Prototype rjsf with a CSP-safe validator (and check ajv for spec validation under the CSP), then decide ADR-018 and record it.
+2. Backend: `dashboards` and `dashboard_versions` tables; spec validation in two phases (schema, then visual manifests, model fields and grid); save creates a version; draft and published pointers; restore; derive the semantic query for an item from its bindings plus dashboard filters; `POST /api/dashboards/{id}/items/{item}/data`; manifests served from `/app/visuals`.
+3. Frontend: react-grid-layout editor with drag and resize, field wells from manifest roles, config panel from `configSchema`, Monaco JSON tab, undo and redo, version history with diff and restore; the v1 visuals (table, KPI, bar, line, area, combo, pie, scatter, text) on ECharts; filter controls; cross-filtering; theming with an accessible palette.
+4. Acceptance: build a six-visual dashboard by hand, save, reload, restore an old version, and see invalid JSON in the spec tab rejected with a clear path.

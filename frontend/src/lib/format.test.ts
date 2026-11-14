@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes, formatCell, formatDuration, timeAgo, toIdentifier } from "./format";
+import {
+  formatBytes, formatCell, formatDuration, formatMeasure, timeAgo, toIdentifier,
+} from "./format";
 
 describe("format", () => {
   it("formats sizes", () => {
@@ -28,6 +30,14 @@ describe("format", () => {
     expect(toIdentifier("My Gifts 2026")).toBe("my_gifts_2026");
     expect(toIdentifier("  --Odd/Name--  ")).toBe("odd_name");
     expect(toIdentifier("2026 gifts")).toBe("t_2026_gifts");
+  });
+
+  it("formats measures by their model format", () => {
+    expect(formatMeasure(1234.5, "currency_aud")).toBe("$1,234.50");
+    expect(formatMeasure(0.256, "percent")).toBe("25.6%");
+    expect(formatMeasure(1234.567)).toBe("1,234.57");
+    expect(formatMeasure(42, "currency_zzzzz")).toBe("42");
+    expect(formatMeasure(null, "currency_aud")).toBe("");
   });
 
   it("formats cells", () => {

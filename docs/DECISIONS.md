@@ -143,3 +143,44 @@ Short ADR entries. Newest at the bottom. "Brief" means `BUILD_BRIEF.md`. An entr
 - **Cost:** only flat schemas are supported. That covers connectors. Visual config panels in M4 may need nested objects and arrays.
 - **To decide in M4:** keep extending the built-in form, or use rjsf with a validator that does not need `eval` (for example a non-compiling JSON Schema validator behind rjsf's validator interface). The same question applies to validating dashboard specs in the browser with ajv.
 - **Also deferred:** shadcn/ui. The M2 screens use a handful of Tailwind components in `components/ui.tsx`. shadcn/ui is worth adding when dialogs, menus and popovers are needed (the M4 editor).
+- **M2 review:** keep the built-in form for connections. At the start of M4, prototype rjsf with a validator that works under the strict CSP, then decide.
+
+## ADR-019: Semantic layer and query compiler
+- **Status:** accepted, M3
+
+**Models**
+- One model per dataset, described by `spec/semantic-model.schema.json` (a fourth spec file). Stored as JSON, not JSONB, because JSONB re-sorts keys and a model must keep its author's order in field lists and YAML.
+- A starter model is generated when a dataset is first refreshed: a dimension per column, a row count, and a sum for each numeric column that is not an identifier. While nobody has edited it, it is regenerated on each refresh so it follows the source's columns. The first save makes it "edited" and it is never touched again.
+- Validation is two-phase like dashboards (ADR-004): the schema, then columns, expressions, measure references and cycles, joins and RLS rules. Every problem has a JSON pointer path.
+- YAML uses the YAML 1.2 rule for booleans (only `true` and `false`). Under YAML 1.1 the `on:` key of a join is read as `True`.
+- Not built: model version history, and a command to sync a whole `models/` folder. Export and import are per model, through the API and the UI.
+
+**Expressions (risk R4)**
+- Dimension expressions, segment filters, RLS filters and measure formulas are parsed with sqlglot and every node is checked against an allow-list in `opsis/semantic/expressions.py`: columns of the dataset, literals, operators, CASE, CAST to basic types, and a fixed list of scalar functions. Subqueries, table functions, aggregates, window functions, parameters and unknown functions are rejected by name.
+- Non-deterministic functions (`now()`, `current_date`, `random()`) are not allowed, so a cached result is always the right result. Relative dates come from query ranges instead.
+- A measure formula may only combine other measures (`{total} / NULLIF({count}, 0)`). It cannot contain a column or an aggregate, so every aggregate in a query comes from a declared base measure.
+
+**Compiler**
+- Output is one SELECT built as a sqlglot tree. Field references are looked up in the model; values become literals in the tree; sqlglot renders the text. Values are literals, not bound parameters, so the SQL text alone identifies the result (see the cache). This narrows the M0 note that said "values as parameters".
+- Every grain returns the start date of its period (ADR-012). The SQL truncation is tested against `calendar.period_start` for every grain, both week starts and six fiscal start months.
+- Joins: only joins declared in the base dataset's model, one hop, and only `many_to_one` or `one_to_one`. Dimensions may come from the joined dataset; measures must come from the base dataset. A `one_to_many` join is refused because it would double-count.
+- Text matching (`contains`, `starts_with`, `ends_with`) is case-insensitive and literal: `%` and `_` in the value are ordinary characters.
+- Filters on measures become HAVING. Decimal results are sent to the browser as JSON numbers; exact decimals stay in the snapshot.
+- A query's row limit is capped by `QUERY_MAX_ROWS` (default 10,000); one extra row is fetched to report `truncated`.
+
+**Row-level security**
+- A dataset's rules are applied inside the subquery that reads its snapshot, so no filter, join or segment can widen them. On a joined dataset this hides that dataset's rows (the joined fields become null); it does not remove rows of the base dataset.
+- Rules that apply to the user's role are ANDed. The default roles are viewer and editor; admins are exempt unless a rule lists them.
+- A rule whose user attribute is missing, empty, or not a text, number or boolean (or list of those) denies every row. A list is only valid after `IN`.
+- A rule that fails to compile blocks queries on that dataset for the roles it applies to. It never fails open.
+- User values are substituted as literals in the tree. A value containing SQL is just a string that matches nothing.
+- Admins can run a query as another role and attribute set (`previewAs`) to test rules. No other role can.
+
+**Engine and cache**
+- `DuckDBEngine` opens an in-memory connection per query, with a memory limit, a thread cap, a temp directory, extension auto-install and auto-load switched off, and a watchdog timer that interrupts the query at `QUERY_TIMEOUT_SECONDS`.
+- `ResultCache` is an LRU per process (`QUERY_CACHE_ENTRIES`, default 200) keyed by a hash of the SQL. The SQL contains the snapshot path, the user's RLS values and relative dates resolved to real dates, so a refresh, a different user or a new day each produce a different key without any invalidation logic.
+
+**Other**
+- DuckDB treats column names case-insensitively, so columns that differ only by case are stored under distinct names at ingestion (`Fund`, `fund_2`).
+- Reading models and running queries needs `dashboards:edit`; saving a model needs `models:edit`. Viewers will query through published dashboards (M4), not through `/api/query`.
+- **Known limit, timezones:** timestamps are grouped as stored. A `timestamptz` from Postgres is stored in UTC, so "by day" means UTC days, not `WORKSPACE_TIMEZONE` days. Date columns are unaffected. See the question in `PROGRESS.md`.

@@ -2,7 +2,7 @@
 
 A self-hosted, AI-native business intelligence platform. Open source, Docker-based, and built so that a person and an AI agent edit the same dashboards.
 
-**Status:** early development. You can connect to CSV or Excel files, PostgreSQL and MySQL, pull tables into local storage, refresh them and preview the rows. The semantic layer, dashboards, the MCP server and sign-in are being built milestone by milestone. See [PROGRESS.md](PROGRESS.md).
+**Status:** early development. You can connect to CSV or Excel files, PostgreSQL and MySQL, pull tables into local storage, define a semantic model for each dataset (dimensions, measures, joins, row-level security) and run queries against it. Dashboards, the MCP server and sign-in are being built milestone by milestone. See [PROGRESS.md](PROGRESS.md).
 
 ## Quick start
 
@@ -26,6 +26,35 @@ Set `COMPOSE_PROFILES=sample` in `.env` and run `docker compose up -d` again. Th
 3. The dataset page shows a preview, the refresh history and the snapshots kept. Refresh now makes a new snapshot.
 
 To use your own data, add a connection of type CSV or Excel file (upload it in the form), PostgreSQL or MySQL.
+
+### Semantic models
+
+Every dataset gets a generated model on its first refresh. Open **Semantic models**, choose a dataset, and you can:
+
+- **Try a query:** tick measures and dimensions, choose a date field with a grain (including financial quarter and year) and a range such as "Last financial year", and run it. The generated SQL is shown under the result.
+- **Edit the model as YAML:** rename fields, add measures such as `avg_gift: {expr: "{total_amount} / NULLIF({gift_count}, 0)"}`, join to another dataset, or add row-level security. Check reports every problem with its location; Save stores it.
+- **Test row-level security:** as an admin, set "Run as" to a viewer and give that user's attributes as JSON.
+
+A model with a join and a security rule:
+
+```yaml
+dataset: gifts
+dimensions:
+  fund_name: {column: fund_name, type: string, label: Fund}
+  gift_date: {column: gift_date, type: time}
+measures:
+  total_amount: {agg: sum, column: amount, format: currency_aud}
+  gift_count: {agg: count}
+  avg_gift: {expr: "{total_amount} / NULLIF({gift_count}, 0)", format: currency_aud}
+joins:
+  - to: donors
+    on: {donor_id: id}
+    relationship: many_to_one
+rls:
+  - filter: "fund_name IN {{ user.attributes.funds }}"
+```
+
+The rule above lets viewers and editors see only the funds listed in their `funds` attribute. A user with no such attribute sees no rows. The full format is in [spec/semantic-model.schema.json](spec/semantic-model.schema.json).
 
 ### Server
 
@@ -107,6 +136,9 @@ Everything is set in `.env`. The two templates document each value. After a chan
 | `FISCAL_YEAR_LABEL` | `fy_end_year` ("FY2027") or `year_span` ("2026-27") | `fy_end_year` | same |
 | `MAX_UPLOAD_MB` | Largest CSV or Excel upload | `200` | same |
 | `SNAPSHOT_RETENTION` | Snapshots kept per dataset (minimum 2) | `3` | same |
+| `QUERY_TIMEOUT_SECONDS` | A query running longer than this is stopped | `30` | same |
+| `QUERY_MAX_ROWS` | Most rows one query may return | `10000` | same |
+| `QUERY_MEMORY_LIMIT_MB` | Memory one query may use before spilling to disk | `1024` | same |
 | `ENCRYPTION_KEY` | Encrypts saved connection passwords | empty (generated and kept in the data volume) | required |
 | `POSTGRES_PASSWORD` | Password of the internal metadata database | template value | required, 12 characters or more |
 | `APP_NAME` | Product name shown in the UI | `Opsis` | same |

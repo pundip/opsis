@@ -20,6 +20,8 @@ dependencies = [
     "duckdb>=1.1",
     "pymysql>=1.1",
     "openpyxl>=3.1",
+    "sqlglot>=25",
+    "pyyaml>=6",
 ]
 
 [dependency-groups]
@@ -54,7 +56,7 @@ plugins = ["pydantic.mypy"]
 files = ["opsis"]
 
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "pymysql.*", "openpyxl.*", "jsonschema.*", "duckdb.*"]
+module = ["pyarrow.*", "pymysql.*", "openpyxl.*", "jsonschema.*", "duckdb.*", "yaml.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

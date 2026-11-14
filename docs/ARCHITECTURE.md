@@ -119,10 +119,28 @@ sequenceDiagram
   K-->>V: columns + rows + truncated flag
 ```
 
-- Viewers never send a semantic query for a dashboard: they send an item id plus filter values, and the backend derives the query from the **published** spec. Editors and the agent may send semantic queries directly (`run_query`), still through the compiler.
+- Viewers never send a semantic query for a dashboard: they send an item id plus filter values, and the backend derives the query from the **published** spec (M4). Editors and the agent may send semantic queries directly (`POST /api/query`, later `run_query`), still through the compiler.
 - User input only ever becomes sqlglot literals or identifiers resolved against the model. Model expressions (`expr`, RLS filters, segments) are parsed with sqlglot and restricted to an allow-list of expression nodes; `{measure}` and `{{ user.attributes.x }}` placeholders are substituted as AST nodes, never as text.
 - A user with no matching value for an RLS attribute gets a predicate that is false (deny by default).
 - The engine opens a short-lived DuckDB connection per query, read-only over Parquet, with a memory limit and a watchdog that interrupts at the timeout.
+
+The compiled SQL always has this shape. Row-level security sits inside the subquery that reads each dataset:
+
+```sql
+SELECT "gifts"."fund" AS "gifts.fund",
+       CAST(DATE_TRUNC('quarter', ("gifts"."gift_date") - INTERVAL '6' MONTH) + INTERVAL '6' MONTH AS DATE) AS "gifts.gift_date",
+       SUM("gifts"."amount") AS "gifts.total_amount"
+FROM (SELECT * FROM READ_PARQUET('<snapshot>/part-*.parquet') AS "gifts"
+      WHERE ("gifts"."region" IN ('VIC'))) AS "gifts"
+LEFT JOIN (SELECT * FROM READ_PARQUET('<snapshot>/part-*.parquet') AS "donors") AS "donors"
+       ON "gifts"."donor_id" = "donors"."id"
+WHERE "gifts"."gift_date" >= CAST('2025-07-01' AS DATE) AND "gifts"."gift_date" < CAST('2026-07-01' AS DATE)
+GROUP BY 1, 2
+ORDER BY "gifts.gift_date" ASC
+LIMIT 501
+```
+
+Code map: `opsis/semantic/model.py` (parse, validate, starter), `expressions.py` (allow-list), `compiler.py`, `calendar.py`; `opsis/query/duckdb_engine.py` (engine and cache); `opsis/services/models.py` and `query.py`; `opsis/api/semantic.py`. Details and rules are in ADR-019.
 
 ### Calendar and financial years
 
@@ -181,6 +199,7 @@ Bootstrap: on first start, `ADMIN_EMAIL` and `ADMIN_INITIAL_PASSWORD` create the
 | File | What it defines |
 |---|---|
 | `spec/semantic-query.schema.json` | The query shape, plus shared definitions (field reference, range, filter, sort) |
+| `spec/semantic-model.schema.json` | A dataset's semantic model: dimensions, measures, segments, joins, RLS |
 | `spec/dashboard.schema.json` | The dashboard spec, referencing the shared definitions |
 | `spec/visual-manifest.schema.json` | A visual plugin manifest |
 | `frontend/src/visuals/bar/manifest.json` | Example manifest |

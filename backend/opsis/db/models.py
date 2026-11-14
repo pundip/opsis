@@ -25,7 +25,7 @@ from sqlalchemy import (
     text,
     true,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSON, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 NAMING_CONVENTION = {
@@ -170,6 +170,29 @@ class Snapshot(Base):
     mode: Mapped[str] = mapped_column(String(20))  # how this snapshot was built
     job_id: Mapped[uuid.UUID | None] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SemanticModel(Base):
+    """The semantic model of one dataset (spec/semantic-model.schema.json)."""
+
+    __tablename__ = "semantic_models"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    dataset_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("datasets.id", ondelete="CASCADE"), unique=True
+    )
+    # JSON, not JSONB: JSONB re-sorts keys, and a model must keep the order its
+    # author wrote (fields are listed and exported to YAML in that order).
+    definition: Mapped[dict[str, Any]] = mapped_column(JSON)
+    # True until someone edits it: a generated starter can be regenerated safely.
+    is_starter: Mapped[bool] = mapped_column(default=True, server_default=true())
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class Job(Base):

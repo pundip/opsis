@@ -1,4 +1,4 @@
-"""Query engine interface (Milestone 0 stub: types and protocol only).
+"""Query engine interface.
 
 The engine executes already-compiled SQL against dataset snapshots. It does not
 know about the semantic model, RLS or users: the compiler (opsis.semantic)
@@ -12,6 +12,7 @@ Flow: semantic query -> compiler (sqlglot AST, RLS, row cap) -> CompiledQuery
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
@@ -33,18 +34,19 @@ class TableRef:
 
 @dataclass(frozen=True)
 class CompiledQuery:
-    sql: str  # a single SELECT in the engine dialect, values as parameters
+    sql: str  # a single SELECT in the engine dialect
     params: tuple[Any, ...]
     tables: tuple[TableRef, ...]
-    row_limit: int  # hard cap; the engine fetches row_limit + 1 to detect truncation
+    row_limit: int  # the SQL asks for row_limit + 1 rows so truncation can be detected
     timeout_s: float
 
-    def cache_key(self, rls_context_hash: str) -> str:
-        """Hash of (sql, params, snapshot ids, RLS context).
-
-        A refresh changes the snapshot id, so stale entries are never hit.
+    def cache_key(self) -> str:
+        """Identifies the result. The SQL already contains everything that can
+        change it: the snapshot paths (a refresh makes a new one), the RLS
+        values of the user, and relative dates resolved to real dates.
         """
-        raise NotImplementedError
+        material = repr((self.sql, self.params, self.row_limit))
+        return hashlib.sha256(material.encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -53,11 +55,12 @@ class ResultColumn:
     type: ColumnType
     role: str  # "dimension" | "measure" | "time"
     format: str | None = None  # measure format name, e.g. "currency_aud"
+    label: str | None = None
+    grain: str | None = None  # for the time column
 
 
 @dataclass(frozen=True)
 class QueryResult:
-    columns: tuple[ResultColumn, ...]
     table: pa.Table
     row_count: int
     truncated: bool  # more rows existed than row_limit

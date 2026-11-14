@@ -1,0 +1,149 @@
+// Types and data hooks for semantic models and queries.
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiGet, apiPost, apiPut } from "./api";
+import type { Column } from "./data";
+
+export type Grain =
+  | "day" | "week" | "month" | "quarter" | "year"
+  | "fiscal_month" | "fiscal_quarter" | "fiscal_year";
+
+export interface ModelSummary {
+  dataset: string;
+  label: string;
+  hasData: boolean;
+  saved: boolean;
+  isStarter: boolean;
+  dimensions: number;
+  measures: number;
+  joins: string[];
+  rlsRules: number;
+  updatedAt: string | null;
+}
+
+export interface Field {
+  ref: string; // "gifts.total_amount"
+  kind: "dimension" | "measure" | "segment";
+  type: "string" | "number" | "boolean" | "time";
+  label: string;
+  dataset: string;
+  grains?: Grain[];
+  format?: string | null;
+}
+
+export interface ModelDetail {
+  dataset: { id: string; name: string; label: string; hasData: boolean; columns: Column[] };
+  definition: Record<string, unknown>;
+  yaml: string;
+  fields: Field[];
+  isStarter: boolean;
+  saved: boolean;
+  updatedAt: string | null;
+}
+
+export interface Problem {
+  path: string;
+  message: string;
+}
+
+export interface SemanticQuery {
+  dataset: string;
+  dimensions?: string[];
+  measures?: string[];
+  timeDimension?: { field: string; grain?: Grain; range?: { relative: string } };
+  segments?: string[];
+  filters?: { field: string; op: string; values?: (string | number | boolean)[] }[];
+  sort?: { field: string; dir: "asc" | "desc" }[];
+  limit?: number;
+}
+
+export interface ResultColumn {
+  name: string;
+  label: string | null;
+  type: string;
+  role: "dimension" | "measure" | "time";
+  format: string | null;
+  grain: Grain | null;
+}
+
+export interface QueryResult {
+  columns: ResultColumn[];
+  rows: unknown[][];
+  rowCount: number;
+  truncated: boolean;
+  elapsedMs: number;
+  cacheHit: boolean;
+  sql?: string;
+}
+
+export interface PreviewAs {
+  role: "viewer" | "editor" | "admin";
+  attributes: Record<string, unknown>;
+}
+
+export function useModels() {
+  return useQuery({ queryKey: ["models"], queryFn: () => apiGet<ModelSummary[]>("/api/models") });
+}
+
+export function useModel(dataset: string) {
+  return useQuery({
+    queryKey: ["models", dataset],
+    queryFn: () => apiGet<ModelDetail>(`/api/models/${dataset}`),
+  });
+}
+
+export function useSaveModel(dataset: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (yaml: string) => apiPut<ModelDetail>(`/api/models/${dataset}`, { yaml }),
+    onSuccess: (saved) => {
+      client.setQueryData(["models", dataset], saved);
+      void client.invalidateQueries({ queryKey: ["models"] });
+    },
+  });
+}
+
+export function useValidateModel(dataset: string) {
+  return useMutation({
+    mutationFn: (yaml: string) =>
+      apiPost<{ valid: boolean; problems: Problem[] }>(`/api/models/${dataset}/validate`, { yaml }),
+  });
+}
+
+export function useStarterModel(dataset: string) {
+  return useMutation({
+    mutationFn: () => apiGet<{ yaml: string }>(`/api/models/${dataset}/starter`),
+  });
+}
+
+export function useRunQuery() {
+  return useMutation({
+    mutationFn: (input: { query: SemanticQuery; previewAs?: PreviewAs }) =>
+      apiPost<QueryResult>("/api/query", { ...input, includeSql: true }),
+  });
+}
+
+export const RELATIVE_RANGES: [string, string][] = [
+  ["", "All dates"],
+  ["this_month", "This month"],
+  ["last_month", "Last month"],
+  ["last_30_days", "Last 30 days"],
+  ["last_12_months", "Last 12 months"],
+  ["this_year", "This calendar year"],
+  ["last_year", "Last calendar year"],
+  ["this_fiscal_year", "This financial year"],
+  ["last_fiscal_year", "Last financial year"],
+  ["fiscal_year_to_date", "Financial year to date"],
+  ["this_fiscal_quarter", "This financial quarter"],
+  ["last_fiscal_quarter", "Last financial quarter"],
+];
+
+export const GRAIN_LABELS: Record<Grain, string> = {
+  day: "Day",
+  week: "Week",
+  month: "Month",
+  quarter: "Quarter",
+  year: "Year",
+  fiscal_month: "Financial period",
+  fiscal_quarter: "Financial quarter",
+  fiscal_year: "Financial year",
+};

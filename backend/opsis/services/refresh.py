@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from opsis.connectors.base import ConnectorError, ReadOptions, RefreshMode
 from opsis.db.models import Connection, Dataset, Job, Snapshot
 from opsis.errors import JobError
-from opsis.services import connections
+from opsis.services import connections, models
 from opsis.settings import Settings
 from opsis.storage import snapshots
 
@@ -98,6 +98,8 @@ def run_refresh(db: Session, job: Job, settings: Settings) -> dict[str, Any]:
     locked.current_snapshot_id = built.snapshot_id
     if dataset.refresh_mode != RefreshMode.FULL.value:
         locked.state = new_state or locked.state
+    # A new dataset gets a starter semantic model; an unedited starter follows the columns.
+    models.ensure_starter(db, locked, {c["name"]: c["type"] for c in built.columns})
     db.flush()
     return {
         "snapshotId": str(built.snapshot_id),

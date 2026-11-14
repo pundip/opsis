@@ -23,6 +23,39 @@ export function fiscalYearLabel(year: number, month: number, calendar: Calendar)
   return `${startYear}-${String(endYear % 100).padStart(2, "0")}`;
 }
 
+const SHORT_MONTHS = MONTHS.map((name) => name.slice(0, 3));
+
+/**
+ * Display label for a period, given its start date ("2026-10-01") and grain.
+ * The backend always returns period start dates; this is where they get names.
+ */
+export function periodLabel(startIso: string, grain: string, calendar: Calendar): string {
+  const [year, month, day] = startIso.slice(0, 10).split("-").map(Number) as [number, number, number];
+  const monthName = SHORT_MONTHS[month - 1] ?? "";
+  const fiscalYear = () => fiscalYearLabel(year, month, calendar);
+  const monthsIntoFiscalYear = (month - calendar.fiscalYearStartMonth + 12) % 12;
+  switch (grain) {
+    case "day":
+      return `${day} ${monthName} ${year}`;
+    case "week":
+      return `Week of ${day} ${monthName} ${year}`;
+    case "month":
+      return `${monthName} ${year}`;
+    case "quarter":
+      return `Q${Math.floor((month - 1) / 3) + 1} ${year}`;
+    case "year":
+      return String(year);
+    case "fiscal_month":
+      return `${monthName} ${year} (P${monthsIntoFiscalYear + 1})`;
+    case "fiscal_quarter":
+      return `Q${Math.floor(monthsIntoFiscalYear / 3) + 1} ${fiscalYear()}`;
+    case "fiscal_year":
+      return fiscalYear();
+    default:
+      return startIso;
+  }
+}
+
 /** Today's year and month in the workspace timezone. */
 export function todayIn(timezone: string, now = new Date()): { year: number; month: number } {
   const parts = new Intl.DateTimeFormat("en-CA", {

@@ -11,6 +11,7 @@ import base64
 import binascii
 import ipaddress
 import re
+from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -20,6 +21,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
+
+from opsis.semantic.calendar import CalendarConfig
 
 LOCAL_HOSTNAMES = {"localhost", "127.0.0.1", "::1", "[::1]"}
 BASE_PATH_RE = re.compile(r"^(/[A-Za-z0-9._~-]+)*$")
@@ -112,11 +115,19 @@ class Settings(BaseSettings):
     snapshot_retention: int = Field(default=3, ge=2, le=100)
     sse_keepalive_seconds: int = Field(default=15, ge=1, le=300)
 
+    # Queries
+    query_timeout_seconds: float = Field(default=30, gt=0, le=600)
+    query_max_rows: int = Field(default=10_000, ge=1, le=100_000)
+    query_memory_limit_mb: int = Field(default=1024, ge=64, le=1_000_000)
+    query_threads: int = Field(default=4, ge=1, le=64)
+    query_cache_entries: int = Field(default=200, ge=0, le=10_000)
+
     # Paths inside the container
     data_dir: Path = Path("/data")
     static_dir: Path = Path("/app/static")
     branding_file: Path = Path("/app/branding.json")
     plugins_dir: Path = Path("/app/plugins")
+    spec_dir: Path = Path("/app/spec")
 
     log_level: Literal["debug", "info", "warning", "error"] = "info"
 
@@ -252,6 +263,18 @@ class Settings(BaseSettings):
     @property
     def cookie_path(self) -> str:
         return self.base_path or "/"
+
+    @property
+    def calendar(self) -> CalendarConfig:
+        return CalendarConfig(
+            week_start=self.week_start,
+            fiscal_year_start_month=self.fiscal_year_start_month,
+            fiscal_year_label=self.fiscal_year_label,
+        )
+
+    def today(self) -> date:
+        """The current date in the workspace timezone (relative ranges use it)."""
+        return datetime.now(ZoneInfo(self.workspace_timezone)).date()
 
     @property
     def trusted_proxy_list(self) -> list[str]:

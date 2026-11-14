@@ -21,11 +21,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from opsis import __version__
-from opsis.api import ingestion, system
+from opsis.api import ingestion, semantic, system
 from opsis.api.errors import ApiError, install_error_handlers
 from opsis.auth import cookies
 from opsis.jobs.worker import InlineRunner
+from opsis.query.duckdb_engine import DuckDBEngine, ResultCache
 from opsis.services import users
+from opsis.services.query import QueryRuntime
 from opsis.settings import Settings, load_settings
 
 log = logging.getLogger("opsis")
@@ -79,6 +81,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.session_factory = session_factory
+    app.state.query_runtime = QueryRuntime(
+        engine=DuckDBEngine(
+            memory_limit_mb=settings.query_memory_limit_mb,
+            threads=settings.query_threads,
+            temp_dir=settings.data_dir / "tmp" / "duckdb",
+        ),
+        cache=ResultCache(settings.query_cache_entries),
+    )
     install_error_handlers(app)
 
     @app.middleware("http")
@@ -127,6 +137,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 def register_feature_routers(api: APIRouter) -> None:
     """Every feature router is included here, under the base path."""
     api.include_router(ingestion.router)
+    api.include_router(semantic.router)
 
 
 def render_index(settings: Settings) -> str | None:

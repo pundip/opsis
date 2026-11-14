@@ -64,6 +64,24 @@ export function toIdentifier(text: string): string {
   return safe.slice(0, 63);
 }
 
+/** A measure value for display. `format` is the model's format name. */
+export function formatMeasure(value: unknown, format?: string | null): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value !== "number") return String(value);
+  if (format?.startsWith("currency_")) {
+    const currency = format.slice("currency_".length).toUpperCase();
+    try {
+      return new Intl.NumberFormat("en-AU", { style: "currency", currency }).format(value);
+    } catch {
+      // Unknown currency code: fall through to a plain number.
+    }
+  }
+  if (format === "percent") {
+    return new Intl.NumberFormat("en-AU", { style: "percent", maximumFractionDigits: 1 }).format(value);
+  }
+  return new Intl.NumberFormat("en-AU", { maximumFractionDigits: 2 }).format(value);
+}
+
 export function formatCell(value: unknown, type?: string): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "boolean") return value ? "true" : "false";
