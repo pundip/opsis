@@ -48,12 +48,3 @@ export function navItems(config: AppConfig, me: Me | null): NavItem[] {
     return true;
   }).map(({ path, label, group }) => ({ path, label, group }));
 }
-
-const MONTHS = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-];
-
-export function monthName(month: number): string {
-  return MONTHS[month - 1] ?? `Month ${month}`;
-}

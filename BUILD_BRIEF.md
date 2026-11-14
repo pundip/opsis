@@ -69,12 +69,13 @@ Primary user: a data operations manager, strong in Python and SQL, whose main so
 | `MCP_AUTH` | `none` (only when bound to 127.0.0.1) / `token` | `none` | `token` |
 | `FEATURE_SQL_LAB` | Admin-only read-only raw SQL | `true` | `false` |
 | `FEATURE_BACKUPS` | Nightly backup job | `false` | `true` |
-| `BIND_ADDRESS` | Host interface for the published port | `127.0.0.1` | n/a (only Caddy publishes) |
-| `PUBLIC_BASE_URL` | Used for OAuth redirects and share links | `http://localhost:8080` | `https://bi.example.com` |
+| `BIND_ADDRESS` | Host interface for the published port | `127.0.0.1` | the LXC's LAN IP (reached by my reverse proxy) |
+| `PUBLIC_BASE_URL` | The externally visible URL. The app derives its base path from it (empty locally, `/opsis` on the server). Used for routing, OAuth redirects, share links and MCP URLs | `http://localhost:8080` | `https://urlloom.com/opsis` |
+| `TRUSTED_PROXIES` | IPs allowed to set `X-Forwarded-*` headers | (empty) | my reverse proxy's IP |
 
 Rules:
 
-- A typed settings module (pydantic-settings) parses flags once at startup. **Invalid combinations fail fast** with a clear message, for example `AUTH_MODE=none` with a non-loopback bind, or public share links with `AUTH_MODE=none`.
+- A typed settings module (pydantic-settings) parses flags once at startup. **Invalid combinations fail fast** with a clear message, for example `AUTH_MODE=none` with a non-loopback bind, public share links with `AUTH_MODE=none`, or an `https` `PUBLIC_BASE_URL` with no `TRUSTED_PROXIES` set.
 - **Flags are enforced in the backend** (routes return 404 when a feature is off), not just hidden in the UI.
 - `GET /api/config` returns the non-secret flags. The frontend uses it to show or hide features.
 - The MCP server **only registers tools for enabled features**.
@@ -84,9 +85,70 @@ Compose profiles:
 | Profile | Services |
 |---|---|
 | (none) | `api`, `postgres` |
-| `server` | adds `worker`, `caddy` |
-| `tunnel` | adds `cloudflared` |
+| `server` | adds `worker` |
+| `caddy` | adds a bundled Caddy proxy, only for installs without their own reverse proxy (not used on my server) |
+| `tunnel` | adds `cloudflared` (optional) |
 | `ollama` | adds an `ollama` container (optional; on Windows, Ollama runs natively on the host instead) |
+| `proxytest` | adds an nginx container that mimics the server's sub-path setup on the laptop (see 3.1) |
+
+### 3.1 Hosting at a sub-path behind my existing reverse proxy
+
+On the server, Opsis is served at **`https://urlloom.com/opsis`** through the reverse proxy I already use for other LXC projects on the same domain. That proxy terminates TLS and forwards to the LXC. Getting sub-path hosting right is a first-class requirement from Milestone 1, not a deployment afterthought.
+
+**One setting drives everything.**
+- `PUBLIC_BASE_URL=https://urlloom.com/opsis`. The app derives `BASE_PATH=/opsis` from it.
+- Locally the base path is empty and Opsis runs at the root.
+- No URL or path is ever hard-coded.
+
+**The app owns the prefix.**
+- Every route is mounted under `BASE_PATH`: UI, `/api`, `/mcp`, share links and health checks.
+- The proxy forwards the path unchanged (no prefix stripping), so behaviour doesn't depend on proxy quirks.
+- Requests outside `BASE_PATH` return 404.
+
+**The frontend base path is set at runtime, not build time**, because the same image runs at `/` and at `/opsis`.
+- Build with Vite `base: './'`.
+- The backend serves `index.html` with an injected `<base href="{BASE_PATH}/">` and a JSON config block, for example `<script id="opsis-config" type="application/json">`, that the bundle reads at startup.
+- React Router's `basename`, the API client and SSE URLs all come from that config.
+- Deep links such as `/opsis/dashboards/42` and browser refresh must work, with the SPA fallback active only inside `BASE_PATH`.
+
+**Isolation on a shared domain.** Other apps share the `urlloom.com` origin, so:
+- Cookies use `Path=/opsis`, and their names are prefixed `opsis_` (session, CSRF), so they never collide with or leak to other apps.
+- Auth tokens live only in HttpOnly cookies, never in localStorage or sessionStorage. Any non-sensitive localStorage keys are prefixed `opsis:`.
+- A strict CSP with no inline scripts; the injected config is a JSON data block, not executable script.
+- The app does not send HSTS when behind an external proxy, because HSTS applies to the whole domain and is the proxy's decision.
+
+**Forwarded headers.**
+- Run Uvicorn with proxy headers enabled, trusting only `TRUSTED_PROXIES`.
+- The app then sees `https` (for Secure cookies and correct redirect URIs) and the real client IP (for rate limiting and the audit log).
+- Forwarded headers from any other IP are ignored.
+
+**Streaming through the proxy.**
+- SSE (live editor updates) and MCP Streamable HTTP must survive the proxy.
+- The app sends `X-Accel-Buffering: no` and a keep-alive comment every 15 s.
+- The docs list the proxy settings: buffering off and a long read timeout.
+
+**Uploads.** The app has a configurable upload limit (default 200 MB), and the docs remind me to raise the proxy's request body limit to match.
+
+**Resulting URLs**, all derived from `PUBLIC_BASE_URL`:
+
+| Purpose | URL |
+|---|---|
+| App | `https://urlloom.com/opsis/` |
+| Google OAuth redirect URI | `https://urlloom.com/opsis/api/auth/google/callback` |
+| Google authorised JavaScript origin | `https://urlloom.com` |
+| MCP endpoint | `https://urlloom.com/opsis/mcp` |
+| Share links | `https://urlloom.com/opsis/s/<token>` |
+| Health check | `https://urlloom.com/opsis/healthz` |
+
+**MCP OAuth (later milestone).** OAuth discovery documents normally sit at the domain root (`/.well-known/...`). Use the path-aware form, for example `/.well-known/oauth-protected-resource/opsis/mcp`, and document the extra proxy rule that routes it to Opsis.
+
+**Proxy docs.** `deploy/proxmox/README.md` includes ready-to-paste configs that preserve the prefix:
+- **Nginx (including a Nginx Proxy Manager custom location):**
+  - `location /opsis/ { proxy_pass http://<lxc-ip>:8080; ... }`. Note there is no URI part on `proxy_pass`, so the prefix is kept.
+  - Add `location = /opsis { return 301 /opsis/; }`, plus the forwarded headers, `proxy_buffering off` and `proxy_read_timeout` for streaming, and `client_max_body_size`.
+- **Caddy:** `redir /opsis /opsis/` and `handle /opsis/* { reverse_proxy <lxc-ip>:8080 }`. Use `handle`, not `handle_path`, which would strip the prefix.
+
+**Test it on the laptop.** The `proxytest` profile runs nginx with the same config, serving Opsis at `http://localhost:8088/opsis/` and a dummy page at `/`. Sub-path behaviour, cookies and streaming can then be verified locally, including in the desktop app's Browser pane, before deploying.
 
 ---
 
@@ -94,10 +156,10 @@ Compose profiles:
 
 Services:
 
-- **`api`**: FastAPI app on Python 3.12. Serves the REST API under `/api`, the MCP server under `/mcp`, and the built frontend as static files. Runs jobs in-process when `JOB_RUNNER=inline`.
+- **`api`**: FastAPI app on Python 3.12. Serves everything under `BASE_PATH` (see 3.1): the REST API at `{BASE_PATH}/api`, the MCP server at `{BASE_PATH}/mcp`, and the built frontend as static files. Runs jobs in-process when `JOB_RUNNER=inline`.
 - **`worker`** (`server` profile): same image, different command. Runs refresh jobs, schedules, backups and emails. The job queue is a Postgres table using `SELECT ... FOR UPDATE SKIP LOCKED`. **No Redis.**
 - **`postgres`**: Postgres 16, used in both modes for parity. Holds metadata only: users, sessions, connections, datasets, models, dashboards, versions, shares, audit log and jobs.
-- **`caddy`** (`server` profile): reverse proxy, TLS (automatic HTTPS on a public domain, or plain HTTP behind a tunnel), security headers.
+- **`caddy`** (`caddy` profile, optional): a bundled reverse proxy with TLS for installs that don't already have one. My server doesn't use it; my existing proxy fronts Opsis (see 3.1).
 - **`cloudflared`** (`tunnel` profile): optional Cloudflare Tunnel for external access.
 
 Analytical storage and query:
@@ -330,7 +392,7 @@ The Docker build copies all manifests into the backend image, so the API and MCP
 **Transport.** Built with the official MCP Python SDK and mounted in `api` at `/mcp` (Streamable HTTP). It calls the same service layer as REST, so there is no duplicated business logic.
 
 **Client setup to document:**
-- Claude Code (desktop Code tab or CLI): a project-level `.mcp.json` in the repo pointing at `http://localhost:8080/mcp`, so the agent building Opsis can also test Opsis through its own MCP server. For the server, document `claude mcp add --transport http opsis https://<host>/mcp` plus an `Authorization: Bearer <PAT>` header.
+- Claude Code (desktop Code tab or CLI): a project-level `.mcp.json` in the repo pointing at `http://localhost:8080/mcp`, so the agent building Opsis can also test Opsis through its own MCP server. For the server, document `claude mcp add --transport http opsis https://urlloom.com/opsis/mcp` plus an `Authorization: Bearer <PAT>` header.
 - Claude Desktop: through an `mcp-remote` bridge config.
 
 **Auth:**
@@ -389,9 +451,9 @@ The Docker build copies all manifests into the backend image, so the API and MCP
 `ADMIN_EMAIL` and `ADMIN_INITIAL_PASSWORD` create the first admin on first start, with a forced password change.
 
 ### Sessions and request security
-- **Sessions:** a server-side session table with an opaque random ID in the cookie (HttpOnly; Secure under https; SameSite=Lax). Idle and absolute timeouts. Revoked on logout and password change. "Sign out everywhere" option.
+- **Sessions:** a server-side session table with an opaque random ID in the `opsis_session` cookie (HttpOnly; Secure under https; SameSite=Lax; `Path={BASE_PATH}`). Idle and absolute timeouts. Revoked on logout and password change. "Sign out everywhere" option.
 - **CSRF:** a double-submit token on every state-changing browser request.
-- **CORS:** locked to `PUBLIC_BASE_URL`.
+- **CORS:** off. The UI is same-origin, so no cross-origin access is allowed.
 - **Login protection:** rate limiting with lockout backoff, stored in Postgres. TOTP 2FA is a later item.
 
 ### Authorisation
@@ -412,7 +474,7 @@ The Docker build copies all manifests into the backend image, so the API and MCP
 
 ### Audit and headers
 - **Audit log:** logins (success and failure), user and role changes, connection changes, publishes, shares, link creation and revocation, and agent writes. Admins can browse it in the UI.
-- **Security headers:** CSP, HSTS (server mode) and frame protection, set by the app and by Caddy.
+- **Security headers:** CSP and frame protection, set by the app. HSTS is left to the external reverse proxy (see 3.1); the bundled Caddy profile may set it.
 
 ---
 
@@ -451,7 +513,8 @@ The Docker build copies all manifests into the backend image, so the API and MCP
     dashboard.schema.json  visual-manifest.schema.json  semantic-query.schema.json
   plugins/connectors/       # drop-in third-party connectors
   deploy/
-    caddy/Caddyfile
+    caddy/Caddyfile         # optional bundled proxy
+    proxytest/nginx.conf    # mimics urlloom.com/opsis on the laptop
     proxmox/README.md
     windows/README.md
   docs/
@@ -470,7 +533,8 @@ The Docker build copies all manifests into the backend image, so the API and MCP
 - `extra_hosts: ["host.docker.internal:host-gateway"]` on `api` and `worker`, so the same `OLLAMA_URL` works on Windows and Linux.
 
 **Ports and volumes:**
-- Local mode publishes `${BIND_ADDRESS}:${HTTP_PORT}:8080` on `api`. Server mode publishes only Caddy's 80/443.
+- `api` publishes `${BIND_ADDRESS}:${HTTP_PORT}:8080` in both modes. Locally that is `127.0.0.1`. On the server it is the LXC's LAN IP, which my reverse proxy forwards to; the Proxmox README should suggest an LXC firewall rule that only allows the proxy's IP on that port. Caddy's 80/443 are published only with the optional `caddy` profile.
+- Healthchecks call `{BASE_PATH}/healthz`.
 - Named volumes: `pgdata`, `opsisdata`, `caddy_data`, `backups`. On the server, `backups` may be a bind mount to an NFS path.
 
 **Cross-platform safety:**
@@ -516,7 +580,14 @@ The Docker build copies all manifests into the backend image, so the API and MCP
     ]
   }
   ```
-- *Done when:* `docker compose up -d` works with both env files; changing a flag changes `/api/config` and the UI; invalid combinations fail fast with a clear message; tests pass.
+- Sub-path support from day one (3.1): app mounted under `BASE_PATH`, runtime-injected base href and config, path-scoped cookies, forwarded-header handling, and the `proxytest` profile.
+- *Done when:*
+  - `docker compose up -d` works with both env files.
+  - Changing a flag changes `/api/config` and the UI.
+  - Invalid combinations fail fast with a clear message.
+  - With the `proxytest` profile, the app works at `http://localhost:8088/opsis/`: deep links and refresh load correctly, assets and API calls stay under `/opsis`, and cookies are scoped to `/opsis`.
+  - The same image also works at the root locally.
+  - Tests pass.
 
 **M2. Data ingestion.**
 - Connector registry; CSV/Excel upload, Postgres and MySQL connectors.
@@ -540,14 +611,17 @@ The Docker build copies all manifests into the backend image, so the API and MCP
 **M5. MCP.**
 - `/mcp`, PATs, all tools, resources and the prompt; audit of agent writes.
 - SSE live updates in the editor.
-- *Done when:* from Claude Code, "build a dashboard of X from dataset Y" creates a valid dashboard that appears live in an open editor, and a stale `base_version` returns 409 and the agent recovers.
+- *Done when:*
+  - From Claude Code, "build a dashboard of X from dataset Y" creates a valid dashboard that appears live in an open editor.
+  - A stale `base_version` returns 409 and the agent recovers.
+  - MCP and SSE both work through the `proxytest` profile at `/opsis/mcp`.
 
 **M6. Auth and sharing (server features).**
 - Local accounts and invites; Google sign-in with domain and email allowlists.
 - Roles, groups, ACLs, sessions, CSRF and rate limiting.
-- Share links and the audit log UI; Caddy and cloudflared profiles.
+- Share links and the audit log UI; the optional `caddy` and `tunnel` profiles; proxy configs for Nginx and Caddy in `deploy/proxmox/README.md`.
 - *Done when:*
-  - In server mode, Google sign-in works for an allowed email and is refused for others.
+  - In server mode at `https://urlloom.com/opsis`, Google sign-in works for an allowed email and is refused for others.
   - A viewer cannot edit.
   - A share link shows only the published version and stops working once revoked.
   - None of this is exposed in local mode.

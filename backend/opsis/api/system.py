@@ -54,6 +54,8 @@ def public_config(settings: Settings) -> dict[str, Any]:
         "mcpAuth": settings.mcp_auth,
         "assistantProvider": settings.assistant_provider if settings.feature_assistant else None,
         "publicBaseUrl": settings.public_base_url,
+        "basePath": settings.base_path,
+        "maxUploadMb": settings.max_upload_mb,
         "features": {
             "scheduledRefresh": settings.feature_scheduled_refresh,
             "publicShareLinks": settings.feature_public_share_links,
@@ -66,6 +68,7 @@ def public_config(settings: Settings) -> dict[str, Any]:
             "timezone": settings.workspace_timezone,
             "weekStart": settings.week_start,
             "fiscalYearStartMonth": settings.fiscal_year_start_month,
+            "fiscalYearLabel": settings.fiscal_year_label,
         },
         "branding": load_branding(settings),
     }

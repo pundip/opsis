@@ -24,6 +24,7 @@ Grain = Literal[
     "day", "week", "month", "quarter", "year", "fiscal_month", "fiscal_quarter", "fiscal_year"
 ]
 WeekStart = Literal["monday", "sunday"]
+FiscalYearLabel = Literal["fy_end_year", "year_span"]
 
 _UNITS = "week|month|quarter|year|fiscal_quarter|fiscal_year"
 _RELATIVE = re.compile(
@@ -38,6 +39,7 @@ _RELATIVE = re.compile(
 class CalendarConfig:
     week_start: WeekStart = "monday"
     fiscal_year_start_month: int = 7
+    fiscal_year_label: FiscalYearLabel = "fy_end_year"
 
     def __post_init__(self) -> None:
         if not 1 <= self.fiscal_year_start_month <= 12:
@@ -91,6 +93,21 @@ def fiscal_year_of(d: date, cfg: CalendarConfig) -> int:
     """The fiscal year number for a date (named after the year it ends in)."""
     start = period_start(d, "fiscal_year", cfg)
     return period_end(start, "fiscal_year").year
+
+
+def fiscal_year_label(d: date, cfg: CalendarConfig) -> str:
+    """Display name of the fiscal year containing `d`.
+
+    fy_end_year: "FY2027". year_span: "2026-27", or just "2026" when the fiscal
+    year is the calendar year.
+    """
+    start = period_start(d, "fiscal_year", cfg)
+    end_year = period_end(start, "fiscal_year").year
+    if cfg.fiscal_year_label == "fy_end_year":
+        return f"FY{end_year}"
+    if start.year == end_year:
+        return str(end_year)
+    return f"{start.year}-{end_year % 100:02d}"
 
 
 def fiscal_period_of(d: date, cfg: CalendarConfig) -> int:

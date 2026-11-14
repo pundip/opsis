@@ -1,6 +1,12 @@
+# Optional bundled proxy (COMPOSE_PROFILES=...,caddy), for installs that do not
+# already have a reverse proxy. Not needed behind an existing proxy.
+#
 # SITE_ADDRESS comes from .env.
-#   :80              plain HTTP, for use behind Cloudflare Tunnel or another TLS proxy
+#   :80              plain HTTP, for use behind Cloudflare Tunnel
 #   bi.example.com   automatic HTTPS from Let's Encrypt (ports 80 and 443 must be reachable)
+#
+# Opsis must trust this proxy: set TRUSTED_PROXIES to the Docker network range,
+# for example TRUSTED_PROXIES=172.16.0.0/12
 {$SITE_ADDRESS::80} {
 	encode zstd gzip
 
@@ -11,5 +17,8 @@
 		-Server
 	}
 
-	reverse_proxy api:8080
+	# The whole path is forwarded unchanged; Opsis owns its base path.
+	reverse_proxy api:8080 {
+		flush_interval -1
+	}
 }

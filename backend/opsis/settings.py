@@ -7,7 +7,10 @@ say how to fix it. Nothing else in the codebase reads os.environ.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import ipaddress
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -19,6 +22,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
 
 LOCAL_HOSTNAMES = {"localhost", "127.0.0.1", "::1", "[::1]"}
+BASE_PATH_RE = re.compile(r"^(/[A-Za-z0-9._~-]+)*$")
+# Values that ship in templates, docs or tutorials. Refused in server mode.
+PLACEHOLDER_WORDS = ("change", "placeholder", "example", "password", "secret", "xxx")
+PLACEHOLDER_VALUES = {"opsis-local-only"}  # the value in .env.local.example
 
 
 class ConfigError(Exception):
@@ -35,6 +42,23 @@ def is_loopback(address: str) -> bool:
     try:
         return ipaddress.ip_address(address.strip("[]")).is_loopback
     except ValueError:
+        return False
+
+
+def looks_like_placeholder(value: str) -> bool:
+    """True for empty, short or template-looking secrets."""
+    lowered = value.strip().lower()
+    return (
+        len(lowered) < 12
+        or lowered in PLACEHOLDER_VALUES
+        or any(word in lowered for word in PLACEHOLDER_WORDS)
+    )
+
+
+def is_fernet_key(value: str) -> bool:
+    try:
+        return len(base64.urlsafe_b64decode(value.encode())) == 32
+    except (binascii.Error, ValueError):
         return False
 
 
@@ -59,12 +83,17 @@ class Settings(BaseSettings):
     feature_backups: bool = False
     bind_address: str = "127.0.0.1"
     http_port: int = Field(default=8080, ge=1, le=65535)
+    # The externally visible URL. Its path, if any, becomes the base path (3.1).
     public_base_url: str = "http://localhost:8080"
+    # Comma-separated IPs or CIDR ranges allowed to set X-Forwarded-* headers.
+    trusted_proxies: str = ""
 
-    # Workspace calendar
+    # Workspace calendar (ADR-012)
     workspace_timezone: str = "Australia/Melbourne"
     week_start: Literal["monday", "sunday"] = "monday"
     fiscal_year_start_month: int = Field(default=7, ge=1, le=12)
+    # fy_end_year: "FY2027". year_span: "2026-27".
+    fiscal_year_label: Literal["fy_end_year", "year_span"] = "fy_end_year"
 
     # Postgres (metadata only)
     postgres_host: str = "postgres"
@@ -73,10 +102,21 @@ class Settings(BaseSettings):
     postgres_password: SecretStr = SecretStr("opsis")
     postgres_db: str = "opsis"
 
+    # Secrets
+    # Fernet key for connector secrets. Required in server mode. In local mode an
+    # empty value means "generate one and keep it in the data volume".
+    encryption_key: SecretStr | None = None
+
+    # Data and limits
+    max_upload_mb: int = Field(default=200, ge=1, le=10_000)
+    snapshot_retention: int = Field(default=3, ge=2, le=100)
+    sse_keepalive_seconds: int = Field(default=15, ge=1, le=300)
+
     # Paths inside the container
     data_dir: Path = Path("/data")
     static_dir: Path = Path("/app/static")
     branding_file: Path = Path("/app/branding.json")
+    plugins_dir: Path = Path("/app/plugins")
 
     log_level: Literal["debug", "info", "warning", "error"] = "info"
 
@@ -86,10 +126,29 @@ class Settings(BaseSettings):
         value = value.rstrip("/")
         parts = urlsplit(value)
         if parts.scheme not in ("http", "https") or not parts.hostname:
-            raise ValueError("must be an http or https URL, for example https://bi.example.com")
-        if parts.path or parts.query or parts.fragment:
-            raise ValueError("must be an origin only, with no path or query")
+            raise ValueError("must be an http or https URL, for example https://example.com/opsis")
+        if parts.query or parts.fragment:
+            raise ValueError("must not contain a query string or fragment")
+        if not BASE_PATH_RE.match(parts.path):
+            raise ValueError(
+                "has a path that cannot be used as a base path. Use plain segments, "
+                "for example https://example.com/opsis"
+            )
         return value
+
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _check_trusted_proxies(cls, value: str) -> str:
+        entries = [e.strip() for e in value.split(",") if e.strip()]
+        for entry in entries:
+            try:
+                ipaddress.ip_network(entry, strict=False)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{entry!r} is not an IP address or CIDR range. "
+                    "Use a comma-separated list such as 192.168.1.10,10.0.0.0/8"
+                ) from exc
+        return ",".join(entries)
 
     @field_validator("workspace_timezone")
     @classmethod
@@ -101,6 +160,18 @@ class Settings(BaseSettings):
                 "must be an IANA timezone name, for example Australia/Melbourne"
             ) from exc
         return value
+
+    @field_validator("encryption_key")
+    @classmethod
+    def _check_encryption_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None or not value.get_secret_value().strip():
+            return None
+        if not is_fernet_key(value.get_secret_value().strip()):
+            raise ValueError(
+                "is not a valid key. Generate one with: "
+                "docker compose run --rm --no-deps api generate-key"
+            )
+        return SecretStr(value.get_secret_value().strip())
 
     @model_validator(mode="after")
     def _check_combinations(self) -> Settings:
@@ -139,13 +210,18 @@ class Settings(BaseSettings):
                 problems.append(
                     "FEATURE_PUBLIC_SHARE_LINKS=true is only available with DEPLOY_MODE=server."
                 )
-        if server:
-            parts = urlsplit(self.public_base_url)
-            if parts.scheme != "https" and parts.hostname not in LOCAL_HOSTNAMES:
-                problems.append(
-                    "PUBLIC_BASE_URL must use https with DEPLOY_MODE=server "
-                    f"(got {self.public_base_url}). Plain http is accepted for localhost only."
-                )
+        parts = urlsplit(self.public_base_url)
+        if server and parts.scheme != "https" and parts.hostname not in LOCAL_HOSTNAMES:
+            problems.append(
+                "PUBLIC_BASE_URL must use https with DEPLOY_MODE=server "
+                f"(got {self.public_base_url}). Plain http is accepted for localhost only."
+            )
+        if parts.scheme == "https" and not self.trusted_proxies:
+            problems.append(
+                "PUBLIC_BASE_URL is https, so a reverse proxy terminates TLS, but TRUSTED_PROXIES "
+                "is empty. Set TRUSTED_PROXIES to the proxy's IP address (or CIDR range) so "
+                "forwarded headers are accepted from it and from nowhere else."
+            )
         if self.job_runner == "worker" and self.compose_profiles is not None:
             profiles = {p.strip() for p in self.compose_profiles.split(",")}
             if "server" not in profiles:
@@ -153,9 +229,33 @@ class Settings(BaseSettings):
                     "JOB_RUNNER=worker needs the worker container, which is in the 'server' "
                     "Compose profile. Add server to COMPOSE_PROFILES or set JOB_RUNNER=inline."
                 )
+        if server:
+            if looks_like_placeholder(self.postgres_password.get_secret_value()):
+                problems.append(
+                    "POSTGRES_PASSWORD is a placeholder or too short for DEPLOY_MODE=server. "
+                    "Set a unique value of at least 12 characters before the first start."
+                )
+            if self.encryption_key is None:
+                problems.append(
+                    "ENCRYPTION_KEY is required with DEPLOY_MODE=server. Generate one with: "
+                    "docker compose run --rm --no-deps api generate-key"
+                )
         if problems:
             raise ValueError("\n".join(problems))
         return self
+
+    @property
+    def base_path(self) -> str:
+        """URL prefix the whole app lives under: "" locally, "/opsis" on the server."""
+        return urlsplit(self.public_base_url).path
+
+    @property
+    def cookie_path(self) -> str:
+        return self.base_path or "/"
+
+    @property
+    def trusted_proxy_list(self) -> list[str]:
+        return [e for e in self.trusted_proxies.split(",") if e]
 
     @property
     def sqlalchemy_url(self) -> URL:
@@ -180,7 +280,8 @@ def _problems_from(exc: ValidationError) -> list[str]:
         if err["loc"]:
             name = str(err["loc"][0]).upper()
             got = err.get("input")
-            shown = f" (got {got!r})" if isinstance(got, str | int | bool) else ""
+            secret = name in ("ENCRYPTION_KEY", "POSTGRES_PASSWORD")
+            shown = f" (got {got!r})" if isinstance(got, str | int | bool) and not secret else ""
             problems.append(f"{name}{shown}: {message}")
         else:
             problems.extend(message.split("\n"))

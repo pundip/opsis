@@ -6,6 +6,8 @@ import { defineConfig } from "vitest/config";
 const apiTarget = process.env.VITE_API_PROXY ?? "http://localhost:8080";
 
 export default defineConfig({
+  // Relative asset URLs: the backend injects <base href> at request time (brief 3.1).
+  base: "./",
   plugins: [react(), tailwindcss()],
   build: { outDir: "dist", sourcemap: false },
   server: {

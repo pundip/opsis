@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AppConfig, Me } from "./config";
-import { monthName, navItems } from "./nav";
+import { navItems } from "./nav";
 
 const config: AppConfig = {
   appName: "Opsis",
@@ -11,6 +11,8 @@ const config: AppConfig = {
   mcpAuth: "none",
   assistantProvider: "ollama",
   publicBaseUrl: "http://localhost:8080",
+  basePath: "",
+  maxUploadMb: 200,
   features: {
     scheduledRefresh: false,
     publicShareLinks: false,
@@ -19,7 +21,12 @@ const config: AppConfig = {
     sqlLab: true,
     backups: false,
   },
-  calendar: { timezone: "Australia/Melbourne", weekStart: "monday", fiscalYearStartMonth: 7 },
+  calendar: {
+    timezone: "Australia/Melbourne",
+    weekStart: "monday",
+    fiscalYearStartMonth: 7,
+    fiscalYearLabel: "fy_end_year",
+  },
   branding: { name: "Opsis" },
 };
 
@@ -64,9 +71,3 @@ describe("navItems", () => {
   });
 });
 
-describe("monthName", () => {
-  it("names the fiscal year start month", () => {
-    expect(monthName(7)).toBe("July");
-    expect(monthName(1)).toBe("January");
-  });
-});

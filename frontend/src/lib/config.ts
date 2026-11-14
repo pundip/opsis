@@ -19,11 +19,14 @@ export interface AppConfig {
   mcpAuth: "none" | "token";
   assistantProvider: "anthropic" | "ollama" | null;
   publicBaseUrl: string;
+  basePath: string;
+  maxUploadMb: number;
   features: Features;
   calendar: {
     timezone: string;
     weekStart: "monday" | "sunday";
     fiscalYearStartMonth: number;
+    fiscalYearLabel: "fy_end_year" | "year_span";
   };
   branding: {
     name: string;

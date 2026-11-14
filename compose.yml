@@ -1,6 +1,11 @@
 # Opsis: one Compose file for the laptop and the server.
 # Copy .env.local.example or .env.server.example to .env, then: docker compose up -d
-# COMPOSE_PROFILES inside .env decides which optional services start.
+# COMPOSE_PROFILES inside .env decides which optional services start:
+#   server     worker container (JOB_RUNNER=worker)
+#   caddy      bundled reverse proxy with TLS, for installs without their own proxy
+#   tunnel     Cloudflare Tunnel
+#   ollama     Ollama container
+#   proxytest  nginx serving Opsis at http://localhost:8088/opsis/ (laptop test of sub-path hosting)
 name: opsis
 
 x-app: &app
@@ -21,6 +26,14 @@ x-app: &app
   restart: unless-stopped
 
 services:
+  # Runs once and exits. A bad .env fails here, one time, with a clear message:
+  #   docker compose logs config-check
+  config-check:
+    <<: *app
+    command: ["check-config"]
+    restart: "no"
+    volumes: []
+
   postgres:
     image: postgres:16-bookworm
     environment:
@@ -40,18 +53,15 @@ services:
     <<: *app
     command: ["api"]
     depends_on:
+      config-check:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     ports:
-      # Local mode: this is the app. Server mode: keep BIND_ADDRESS=127.0.0.1 so
-      # only Caddy is reachable from outside (see ADR-013).
+      # Laptop: 127.0.0.1. Server: the LXC's LAN IP, reached by your reverse proxy.
       - "${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
+      test: ["CMD", "python", "-m", "opsis", "healthcheck"] # calls {BASE_PATH}/healthz
       interval: 10s
       timeout: 5s
       retries: 6
@@ -63,12 +73,14 @@ services:
     profiles: ["server"]
     command: ["worker"]
     depends_on:
+      config-check:
+        condition: service_completed_successfully
       api:
         condition: service_healthy # api runs the migrations
 
   caddy:
     image: caddy:2-alpine
-    profiles: ["server"]
+    profiles: ["caddy"]
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:-:80}
     ports:
@@ -89,10 +101,6 @@ services:
     command: ["tunnel", "--no-autoupdate", "run"]
     environment:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
-    depends_on:
-      caddy:
-        condition: service_started
-        required: false
     restart: unless-stopped
 
   ollama:
@@ -100,6 +108,20 @@ services:
     profiles: ["ollama"]
     volumes:
       - ollama:/root/.ollama
+    restart: unless-stopped
+
+  # Mimics the production reverse proxy on the laptop: another app at /, Opsis at /opsis.
+  # Needs PUBLIC_BASE_URL=http://localhost:8088/opsis (see .env.local.example).
+  proxytest:
+    image: nginx:stable-alpine
+    profiles: ["proxytest"]
+    ports:
+      - "127.0.0.1:8088:80"
+    volumes:
+      - ./deploy/proxytest/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

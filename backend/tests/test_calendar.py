@@ -7,6 +7,7 @@ import pytest
 from opsis.semantic.calendar import (
     CalendarConfig,
     fiscal_period_of,
+    fiscal_year_label,
     fiscal_year_of,
     period_end,
     period_start,
@@ -42,6 +43,20 @@ def test_fiscal_year_boundaries() -> None:
     assert fiscal_year_of(date(2026, 7, 1), AU) == 2027
     assert fiscal_period_of(date(2026, 7, 15), AU) == 1
     assert fiscal_period_of(date(2026, 6, 15), AU) == 12
+
+
+def test_fiscal_year_labels() -> None:
+    span = CalendarConfig(fiscal_year_start_month=7, fiscal_year_label="year_span")
+    assert fiscal_year_label(date(2026, 11, 14), AU) == "FY2027"
+    assert fiscal_year_label(date(2026, 6, 30), AU) == "FY2026"
+    assert fiscal_year_label(date(2026, 11, 14), span) == "2026-27"
+    assert fiscal_year_label(date(2026, 6, 30), span) == "2025-26"
+    assert fiscal_year_label(date(2099, 8, 1), span) == "2099-00"
+    calendar_year = CalendarConfig(fiscal_year_start_month=1, fiscal_year_label="year_span")
+    assert fiscal_year_label(date(2026, 3, 1), calendar_year) == "2026"
+    assert (
+        fiscal_year_label(date(2026, 3, 1), CalendarConfig(fiscal_year_start_month=1)) == "FY2026"
+    )
 
 
 def test_fiscal_quarters_follow_the_start_month() -> None:

@@ -1,5 +1,5 @@
 import type { AppConfig, Features, Me } from "../lib/config";
-import { monthName } from "../lib/nav";
+import { fiscalYearLabel, monthName, todayIn } from "../lib/calendar";
 
 const FEATURE_LABELS: Record<keyof Features, string> = {
   assistant: "In-app assistant",
@@ -29,6 +29,8 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 export function Home({ config, me }: { config: AppConfig; me: Me }) {
+  const today = todayIn(config.calendar.timezone);
+  const currentFy = fiscalYearLabel(today.year, today.month, config.calendar);
   const features = Object.keys(FEATURE_LABELS) as (keyof Features)[];
   return (
     <div className="mx-auto max-w-4xl">
@@ -84,6 +86,7 @@ export function Home({ config, me }: { config: AppConfig; me: Me }) {
               label="Financial year starts"
               value={monthName(config.calendar.fiscalYearStartMonth)}
             />
+            <Row label="Current financial year" value={currentFy} />
           </dl>
         </Card>
       </div>

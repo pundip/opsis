@@ -73,16 +73,27 @@ Short ADR entries. Newest at the bottom. "Brief" means `BUILD_BRIEF.md`. An entr
 - **Not included:** 4-4-5 or week-based fiscal calendars, and a fiscal year that does not start on the first of a month.
 
 ## ADR-013: The api container is published on loopback in server mode
-- **Status:** accepted, M1. **Deviation.**
+- **Status:** superseded by ADR-016 (M1 review). The brief now says the api publishes on `BIND_ADDRESS` in both modes, and on the server that is the LXC's LAN IP. The text below is kept for history only.
 - **Decision:** `compose.yml` always publishes `api` on `${BIND_ADDRESS}:${HTTP_PORT}`. The server template sets `BIND_ADDRESS=127.0.0.1`, so the api is reachable only from the server itself and Caddy remains the only public entry. The brief says server mode publishes only Caddy's ports.
 - **Why:** Compose cannot drop a `ports` entry based on `.env`, and the brief requires one `compose.yml` with all differences in `.env`. A loopback publish exposes nothing and is handy for diagnostics.
 - **Guard:** `AUTH_MODE=none` and `MCP_AUTH=none` are rejected in server mode regardless of the bind address.
 
-## ADR-014: What fails fast in M1, and what waits
-- **Status:** accepted, M1
-- **Decision:** startup rejects: `AUTH_MODE=none` or `MCP_AUTH=none` off loopback or in server mode; public share links without sign-in or outside server mode; a non-https `PUBLIC_BASE_URL` in server mode (localhost excepted); `JOB_RUNNER=worker` without the `server` Compose profile; malformed URL, timezone, week start or fiscal month. All problems are reported together.
-- **Deferred on purpose:** checks that need credentials (`GOOGLE_CLIENT_ID` for `AUTH_MODE=full`, `ANTHROPIC_API_KEY` for the assistant, SMTP for email, `ENCRYPTION_KEY`) arrive with the milestone that uses them. Until then the server template boots as shipped, which the M1 acceptance test requires.
-- **Open point for M6:** whether a missing Google client id should stop startup or only disable the Google button.
+## ADR-014: What fails fast
+- **Status:** accepted, M1; revised at the M1 review
+- **Decision:** startup rejects:
+  - `AUTH_MODE=none` or `MCP_AUTH=none` off loopback or in server mode;
+  - public share links without sign-in or outside server mode;
+  - a non-https `PUBLIC_BASE_URL` in server mode (localhost excepted);
+  - an https `PUBLIC_BASE_URL` with empty `TRUSTED_PROXIES`;
+  - `JOB_RUNNER=worker` without the `server` Compose profile;
+  - in server mode, a placeholder or short `POSTGRES_PASSWORD` (under 12 characters, or containing words such as "change" or "password") and a missing `ENCRYPTION_KEY`;
+  - an `ENCRYPTION_KEY` that is not a valid Fernet key, in any mode;
+  - malformed URL, base path, proxy list, timezone, week start, fiscal month or fiscal label.
+- All problems are reported together. Secret values are never echoed in the message.
+- **How it fails:** a one-shot `config-check` service runs first; `api` and `worker` depend on it with `condition: service_completed_successfully`. A bad `.env` therefore stops `docker compose up` once, and the reason is in `docker compose logs config-check`. There is no restart loop.
+- **Consequence:** the server template no longer boots as shipped. That is intended: it has three values marked CHANGE.
+- **Local mode:** an empty `ENCRYPTION_KEY` is allowed. A key is generated on first use and stored in the `opsisdata` volume (`/data/secrets/encryption.key`), so a laptop install needs no setup. Losing that volume loses the key along with the data it protects.
+- **Still to come:** the same placeholder rule will apply to each new secret as it is introduced (`ADMIN_INITIAL_PASSWORD` and `GOOGLE_CLIENT_SECRET` in M6, `ANTHROPIC_API_KEY` in M7).
 
 ## ADR-015: Smaller M1 choices
 - **Status:** accepted, M1
@@ -92,3 +103,18 @@ Short ADR entries. Newest at the bottom. "Brief" means `BUILD_BRIEF.md`. An entr
 - **Test HTTP client:** the dev dependency is `httpx2`, which the installed Starlette test client now asks for in place of `httpx`. The brief's `httpx` remains the choice for runtime HTTP calls when they arrive.
 - **Frontend:** Tailwind v4 through its Vite plugin. shadcn/ui components and the other listed libraries are added when the first screen needs them (M2 forms), not before.
 - **Errors:** every API error is `{"error": {"code", "message", "details"}}`; validation details carry JSON pointer paths.
+
+## ADR-016: Sub-path hosting behind an existing reverse proxy
+- **Status:** accepted, M1 catch-up (brief section 3.1). Supersedes ADR-013.
+- **One setting:** `PUBLIC_BASE_URL` may carry a path. `Settings.base_path` is that path (`""` locally, `/opsis` on the server). Nothing else stores a URL or prefix.
+- **The app owns the prefix:** every router is included with `prefix=base_path`, static assets are mounted at `{base}/assets`, and the SPA fallback is registered at `{base}/{path}`. A request outside the prefix matches no route and gets a JSON 404. `GET {base}` redirects to `{base}/`. I chose explicit prefixes over an ASGI `root_path` or a sub-application mount because the proxy forwards the path unchanged and there is then exactly one place where the prefix is applied.
+- **Runtime frontend base:** Vite builds with `base: "./"`. The backend serves `index.html` with an injected `<base href="{base}/">` and a `<script id="opsis-config" type="application/json">` block. `src/lib/runtime.ts` reads it; the API client, React Router `basename` and (later) SSE URLs all go through it. The block is data, so the CSP stays `script-src 'self'` with no inline script.
+- **Cookies:** names are prefixed `opsis_` and `Path` is the base path (`/` locally). `Secure` follows the scheme of `PUBLIC_BASE_URL`, not the request, so it cannot be downgraded by a missing forwarded header.
+- **CSRF, brought forward from M6:** an `opsis_csrf` cookie is issued on first contact, and every POST, PUT, PATCH or DELETE under `{base}/api/` must repeat it in `X-CSRF-Token`. This is needed now because M2 adds write endpoints, and with `AUTH_MODE=none` any web page could otherwise post a form to `localhost:8080`. Requests with a Bearer token are exempt (browsers never attach those on their own).
+- **Forwarded headers:** Uvicorn runs with proxy headers only when `TRUSTED_PROXIES` is set, and honours them only from those addresses or CIDR ranges.
+- **HSTS:** never sent by the app. It applies to the whole domain, so it belongs to the proxy.
+- **CORS:** none. The UI is same-origin.
+- **Streaming:** `opsis/api/sse.py` builds SSE responses with `X-Accel-Buffering: no` and a keep-alive comment every `SSE_KEEPALIVE_SECONDS` (default 15). The first real stream arrives in M5.
+- **Publishing:** `api` publishes `${BIND_ADDRESS}:${HTTP_PORT}` in both modes. The server template defaults to `0.0.0.0` with a note to set the LXC's LAN IP and firewall the port to the proxy.
+- **Profiles:** `server` adds only the worker; `caddy` is its own optional profile; `proxytest` runs nginx at `http://localhost:8088` with another app at `/` and Opsis at `/opsis/`. `deploy/proxytest/nginx.conf` is the reference for the real proxy.
+- **Healthcheck:** `python -m opsis healthcheck` calls `{base}/healthz`.
