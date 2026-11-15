@@ -291,3 +291,25 @@ class Job(Base):
         ForeignKey("users.id", ondelete="SET NULL")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AccessToken(Base):
+    """A personal access token for the MCP server. Only a hash is stored;
+    the token itself is shown once, when it is created."""
+
+    __tablename__ = "access_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(100))
+    # SHA-256 of the token, hex. The token is 256 random bits, so a fast hash is enough.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    # The first characters of the token, to recognise it in a list.
+    prefix: Mapped[str] = mapped_column(String(20))
+    scopes: Mapped[list[str]] = mapped_column(JSONB)  # read | edit | publish | admin
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (Index("ix_access_tokens_user_id", "user_id"),)

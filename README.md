@@ -2,7 +2,7 @@
 
 A self-hosted, AI-native business intelligence platform. Open source, Docker-based, and built so that a person and an AI agent edit the same dashboards.
 
-**Status:** early development. You can connect to CSV or Excel files, PostgreSQL and MySQL, pull tables into local storage, define a semantic model for each dataset (dimensions, measures, joins, row-level security) run queries against it, and build dashboards on top with a drag-and-resize editor. The MCP server and sign-in are being built milestone by milestone. See [PROGRESS.md](PROGRESS.md).
+**Status:** early development. You can connect to CSV or Excel files, PostgreSQL and MySQL, pull tables into local storage, define a semantic model for each dataset (dimensions, measures, joins, row-level security) run queries against it, build dashboards on top with a drag-and-resize editor, and let an AI agent do the same through the built-in MCP server. Sign-in and sharing are being built milestone by milestone. See [PROGRESS.md](PROGRESS.md).
 
 ## Quick start
 
@@ -66,7 +66,7 @@ More that a model can say:
 
 Open **Dashboards**, name a new one, and you are in the editor:
 
-- **Add** a visual from the toolbar: table, KPI card, bar, line, area, combo, pie or donut, scatter, or text. Drag a tile to move it and pull its corner to resize it.
+- **Add** a visual from the toolbar: table, KPI card, bar, line, area, combo, pie or donut, scatter, or text. Drag a tile to move it and pull its corner to resize it. On a combo chart each measure can use the left or the right value axis (for example amount as bars on the left, number of gifts as a line on the right).
 - Click a tile to select it. The **Visual** tab picks its dataset, puts fields into the visual's roles (for example Category, Values, Split by), sets sort and row limit, and shows the visual's own options.
 - **Filters** adds controls above the dashboard: a dropdown, a multi-select, a date range (including "This financial year") or a text search.
 - **Dashboard** holds the title, grid and theme (auto, light or dark). **History** lists every saved version, shows what changed, and can restore one. **JSON** is the whole dashboard as text; Apply checks it first and reports each problem with its path.
@@ -75,6 +75,36 @@ Open **Dashboards**, name a new one, and you are in the editor:
 When viewing, click a bar, slice, point or table value to filter the other visuals by it, change the time grain on a time chart (year to day), and switch any chart to a table of the same data. A tile shows "RLS bypassed" when row-level security rules exist on its data but do not apply to your role.
 
 The format is [spec/dashboard.schema.json](spec/dashboard.schema.json). Each visual declares its roles and options in `frontend/src/visuals/<id>/manifest.json`.
+
+### Working with an AI agent (MCP)
+
+Opsis has an MCP server at `/mcp` (for example `http://localhost:8080/mcp`). Through it an agent can look at datasets, run queries, and build or change dashboards. Everything it saves is a normal version marked as made by the assistant, and an open editor shows the change at once with an **Undo** button.
+
+**Claude Code.** This repository has a `.mcp.json` that points at `http://localhost:8080/mcp`, so Claude Code started in this folder finds the server by itself. Anywhere else:
+
+```bash
+claude mcp add --transport http opsis http://localhost:8080/mcp
+```
+
+Then ask, for example: "Build a dashboard of giving by fund and month from the gifts dataset." There is also a ready-made prompt, `build_dashboard`.
+
+**Claude Desktop** connects through the `mcp-remote` bridge. Add this to its `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "opsis": { "command": "npx", "args": ["-y", "mcp-remote", "http://localhost:8080/mcp"] }
+  }
+}
+```
+
+**Access tokens.** On a laptop install (`MCP_AUTH=none`) the server accepts local connections without a token. On a server (`MCP_AUTH=token`) every client needs a personal access token: open **Access tokens**, create one, and copy it when it is shown (it is shown only once). A token has scopes (read, edit, publish), expires, can be revoked, and never allows more than your own role. Use it like this:
+
+```bash
+claude mcp add --transport http opsis https://your-domain/opsis/mcp --header "Authorization: Bearer <your token>"
+```
+
+The tools: `list_datasets`, `describe_dataset`, `list_visuals`, `get_spec_schema`, `list_connections`, `get_semantic_model`, `preview_dataset`, `run_query`, `profile_column`, `validate_model`, `patch_semantic_model`, `list_dashboards`, `get_dashboard`, `validate_spec`, `create_dashboard`, `patch_dashboard`, `list_versions`, `restore_version`, `publish_dashboard`, `trigger_refresh`, `get_job_status`.
 
 ### Server
 
@@ -184,10 +214,11 @@ The only tools needed on the host are Docker and Node.js (for the frontend tests
 | `npm run test:backend` | pytest in the dev image, against a throwaway `opsis_test` database and the sample MySQL |
 | `npm run lint:backend` | ruff and mypy (strict) |
 | `npm run test:frontend` | TypeScript, ESLint and Vitest |
+| `npm run smoke` | Playwright browser tests, including an MCP client, at http://localhost:8080 and then behind nginx at http://localhost:8088/opsis/. Add `-- --no-build` to skip the image rebuild |
 | `npm run lock:backend` | Regenerate `backend/uv.lock` after editing `pyproject.toml` |
 | `node scripts/benchmark.mjs --rows 5000000` | Load a synthetic dataset into the running stack and time ingestion and queries |
 
-Run `npm install` inside `frontend/` once before the frontend commands.
+Run `npm install` inside `frontend/` once before the frontend commands. The smoke tests install their own dependencies and a Chromium browser the first time (in `e2e/`).
 
 On Windows, hot reload uses file polling. It is noticeably faster when the repository lives inside the WSL filesystem.
 

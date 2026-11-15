@@ -74,6 +74,11 @@
           "items": { "enum": ["string", "number", "boolean", "time"] },
           "uniqueItems": true,
           "minItems": 1
+        },
+        "axis": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, each measure bound to this role may choose a value axis with {\"field\": ..., \"axis\": \"left\" | \"right\"}."
         }
       }
     },

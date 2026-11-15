@@ -1,0 +1,16 @@
+{
+  "name": "opsis-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Browser smoke tests. Run from the repository root with: npm run smoke",
+  "scripts": {
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@playwright/test": "^1.65.1",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}

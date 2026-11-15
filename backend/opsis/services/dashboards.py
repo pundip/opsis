@@ -10,12 +10,13 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from opsis.auth.principal import Permission, Principal
+from opsis.dashboards import patch as patches
 from opsis.dashboards import spec as specs
 from opsis.dashboards.manifests import Manifest, load_manifests
 from opsis.db.models import Dashboard, DashboardVersion, Dataset, User
 from opsis.errors import ApiError
 from opsis.semantic.model import Model, Problem, schema_problems, schema_validator
-from opsis.services import audit
+from opsis.services import audit, events
 from opsis.services import query as queries
 from opsis.services.query import QueryRuntime
 from opsis.settings import Settings
@@ -131,6 +132,32 @@ def _write_version(
     )
 
 
+def _announce(
+    dashboard: Dashboard,
+    event: str,
+    actor: Principal,
+    author_type: str,
+    *,
+    message: str | None = None,
+    client_id: str | None = None,
+) -> None:
+    """Tell open editors that the dashboard changed. Call after the commit."""
+    events.hub.publish(
+        events.dashboard_channel(dashboard.id),
+        event,
+        {
+            "dashboardId": str(dashboard.id),
+            "version": dashboard.version,
+            "publishedVersion": dashboard.published_version,
+            "authorType": author_type,
+            "authorName": actor.display_name,
+            "message": message,
+            # Echoed so the editor that made the change can ignore its own event.
+            "clientId": client_id,
+        },
+    )
+
+
 def _checked(db: Session, settings: Settings, spec: Any) -> dict[str, Any]:
     found = problems(db, settings, spec)
     if found:
@@ -140,17 +167,25 @@ def _checked(db: Session, settings: Settings, spec: Any) -> dict[str, Any]:
 
 
 def create(
-    db: Session, settings: Settings, actor: Principal, *, title: str, spec: Any | None = None
+    db: Session,
+    settings: Settings,
+    actor: Principal,
+    *,
+    title: str,
+    spec: Any | None = None,
+    author_type: str = "user",
+    message: str | None = None,
 ) -> Dashboard:
     content = _checked(db, settings, spec) if spec is not None else specs.blank_spec(title.strip())
     dashboard = Dashboard(title=content["title"], owner_id=actor.user_id, version=0)
     db.add(dashboard)
     db.flush()
-    _write_version(db, dashboard, content, "user", actor.user_id, "Created")
+    _write_version(db, dashboard, content, author_type, actor.user_id, message or "Created")
     audit.record(
         db,
         action="dashboard.created",
         actor=actor,
+        actor_type=author_type,
         target_type="dashboard",
         target_id=str(dashboard.id),
         detail={"title": dashboard.title},
@@ -169,6 +204,7 @@ def save(
     base_version: int | None = None,
     message: str | None = None,
     author_type: str = "user",
+    client_id: str | None = None,
 ) -> Dashboard:
     """Validate and store a spec as a new version (the new draft).
 
@@ -188,7 +224,49 @@ def save(
         )
     _write_version(db, dashboard, _checked(db, settings, spec), author_type, actor.user_id, message)
     db.commit()
+    _announce(
+        dashboard, "version_created", actor, author_type, message=message, client_id=client_id
+    )
     return dashboard
+
+
+def patch(
+    db: Session,
+    settings: Settings,
+    actor: Principal,
+    dashboard_id: uuid.UUID,
+    ops: Any,
+    *,
+    base_version: int,
+    message: str | None = None,
+    author_type: str = "agent",
+) -> Dashboard:
+    """Apply JSON Patch operations to the draft and store the result as a new version.
+
+    The patch is applied to `base_version`, which must be the latest version:
+    a stale one is refused with 409 before anything is applied.
+    """
+    dashboard = get(db, dashboard_id)
+    if base_version != dashboard.version:
+        raise ApiError(
+            409,
+            "version_conflict",
+            f"The dashboard has changed since version {base_version} (it is now version "
+            f"{dashboard.version}). Load the latest version and apply your change again.",
+            [{"path": "/baseVersion", "message": f"Current version is {dashboard.version}."}],
+        )
+    current = _version_row(db, dashboard, dashboard.version).spec
+    patched = patches.apply(current, ops)
+    return save(
+        db,
+        settings,
+        actor,
+        dashboard_id,
+        patched,
+        base_version=base_version,
+        message=message,
+        author_type=author_type,
+    )
 
 
 def list_versions(db: Session, dashboard: Dashboard) -> list[dict[str, Any]]:
@@ -219,13 +297,37 @@ def get_version(db: Session, dashboard: Dashboard, number: int) -> dict[str, Any
 
 
 def restore(
-    db: Session, settings: Settings, actor: Principal, dashboard: Dashboard, number: int
+    db: Session,
+    settings: Settings,
+    actor: Principal,
+    dashboard: Dashboard,
+    number: int,
+    *,
+    author_type: str = "user",
+    client_id: str | None = None,
 ) -> Dashboard:
     old = _version_row(db, dashboard, number).spec
-    return save(db, settings, actor, dashboard.id, old, message=f"Restored version {number}")
+    return save(
+        db,
+        settings,
+        actor,
+        dashboard.id,
+        old,
+        message=f"Restored version {number}",
+        author_type=author_type,
+        client_id=client_id,
+    )
 
 
-def publish(db: Session, actor: Principal, dashboard: Dashboard, number: int | None) -> Dashboard:
+def publish(
+    db: Session,
+    actor: Principal,
+    dashboard: Dashboard,
+    number: int | None,
+    *,
+    author_type: str = "user",
+    client_id: str | None = None,
+) -> Dashboard:
     target = number if number is not None else dashboard.version
     _version_row(db, dashboard, target)
     dashboard.published_version = target
@@ -233,11 +335,13 @@ def publish(db: Session, actor: Principal, dashboard: Dashboard, number: int | N
         db,
         action="dashboard.published",
         actor=actor,
+        actor_type=author_type,
         target_type="dashboard",
         target_id=str(dashboard.id),
         detail={"title": dashboard.title, "version": target},
     )
     db.commit()
+    _announce(dashboard, "published", actor, author_type, client_id=client_id)
     return dashboard
 
 

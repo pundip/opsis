@@ -97,10 +97,22 @@ describe("cartesianOption", () => {
     expect(series.every((s) => s.stack === "total")).toBe(true);
   });
 
-  it("puts combo bars and lines on one shared value axis", () => {
+  it("puts combo bars and lines on one shared value axis by default", () => {
     const result = cartesianOption("combo", { data: data(columns, rows), item: item("combo", { category: ["g.fund"], bars: ["g.total"], lines: ["g.count"] }), config: {}, theme, calendar });
     expect(seriesOf(result.option).map((s) => s.type)).toEqual(["bar", "line"]);
     expect(Array.isArray((result.option as { yAxis: unknown }).yAxis)).toBe(false);
+  });
+
+  it("gives a combo measure its own right-hand axis when asked", () => {
+    const result = cartesianOption("combo", { data: data(columns, rows), item: item("combo", { category: ["g.fund"], bars: ["g.total"], lines: [{ field: "g.count", axis: "right" }] }), config: {}, theme, calendar });
+    const series = seriesOf(result.option) as (ReturnType<typeof seriesOf>[number] & { yAxisIndex: number })[];
+    expect(series.map((s) => [s.name, s.type, s.yAxisIndex])).toEqual([["total", "bar", 0], ["count (right axis)", "line", 1]]);
+    const axes = (result.option as { yAxis: { name: string; position: string; splitLine: { show?: boolean } }[] }).yAxis;
+    expect(axes.map((a) => [a.name, a.position])).toEqual([["total", "left"], ["count", "right"]]);
+    expect(axes[1]!.splitLine.show).toBe(false); // one set of grid lines
+    // Every measure on the right is the same as every measure on the left: one axis.
+    const all = cartesianOption("combo", { data: data(columns, rows), item: item("combo", { category: ["g.fund"], bars: [{ field: "g.total", axis: "right" }], lines: [{ field: "g.count", axis: "right" }] }), config: {}, theme, calendar });
+    expect(Array.isArray((all.option as { yAxis: unknown }).yAxis)).toBe(false);
   });
 
   it("swaps the axes for horizontal bars and returns nothing without its fields", () => {

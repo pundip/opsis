@@ -1,12 +1,13 @@
 // The dashboard editor: a grid to arrange visuals, side panels to configure them,
 // undo and redo, version history, and a JSON tab onto the same spec.
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Canvas } from "../components/dashboard/Canvas";
 import { FiltersPanel, HistoryPanel, ItemPanel, SettingsPanel } from "../components/dashboard/EditorPanels";
 import { FiltersBar } from "../components/dashboard/FiltersBar";
 import { Badge, Button, ErrorNote, Input } from "../components/ui";
-import { ApiError } from "../lib/api";
+import { ApiError, apiGet } from "../lib/api";
 import type { AppConfig } from "../lib/config";
 import {
   type DashboardDetail,
@@ -18,8 +19,10 @@ import {
   defaultConfig,
   newId,
   useDashboard,
+  useDashboardEvents,
   useFieldsFor,
   usePublishDashboard,
+  useRestoreDashboard,
   useSaveDashboard,
   useSchemas,
   useValidateSpec,
@@ -104,6 +107,17 @@ function JsonTab({ spec, onApply, dark }: { spec: Spec; onApply: (spec: Spec) =>
   );
 }
 
+interface RemoteChange {
+  version: number;
+  /** The version this editor had before the change. Undo restores it. */
+  previous: number;
+  byAssistant: boolean;
+  author?: string;
+  message?: string | null;
+  /** False while the editor still shows unsaved local work instead. */
+  loaded: boolean;
+}
+
 function Editor({ dashboard, config }: { dashboard: DashboardDetail; config: AppConfig }) {
   const id = dashboard.id;
   const history = useHistory<Spec>(dashboard.spec);
@@ -115,10 +129,55 @@ function Editor({ dashboard, config }: { dashboard: DashboardDetail; config: App
   const [state, setState] = useState<ViewState>(EMPTY_STATE);
   const save = useSaveDashboard(id);
   const publish = usePublishDashboard(id);
+  const restore = useRestoreDashboard(id);
+  const client = useQueryClient();
+  // A change that arrived from elsewhere while this editor was open.
+  const [remote, setRemote] = useState<RemoteChange | null>(null);
   const models = useModels();
   const theme = useChartTheme(spec.theme);
   const dirty = spec !== saved;
   const item = spec.items.find((i) => i.id === selected) ?? null;
+
+  // Live updates: the assistant, another person or another tab saved a version.
+  const live = useRef({ dirty, version: dashboard.version });
+  useEffect(() => {
+    live.current = { dirty, version: dashboard.version };
+  });
+  const loadLatest = async (change: Omit<RemoteChange, "loaded" | "previous">) => {
+    const previous = live.current.version;
+    const latest = await client.fetchQuery({
+      queryKey: ["dashboards", id],
+      queryFn: () => apiGet<DashboardDetail>(`/api/dashboards/${id}`),
+      staleTime: 0,
+    });
+    history.reset(latest.spec);
+    setSaved(latest.spec);
+    setSelected(null);
+    void client.invalidateQueries({ queryKey: ["dashboard-versions", id] });
+    setRemote({ ...change, version: latest.version, previous, loaded: true });
+  };
+  useDashboardEvents(id, (event) => {
+    if (event.kind === "published") {
+      void client.invalidateQueries({ queryKey: ["dashboards", id] });
+      return;
+    }
+    if (event.version <= live.current.version) return;
+    const change = { version: event.version, byAssistant: event.authorType === "agent", author: event.authorName, message: event.message };
+    // Unsaved work is never thrown away without asking.
+    if (live.current.dirty) setRemote({ ...change, previous: live.current.version, loaded: false });
+    else void loadLatest(change);
+  });
+  const undoRemote = () => {
+    if (!remote) return;
+    restore.mutate(remote.previous, {
+      onSuccess: (restored) => {
+        history.reset(restored.spec);
+        setSaved(restored.spec);
+        setSelected(null);
+        setRemote(null);
+      },
+    });
+  };
 
   const datasets = useMemo(() => (models.data ?? []).filter((m) => m.hasData).map((m) => m.dataset), [models.data]);
   const usedDatasets = useMemo(
@@ -221,6 +280,27 @@ function Editor({ dashboard, config }: { dashboard: DashboardDetail; config: App
           </Button>
         )}
       </div>
+      {remote && (
+        <div role="alert" className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-sky-300 bg-sky-50 px-3 py-2 text-sm dark:border-sky-900 dark:bg-sky-950/50">
+          <span className="mr-auto">
+            <strong>{remote.byAssistant ? "Updated by assistant." : `Updated by ${remote.author ?? "someone else"}.`}</strong>{" "}
+            {remote.loaded
+              ? `This is now version ${remote.version}${remote.message ? `: ${remote.message}` : "."}`
+              : `Version ${remote.version} was saved while you have unsaved changes, so your next save will be refused.`}
+          </span>
+          {remote.loaded ? (
+            <Button busy={restore.isPending} onClick={undoRemote} title={`Go back to version ${remote.previous}. The update stays in the history.`}>
+              Undo
+            </Button>
+          ) : (
+            <Button onClick={() => void loadLatest(remote)} title="Your unsaved changes will be lost">
+              Load version {remote.version}
+            </Button>
+          )}
+          <Button variant="ghost" onClick={() => setRemote(null)}>Dismiss</Button>
+        </div>
+      )}
+      <ErrorNote error={restore.error} />
       <ProblemList problems={saveProblems} />
       {!saveProblems.length && <ErrorNote error={save.error ?? publish.error} />}
       {conflict && (

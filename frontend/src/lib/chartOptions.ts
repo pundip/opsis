@@ -8,7 +8,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import { periodLabel } from "./calendar";
 import type { AppConfig } from "./config";
-import { type Item, type ItemData, bound } from "./dashboard";
+import { type Item, type ItemData, bindingAxis, bindingField, bound } from "./dashboard";
 import { formatMeasure } from "./format";
 import type { ResultColumn } from "./semantic";
 import { type ChartTheme, seriesColor } from "./theme";
@@ -95,20 +95,22 @@ interface SeriesData {
   column: ResultColumn;
   kind: "bar" | "line";
   color: string;
+  /** Drawn against the right-hand value axis (combo chart only). */
+  right?: boolean;
 }
 
-/** Bar, line, area and combo charts: one category axis, one value axis. */
+/** Bar, line, area and combo charts: one category axis and one value axis.
+ * A combo chart gets a second, right-hand value axis when a measure asks for it. */
 export function cartesianOption(kind: "bar" | "line" | "area" | "combo", input: ChartInput): ChartResult {
   const { data, item, config, theme, calendar } = input;
   const index = (ref: string | undefined) => (ref ? data.columns.findIndex((c) => c.name === ref) : -1);
   const categoryRef = bound(item, kind === "bar" || kind === "combo" ? "category" : "x")[0];
   const seriesRef = kind === "combo" ? undefined : bound(item, "series")[0];
-  const measures: { ref: string; kind: "bar" | "line" }[] =
+  const comboRole = (role: "bars" | "lines", mark: "bar" | "line") =>
+    (item.bindings?.[role] ?? []).map((entry) => ({ ref: bindingField(entry), kind: mark, right: bindingAxis(entry) === "right" }));
+  const measures: { ref: string; kind: "bar" | "line"; right?: boolean }[] =
     kind === "combo"
-      ? [
-          ...bound(item, "bars").map((ref) => ({ ref, kind: "bar" as const })),
-          ...bound(item, "lines").map((ref) => ({ ref, kind: "line" as const })),
-        ]
+      ? [...comboRole("bars", "bar"), ...comboRole("lines", "line")]
       : bound(item, kind === "bar" ? "value" : "y").map((ref) => ({ ref, kind: kind === "bar" ? ("bar" as const) : ("line" as const) }));
   const ci = index(categoryRef);
   const usable = measures.filter((m) => index(m.ref) >= 0);
@@ -162,7 +164,7 @@ export function cartesianOption(kind: "bar" | "line" | "area" | "combo", input: 
       const column = data.columns[mi]!;
       const values: (number | null)[] = categories.map(() => null);
       for (const row of data.rows) values[at(row)] = number(row[mi]);
-      series.push({ name: column.label ?? column.name, values, column, kind: measure.kind, color: seriesColor(theme, i) });
+      series.push({ name: column.label ?? column.name, values, column, kind: measure.kind, color: seriesColor(theme, i), right: Boolean(measure.right) });
     });
   }
 
@@ -173,19 +175,35 @@ export function cartesianOption(kind: "bar" | "line" | "area" | "combo", input: 
   const showLabels = Boolean(config.showLabels) && categories.length <= 12 && series.length <= 2;
   const labels = categories.map((value) => displayValue(value, categoryColumn, calendar));
   const categoryAxis = { ...c.categoryAxis, data: labels, inverse: horizontal };
+  // Two value axes only when a measure asks for the right-hand one and another stays on the left.
+  const dual = series.some((s) => s.right) && series.some((s) => !s.right);
+  const axisName = (right: boolean) => series.filter((s) => Boolean(s.right) === right).map((s) => s.name).join(", ");
+  const namedAxis = (right: boolean) => ({
+    ...c.valueAxis,
+    name: axisName(right),
+    nameLocation: "end" as const,
+    nameGap: 10,
+    nameTextStyle: { color: theme.inkSecondary, fontSize: 11, align: right ? ("right" as const) : ("left" as const) },
+    // One set of grid lines, from the left axis, so the two scales do not tangle.
+    splitLine: right ? { show: false } : c.valueAxis.splitLine,
+    position: right ? ("right" as const) : ("left" as const),
+    alignTicks: right ? true : undefined,
+  });
+  const legendName = (s: SeriesData) => (dual && s.right ? `${s.name} (right axis)` : s.name);
   const option: EChartsCoreOption = {
     textStyle: c.text,
     animationDuration: 250,
     aria: { enabled: true },
-    grid: { left: 8, right: 16, top: showLegend ? 34 : 12, bottom: 4, containLabel: true },
+    grid: { left: 8, right: dual ? 8 : 16, top: (showLegend ? 34 : 12) + (dual ? 22 : 0), bottom: 4, containLabel: true },
     tooltip: { ...c.tooltip, trigger: "axis", axisPointer: { type: kind === "bar" ? "shadow" : "line", lineStyle: { color: theme.axis } } },
     legend: showLegend ? c.legend : undefined,
     xAxis: horizontal ? c.valueAxis : categoryAxis,
-    yAxis: horizontal ? categoryAxis : c.valueAxis,
+    yAxis: horizontal ? categoryAxis : dual ? [namedAxis(false), namedAxis(true)] : c.valueAxis,
     series: series.map((s) => {
       const isArea = kind === "area";
       const base = {
-        name: s.name,
+        name: legendName(s),
+        yAxisIndex: dual && s.right ? 1 : 0,
         data: s.values,
         tooltip: { valueFormatter: (v: unknown) => formatMeasure(v, s.column.format) },
         emphasis: { focus: "series" as const },

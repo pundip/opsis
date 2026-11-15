@@ -19,12 +19,14 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from starlette.routing import Route
 
 from opsis import __version__
-from opsis.api import dashboards, ingestion, semantic, system
+from opsis.api import dashboards, ingestion, semantic, system, tokens
 from opsis.api.errors import ApiError, install_error_handlers
 from opsis.auth import cookies
 from opsis.jobs.worker import InlineRunner
+from opsis.mcp.server import OpsisMcp
 from opsis.query.duckdb_engine import DuckDBEngine, ResultCache
 from opsis.services import users
 from opsis.services.query import QueryRuntime
@@ -47,6 +49,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     engine = create_engine(settings.sqlalchemy_url, pool_pre_ping=True)
     session_factory = sessionmaker(engine, expire_on_commit=False)
 
+    runtime = QueryRuntime(
+        engine=DuckDBEngine(
+            memory_limit_mb=settings.query_memory_limit_mb,
+            threads=settings.query_threads,
+            temp_dir=settings.data_dir / "tmp" / "duckdb",
+        ),
+        cache=ResultCache(settings.query_cache_entries),
+        max_concurrent=settings.query_max_concurrent,
+    )
+    mcp = OpsisMcp(settings, session_factory, runtime)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if settings.auth_mode == "none":
@@ -65,7 +78,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if runner is not None:
             runner.start()
         try:
-            yield
+            # The MCP session manager owns a task group for the requests it serves.
+            async with mcp.manager.run():
+                yield
         finally:
             if runner is not None:
                 runner.stop()
@@ -81,15 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.session_factory = session_factory
-    app.state.query_runtime = QueryRuntime(
-        engine=DuckDBEngine(
-            memory_limit_mb=settings.query_memory_limit_mb,
-            threads=settings.query_threads,
-            temp_dir=settings.data_dir / "tmp" / "duckdb",
-        ),
-        cache=ResultCache(settings.query_cache_entries),
-        max_concurrent=settings.query_max_concurrent,
-    )
+    app.state.query_runtime = runtime
     install_error_handlers(app)
 
     @app.middleware("http")
@@ -131,6 +138,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api.include_router(system.router)
     register_feature_routers(api)
     app.include_router(api)
+    # The MCP endpoint is an ASGI app of its own (Streamable HTTP), mounted as one
+    # exact path so that no redirect is ever needed behind the proxy.
+    app.router.routes.append(Route(f"{base}/mcp", endpoint=mcp))
     _mount_frontend(app, settings)
     return app
 
@@ -140,6 +150,7 @@ def register_feature_routers(api: APIRouter) -> None:
     api.include_router(ingestion.router)
     api.include_router(semantic.router)
     api.include_router(dashboards.router)
+    api.include_router(tokens.router)
 
 
 def render_index(settings: Settings) -> str | None:

@@ -12,7 +12,9 @@ import { Home } from "../pages/Home";
 import { Jobs } from "../pages/Jobs";
 import { ModelDetail } from "../pages/ModelDetail";
 import { Models } from "../pages/Models";
-import { Placeholder } from "../pages/Placeholder";import { Layout } from "./Layout";
+import { Placeholder } from "../pages/Placeholder";
+import { Tokens } from "../pages/Tokens";
+import { Layout } from "./Layout";
 
 function FullPage({ title, children }: { title: string; children?: React.ReactNode }) {
   return (
@@ -72,6 +74,8 @@ export function App() {
         return <Models />;
       case "/dashboards":
         return <Dashboards me={user} />;
+      case "/tokens":
+        return <Tokens />;
       default:
         return null;
     }

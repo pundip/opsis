@@ -108,7 +108,7 @@
       ]
     },
     "binding": {
-      "description": "A field reference, or an object when a time dimension needs a grain.",
+      "description": "A field reference, or an object when a time dimension needs a grain or a measure needs the right-hand value axis (combo chart).",
       "oneOf": [
         { "$ref": "semantic-query.schema.json#/$defs/fieldRef" },
         {
@@ -117,7 +117,12 @@
           "required": ["field"],
           "properties": {
             "field": { "$ref": "semantic-query.schema.json#/$defs/fieldRef" },
-            "grain": { "$ref": "semantic-query.schema.json#/$defs/grain" }
+            "grain": { "$ref": "semantic-query.schema.json#/$defs/grain" },
+            "axis": {
+              "enum": ["left", "right"],
+              "default": "left",
+              "description": "Which value axis a measure is drawn against. Only for roles that allow it (the combo chart's bars and lines)."
+            }
           }
         }
       ]

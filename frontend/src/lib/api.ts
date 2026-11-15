@@ -18,9 +18,19 @@ export class ApiError extends Error {
   }
 }
 
+/** Identifies this browser tab. Sent with every write and echoed in live events,
+ * so a tab can tell its own changes from someone else's. Not a secret. */
+export const CLIENT_ID =
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `tab-${Math.random().toString(36).slice(2)}`;
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
-  if (method !== "GET") headers["X-CSRF-Token"] = readCookie("opsis_csrf");
+  if (method !== "GET") {
+    headers["X-CSRF-Token"] = readCookie("opsis_csrf");
+    headers["X-Opsis-Client"] = CLIENT_ID;
+  }
   let payload: BodyInit | undefined;
   if (body instanceof FormData) {
     payload = body;

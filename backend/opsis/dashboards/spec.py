@@ -12,6 +12,7 @@ the dashboard's filters, which keeps specs small and hard to get wrong.
 
 from __future__ import annotations
 
+import difflib
 from collections.abc import Mapping
 from datetime import date, timedelta
 from pathlib import Path
@@ -132,6 +133,33 @@ def validate(
     return problems
 
 
+def _unknown_field(models: Mapping[str, Model], dataset: str, ref: str, kind: str) -> str:
+    """Why `ref` cannot be used, with the closest real names. People and agents
+    both fix a wrong name fastest when they are shown the right ones."""
+    model = models[dataset]
+    measures = [f"{dataset}.{name}" for name in model.measures]
+    dimensions = [f"{dataset}.{name}" for name in model.dimensions]
+    for join in model.joins:
+        if join.relationship in SAFE_JOINS and join.to in models:
+            dimensions += [f"{join.to}.{name}" for name in models[join.to].dimensions]
+    known = (
+        measures
+        if kind == "measure"
+        else dimensions
+        if kind == "dimension"
+        else measures + dimensions
+    )
+    message = f"{ref!r} is not a field that {dataset!r} can use."
+    if "." not in ref:
+        message += f" Write fields as dataset.field, for example {dataset}.{ref}."
+    close = difflib.get_close_matches(ref, measures + dimensions, n=3, cutoff=0.6)
+    if close:
+        message += f" Did you mean {' or '.join(repr(c) for c in close)}?"
+    what = {"measure": "Measures", "dimension": "Dimensions"}.get(kind, "Fields")
+    shown = ", ".join(known[:20]) + (", ..." if len(known) > 20 else "")
+    return f"{message} {what} available: {shown or 'none'}."
+
+
 def _check_item(
     add: Any, path: str, item: Mapping[str, Any], manifest: Manifest, models: Mapping[str, Model]
 ) -> None:
@@ -179,9 +207,16 @@ def _check_item(
         for position, entry in enumerate(entries):
             ref, grain = _binding(entry)
             where = f"{path}/bindings/{role}/{position}"
+            if isinstance(entry, dict) and "axis" in entry and not rule.get("axis"):
+                add(
+                    f"{where}/axis",
+                    f"{rule.get('label', role)} of the {manifest['id']} visual has no axis choice. "
+                    "Only the combo chart's bars and lines can use the right-hand axis. "
+                    "Remove `axis`.",
+                )
             found = resolve_field(models, dataset, ref)
             if found is None:
-                add(where, f"{ref!r} is not a field that {dataset!r} can use.")
+                add(where, _unknown_field(models, dataset, ref, rule["kind"]))
                 continue
             kind, definition = found
             bound.add(ref)

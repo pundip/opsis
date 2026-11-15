@@ -247,13 +247,54 @@ Short ADR entries. Newest at the bottom. "Brief" means `BUILD_BRIEF.md`. An entr
 - Each visual is a folder in `frontend/src/visuals/<id>/` with `manifest.json` (roles, `configSchema`, minimum size) and `Render.tsx`. The frontend finds them with `import.meta.glob`; the backend reads the same manifests from `VISUALS_DIR` to validate specs. v1: table, KPI, bar, line, area, combo, pie or donut, scatter, text.
 - Charts use ECharts 6 with the canvas renderer, loaded as a lazy chunk. Text is a small safe Markdown subset rendered as React elements (no HTML pass-through; links limited to http, https and mailto).
 - Chart rules, fixed in code rather than left to each dashboard: an eight-colour categorical palette checked for colour-blind separation in light and dark; colours assigned by series name in a fixed order so a filter never repaints the survivors; a ninth and later series folded into "Other"; bars at most 24px wide with a rounded data end; 2px lines; a legend whenever there are two or more series; text in ink colours, never the series colour; every chart can be switched to a table of the same data.
-- **Deviation:** the combo chart draws bars and lines on one value axis. A second y-axis is not offered, because two scales on one chart invite false comparisons. Measures of very different size belong in two charts.
+- The combo chart draws bars and lines on one value axis by default. **Changed at the M4 review:** a measure in the bars or lines role may ask for the right-hand axis with `{"field": ..., "axis": "right"}` (the usual case is gift amount as bars against gift count as a line, which is flat on a shared axis). Roles opt in with `"axis": true` in the manifest, so no other visual accepts it. To keep two scales readable, each axis is named after its measures, the legend marks right-axis series, and only the left axis draws grid lines.
 - Scatter plots colour at most three groups plus "Other".
 - Themes: `theme.mode` (auto, light, dark) and an optional palette override in the spec. Named presets beyond "default" wait for branding in M6.
 
 **Editor**
 - react-grid-layout 2 for drag and resize. Only a finished drag or resize is recorded as an edit; the grid's own re-packing after a removal or an undo is not, otherwise it buried the real step in the undo history.
 - Selection is on an element inside each tile, because the grid library owns the tile's own mouse handlers. Tiles can also be selected from the keyboard.
-- **Deviation:** field wells are role lists with an "Add a field" selector and remove buttons, not drag-and-drop of fields. It is keyboard accessible and was much quicker to build; drag-and-drop can be added on top later.
+- **Deviation (accepted at the M4 review for v1):** field wells are role lists with an "Add a field" selector and remove buttons, not drag-and-drop of fields. Drag-and-drop is in the M8 backlog.
 - Undo and redo keep up to 100 states in memory. Version history shows a line diff of the JSON between a version and what is on screen.
 - Monaco is bundled locally (no CDN) as a lazy chunk with its JSON worker, so it works under the CSP and offline. It is about 3.4 MB (0.9 MB gzipped) and loads only when the JSON tab is opened.
+
+## ADR-022: MCP server, access tokens, agent writes and live updates
+- **Status:** accepted, M5
+
+**Transport**
+- The official MCP Python SDK (2.3), using its low-level `Server` with our own handlers, served over Streamable HTTP at `{BASE_PATH}/mcp`. It is added to the FastAPI app as one exact route, not a mount, so no trailing-slash redirect can happen behind a proxy.
+- **Stateless, with plain JSON responses.** Every request stands alone: there is no session id to keep, nothing to store and nothing to stream, which is the simplest thing to carry through a reverse proxy. GET and DELETE on the endpoint answer 405, as the MCP spec allows for a server that offers no stream. The cost is that the server cannot push notifications to an MCP client; no tool needs that.
+- Tool code is ordinary synchronous service code and runs in a worker thread, so a slow query never blocks the event loop.
+
+**Tools**
+- Defined in `opsis/mcp/tools.py` as plain functions behind one entry point, `tools.call`. Nothing in that file knows about MCP, so the in-app assistant (M7) will call the same functions.
+- 21 tools. Not built yet: `share_dashboard` and `create_share_link`, which need the sharing model of M6. The catalogue supports a feature flag per tool, so a tool of a feature that is off is not listed and cannot be called.
+- Written for small models (asked for at the M4 review):
+  - datasets are referred to by name and fields by `dataset.field`, never by internal id; a dashboard may be named by title when the title is unique;
+  - every description says when to use the tool and ends with one example input, and a test checks that each example is valid input for its tool;
+  - arguments are validated against the schema of the tool before anything runs. An object or list sent as a JSON string, and a number sent as a string, are accepted;
+  - `list_visuals` with a dataset returns a ready-to-use example item for every visual, built from the real fields of that dataset. A test checks that every example passes validation as it stands;
+  - every failure is text with a stable code, the problems by JSON path, and a "What to do" line naming the next call. A wrong name gets "Did you mean" and the list of real names; a stale version says which version is current and to read again and retry;
+  - results are compact JSON, lists are capped (`run_query` 1,000 rows, `preview_dataset` 100), and write results say what to do next and carry the editor link.
+- Agent edits to dashboards and models are JSON Patch (RFC 6902) with `base_version`. The patch code is our own (`opsis/dashboards/patch.py`) so that each error names the operation and what is really at that path. All operations apply or none do, and the result goes through the same validation as a save from the UI.
+- Row-level security: `run_query` goes through the semantic layer like everything else. `preview_dataset`, `profile_column` and the sample values in `describe_dataset` read rows directly, so they are refused (or left out) when a rule applies to the role of the caller.
+
+**Who is calling**
+- `MCP_AUTH=none` (allowed only on a loopback bind): calls run as the built-in admin.
+- `MCP_AUTH=token`: `Authorization: Bearer <token>`. Personal access tokens are made on the Access tokens page, shown once, and stored as a SHA-256 hash (the token is 256 random bits, so a slow password hash adds nothing). Each has scopes (`read`, `edit`, `publish`, `admin`), an expiry of at most a year, can be revoked, and records when it was last used.
+- A call runs as the owner of the token. A tool needs both the role permission of the owner and the scope on the token, so a token can narrow what its owner may do but never widen it. Tools the caller cannot use are not listed. The `admin` scope exists but no tool needs it yet.
+- Tokens work for MCP only, not for the REST API.
+- A request that carries an `Origin` header from another site is refused, so a web page cannot drive a local server from the browser.
+- Not built: OAuth for claude.ai connectors (a later milestone in the brief).
+
+**Audit**
+- Versions created through MCP have `author_type = agent` and the user the call ran as. Every write tool also adds an audit row `agent.<tool>` with the tool, a summary of its arguments (paths of patch operations, not whole specs), the version it created, and how the caller was authenticated.
+
+**Live updates**
+- `GET /api/dashboards/{id}/events` is a server-sent event stream for an open editor: `hello` (the current version, on every connect), `version_created` and `published`.
+- The hub is in the memory of the api process (`opsis/services/events.py`). All dashboard writes happen in that one process (REST, MCP, and later the assistant), so no broker is needed. If the api ever runs as several processes this must become Postgres LISTEN/NOTIFY; the interface is two functions.
+- Each browser tab sends a random id with its writes (`X-Opsis-Client`), echoed in the event, so a tab ignores the events it caused.
+- In the editor: a change from elsewhere is loaded at once when there is no unsaved work, with a notice "Updated by assistant. Undo". Undo restores the version the editor had before, as a new version, so the change by the agent stays in the history. With unsaved work the editor keeps it and offers to load the new version instead.
+
+**Testing**
+- Playwright (`e2e/`, run with `npm run smoke`) drives a real browser, and the official MCP TypeScript client, against the running stack at the root and at the sub-path. It replaces manual browser checks from M5 on.

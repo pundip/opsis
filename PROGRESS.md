@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-15 (end of Milestone 4)
+Last updated: 2026-11-15 (end of Milestone 5)
 
 ## Milestone status
 
@@ -10,41 +10,61 @@ Last updated: 2026-11-15 (end of Milestone 4)
 | M1 Skeleton and modes | Done, reviewed, catch-up to the revised brief done |
 | M2 Data ingestion | Done, reviewed |
 | M3 Semantic layer and queries | Done, reviewed |
-| M3.5 Timezones, conditional measures, model versions, benchmark | Done, reported with M4 |
-| M4 Dashboards and visuals | Done, awaiting review |
-| M5 MCP | Not started |
+| M3.5 Timezones, conditional measures, model versions, benchmark | Done, reviewed |
+| M4 Dashboards and visuals | Done, reviewed |
+| M5 MCP | Done, awaiting review |
 | M6 Auth and sharing | Not started |
 | M7 In-app assistant | Not started |
 | M8 More connectors and hardening | Not started |
 
-## M4 Dashboards and visuals
+## M5 MCP
 
-Built (decisions in ADR-021, rjsf decision in ADR-018):
+Built (decisions in ADR-022):
 
-- **Backend:** `dashboards` and `dashboard_versions` tables (migration `0005`). `opsis/dashboards/spec.py` validates a spec in two phases with a JSON pointer path on every problem, and derives the semantic query for an item from its bindings plus the view state. `manifests.py` loads the visual manifests. `opsis/services/dashboards.py` and `opsis/api/dashboards.py`: list, create, read, save with `baseVersion` (409 when stale), versions, restore, publish, unpublish, delete, validate, item data, filter options. Also `GET /api/visuals` and `GET /api/schemas`.
-- **Visuals:** table (with conditional formatting), KPI card (with comparison to the previous period or year), bar, line, area, combo, pie or donut, scatter, text (safe Markdown subset). Each is a folder with a manifest and a renderer in `frontend/src/visuals/`.
-- **Editor** (`/dashboards/:id/edit`): grid with drag and resize, add and remove visuals, role-based field wells, options panel generated from each visual's `configSchema` (rjsf with a CSP-safe validator), filters panel, dashboard settings, undo and redo, version history with a line diff and restore, a Monaco JSON tab, Save and Publish.
-- **Viewing** (`/dashboards/:id`): filter bar (dropdown, multi-select, date range, search), cross-filtering by clicking a mark or a table value, drill through time grains per tile, chart to table toggle, light and dark themes, an "RLS bypassed" badge on any tile where an exemption applied.
-- Viewers read the published version only and never send a query; the backend derives it from the stored spec.
+- **From the M4 review, done first:**
+  - **Playwright smoke tests** in `e2e/`. `npm run smoke` rebuilds the image, runs every test at http://localhost:8080, switches the stack to the sub-path with `compose.subpath.yml` and the `proxytest` profile, runs them again at http://localhost:8088/opsis/, and puts the stack back. No edit to `.env` is needed. CLAUDE.md now names this as the way to verify UI.
+  - **Combo chart, optional right-hand axis:** a measure in Bars or Lines can be bound as `{"field": ..., "axis": "right"}`; the editor has a Left axis / Right axis selector per measure. Each axis is named after its measures, the legend marks right-axis series, and only the left axis draws grid lines.
+- **MCP server** at `{BASE_PATH}/mcp` (Streamable HTTP, stateless, JSON responses) with 21 tools, 6 resources (a guide, the visual manifests, the four schemas) and the `build_dashboard` prompt. `.mcp.json` at the repository root points Claude Code at it.
+- **Tools** (`opsis/mcp/tools.py`): `list_datasets`, `describe_dataset`, `list_visuals`, `get_spec_schema`, `list_connections`, `get_semantic_model`, `preview_dataset`, `run_query`, `profile_column`, `validate_model`, `patch_semantic_model`, `list_dashboards`, `get_dashboard`, `validate_spec`, `create_dashboard`, `patch_dashboard`, `list_versions`, `restore_version`, `publish_dashboard`, `trigger_refresh`, `get_job_status`.
+- **Written for small models:** names instead of ids, one example input per tool, a ready-made example item per visual from the real fields of a dataset, lenient argument handling, and errors that carry a code, the problems by path, "Did you mean" suggestions and a "What to do" line. Details in ADR-022.
+- **JSON Patch with `base_version`** for dashboards and models (`opsis/dashboards/patch.py`); a stale version is refused with 409 and instructions to re-read and retry.
+- **Personal access tokens** (migration `0006`, `opsis/services/tokens.py`, the Access tokens page): shown once, stored hashed, scoped, expiring, revocable, last-used time. Required when `MCP_AUTH=token`.
+- **Audit:** agent-made versions are marked `agent`; every write tool adds an `agent.<tool>` audit row with an argument summary and the version created.
+- **Live updates:** `GET /api/dashboards/{id}/events` (server-sent events) and the editor notice "Updated by assistant. Undo". Unsaved work in the editor is never overwritten: the editor offers to load the new version instead.
+- Validation messages for an unknown field now suggest the closest real names and list what is available (in the UI as well).
 
-### How M4 was verified
+### How M5 was verified
 
-- **Automated:** 210 backend tests pass (6 new in `tests/test_dashboards.py`, against a real Postgres source: validation paths, versions and restore, stale save refused, publish and what a viewer sees, item data equal to the semantic query, filters, cross-filter on a joined field, drill grain, KPI comparison, filter options). `ruff check`, `ruff format --check` and `mypy --strict` pass. Frontend: `tsc`, ESLint and 39 Vitest tests pass (chart options, palette rules, Markdown safety, schema validator, history, diff); the production build succeeds.
-- **Acceptance, by hand in the Browser pane under http://localhost:8088/opsis/** on the sample `gifts` and `donors` data: created a dashboard and built six visuals (KPI, bar, line, pie, table, text) and two filters through the editor controls; saved; reloaded and saw the same six; changed the date filter ($12.5M for all dates, $3.7M for last financial year); changed the drill grain; switched a chart to a table; cross-filtered on donor region (KPI fell to $615.7K, chip shown and removable). Then: selected a tile by clicking it, removed it, Undo brought it back, Redo removed it again; dragged a tile to a new place and resized another by its corner, each undone with one Undo; saved (version 3); History showed the versions and a one-line diff against version 2; restored version 2 (became version 4, the resize was gone). JSON tab: Monaco loaded with its worker; broken JSON was refused with the parser's position; a wrong type was refused with `/interactions/crossFilter 'yes' is not of type 'boolean'`; an unknown field was refused with `/items/0/bindings/value/0 'gifts.no_such_measure' is not a field that 'gifts' can use`; nothing changed on the canvas in those three cases; a valid spec applied and one Undo reversed it. Publish worked; the view page then wrongly said "Draft", which was fixed and confirmed at the root. Dark mode rendered with the dark palette. Bars measured 24px wide on the canvas. No CSP violations and no horizontal overflow.
-- **Repeated at the root, http://localhost:8080,** after a full image rebuild: the same dashboard rendered (six tiles, badges, published); remove, save, history diff, restore, Monaco and publish all worked; a new dashboard was created from the list page, a KPI bound and saved; area, combo and scatter visuals were added and rendered. Every API response in that run was 200.
+- **Backend, automated:** 219 pytest tests pass (9 new in `tests/test_mcp.py`, all through the real HTTP endpoint in-process); `ruff check`, `ruff format --check` and `mypy --strict` pass. The new tests cover:
+  - the catalogue: every tool has an example input that is valid for it; resources and the prompt; GET and DELETE answer 405;
+  - an agent flow on a real Postgres source: discover, every `exampleItem` valid as it stands, create, patch, a stale `base_version` refused and recovered from, a wrong field name answered with the right one, a bad patch path, bad arguments, restore, publish, and the audit rows;
+  - `run_query` equal to SQL on the source and capped at 1,000 rows; `profile_column` equal to SQL; a column name containing SQL treated as a name; model patch, conflict and invalid model; refresh and job status;
+  - tokens: missing, made-up, revoked, expired and deactivated-owner tokens get 401; a token is stored only as a hash; scopes hide and block tools; a viewer with every scope still only gets viewer tools; two tokens act as their two owners; another origin is refused;
+  - row-level security through the tools; JSON Patch operations and 16 error messages; the axis option; the event hub across threads; and that writes announce themselves.
+- **Frontend, automated:** `tsc`, ESLint and 40 Vitest tests pass (one new, for the right-hand axis).
+- **Browser and a real MCP client, automated** (`npm run smoke`, 3 Playwright tests, **passed at http://localhost:8080 and at http://localhost:8088/opsis/** after a full image rebuild):
+  - `smoke.spec.ts`: build a dashboard with two visuals from a fresh CSV dataset, save, reload, remove a visual, undo, redo, save, see the diff, restore an old version, have the JSON tab refuse a wrong type with its path, publish, and open the published view. No script errors and no CSP violations.
+  - `mcp.spec.ts`: the official MCP TypeScript client connects to `/mcp` (and to `/opsis/mcp` through nginx), lists tools and resources, gets the prompt, describes the dataset, runs a query with the right totals, and creates a dashboard whose `editUrl` matches the install, sub-path included. With the editor open on that dashboard, a patch with a stale version is refused, the agent re-reads and retries, and **three visuals appear in the editor without a reload** with the notice "Updated by assistant."; Undo returns to the earlier version; with unsaved work in the editor, an agent change does not overwrite it and "Load version N" brings it in. The event stream response is `text/event-stream` through the proxy.
+  - The Access tokens page: a token is created, shown once, not shown after a reload, revoked and deleted.
+- **By hand, as an agent:** I called the tools over HTTP myself with only their descriptions to go on: `describe_dataset` on the sample `gifts` data, then one `create_dashboard` call with three KPIs, a combo chart (amount as bars, gift count on the right axis), a line chart by month and channel, a table and two filters. It was accepted first time and renders correctly (checked from a screenshot). It is still in the dev stack as "Giving overview (built over MCP)".
 
-Bugs found by this testing and fixed: a cross-filter on a joined dataset's field was ignored; the unsaved preview failed when a sort named a field that was no longer bound; clicking a tile did not select it (the grid library owns the tile's mouse handlers); Undo did not restore a removed tile because the grid's automatic re-packing was recorded as an edit; the view page said "Draft" when the draft was the published version.
+Bugs found by this testing and fixed: the `title` argument of `create_dashboard` was ignored when the spec had its own title; a GET on `/mcp` opened a stream that never ended; `replace` on a missing key gave a message that did not say to use `add`.
 
 Not verified:
 
-- Area, combo and scatter were only checked to render with data at the root. Their options, and the table's conditional formatting, were not exercised by hand (the option builders are unit-tested).
-- Charts were judged from measurements and the accessibility descriptions more than by eye, because the Browser pane is narrow. Worth a look on a full-size screen at review.
-- A viewer account using a dashboard in the browser. There is no sign-in until M6; viewer behaviour is covered by API tests only.
-- The select, multi-select and search filter controls by hand under both URLs (date range and multi-select were used under /opsis; search only in tests).
-- Keyboard-only use of the editor, a screen reader, and touch devices.
-- Dashboards on large data, and many tiles at once against the concurrency limit.
-- No Playwright smoke test exists yet. Browser checks are manual.
-- Everything already listed as unverified for earlier milestones (LXC, real proxy, https, `caddy`, `tunnel` and `ollama` profiles, worker mode for dashboards).
+- **A model-driven session through Claude Code's own MCP integration.** `.mcp.json` is new, so it was not loaded in the session that built this. The tools were driven by the official MCP client from a script, and by me over plain HTTP. Your test with Sonnet and Fable is the first real run of that kind.
+- `MCP_AUTH=token` against the running container. Token handling is tested through the real endpoint in-process only, because the dev stack runs with `MCP_AUTH=none`.
+- Claude Desktop through `mcp-remote`. The config in the README follows the brief but was not run.
+- Long-lived event streams (hours), many editors at once, and what a real proxy does to an idle stream beyond the nginx test profile.
+- The Proxmox LXC and everything else listed as unverified for earlier milestones.
+
+### M3.5 benchmark, in one line
+
+5 million rows on this laptop: typical queries 77 to 250 ms cold and 11 to 14 ms warm; 10 different uncached queries at once finished in 3.4 to 3.6 s with the health check staying under 105 ms; peak api memory 1.1 GB during queries and 264 MB during ingestion. Full tables are below.
+
+## M4 Dashboards and visuals (reviewed)
+
+Built in M4 (ADR-021): the dashboard tables and versions, two-phase spec validation, query derivation on the backend, nine visuals, the editor (grid, field wells, config panels, filters, undo and redo, history with diff and restore, JSON tab), viewing with filters, cross-filtering, drill, table toggle, themes and the "RLS bypassed" badge. Verified at the time by hand at both URLs; the same flow is now the Playwright smoke test.
 
 ## Review outcomes so far
 
@@ -52,6 +72,7 @@ Not verified:
 - **M1:** brief replaced with the current version (sub-path hosting, section 3.1); ADR-013 superseded by ADR-016; `FISCAL_YEAR_LABEL` added; one-shot config check; placeholder secrets refused in server mode; `httpx2` kept.
 - **M2:** keep the built-in schema form for connections; at the start of M4 prototype rjsf with a CSP-safe validator and decide then (ADR-018). `BIND_ADDRESS` stays `0.0.0.0` in the server template and is not a required value. Editors may see connections and their non-secret settings.
 - **M3:** approved with M3.5 (timezones, conditional measures, model versions, value checks, benchmark; all done). Admins stay exempt from RLS by default, with a visible badge (done in M4), share links never exempt and "View as" in M6. Bulk model export and two-hop joins go to M8. Every milestone is verified at the root and under /opsis.
+- **M4:** approved. Field selector is fine for v1 (drag-and-drop to the M8 backlog). Playwright smoke test at the start of M5, at both URLs, replacing manual browser checks from then on. Combo chart gets an optional right-hand axis per measure. Filter and drill state in the URL in M6 with share links. MCP tool descriptions and errors must work for a smaller model: anything Sonnet struggles with counts as a tool design issue.
 - **For the LXC work (noted at the M2 review):** the server will use port forwarding to the LXC. Check then what source address the api sees for proxied requests, because that is the address `TRUSTED_PROXIES` must list (it may be the forwarder or the Docker gateway, not the reverse proxy itself).
 
 ## What exists
@@ -89,6 +110,12 @@ Run: `copy .env.local.example .env`, `docker compose up -d`, open http://localho
 - `frontend/src/lib/`: `dashboard.ts` (types and API hooks), `chartOptions.ts`, `theme.ts` (palette), `history.ts`, `diff.ts`, `markdown.tsx`, `schemaValidator.ts`.
 - `frontend/src/components/dashboard/`: `Canvas`, `ItemFrame`, `FiltersBar`, `EditorPanels`, `MonacoJson`; `components/ConfigForm.tsx` (rjsf), `components/EChart.tsx`.
 - Pages: `Dashboards`, `DashboardPage`, `DashboardEditor`.
+
+**MCP and agent writes (M5)**
+- `opsis/mcp/`: `tools.py` (the 21 tools and `call`), `server.py` (endpoint, authentication, resources, prompt), `guide.py` (instructions, guide and prompt text).
+- `opsis/dashboards/patch.py` (JSON Patch), `opsis/services/tokens.py`, `opsis/services/events.py`, `opsis/api/tokens.py`. Migration `0006`.
+- Frontend: `pages/Tokens.tsx`; `useDashboardEvents` in `lib/dashboard.ts`; the remote-change notice in `DashboardEditor`.
+- `e2e/` (Playwright tests and helpers), `scripts/smoke.mjs`, `compose.subpath.yml`, `.mcp.json`.
 
 ## M3.5 (from the M3 review)
 
@@ -166,46 +193,49 @@ Not verified:
 - ADR-005, 006, 007 (approved).
 - ADR-016: CSRF protection brought forward from M6.
 - ADR-017: the CSV and Excel connector id is `file`, not `csv`.
-- ADR-018: connection forms use a small built-in schema form. Visual config panels use rjsf with our own CSP-safe validator instead of ajv (decided in M4). shadcn/ui is still not added.
-- ADR-019: a fourth spec file (`semantic-model.schema.json`); query values are SQL literals rendered by sqlglot, not bound parameters (approved at the M3 review, with the value checks of ADR-020); the model editor is still a plain text area (Monaco is now available and could replace it).
-- ADR-021 (new, M4): field wells are selectors with add and remove, not drag-and-drop of fields; the combo chart has one value axis, never two; cross-filter and drill state live in the view, not in the spec; the chart palette and mark rules are fixed in code.
+- ADR-018: connection forms use a small built-in schema form. Visual config panels use rjsf with our own CSP-safe validator instead of ajv. shadcn/ui is still not added.
+- ADR-019: a fourth spec file (`semantic-model.schema.json`); query values are SQL literals rendered by sqlglot, not bound parameters (approved); the model editor is still a plain text area.
+- ADR-021: field wells are selectors, not drag-and-drop (accepted for v1); cross-filter and drill state live in the view, not in the spec; the chart palette and mark rules are fixed in code.
+- ADR-022 (new, M5): the MCP endpoint is stateless with JSON responses, so it never streams and cannot push to a client; `share_dashboard` and `create_share_link` wait for M6; JSON Patch is our own code, not a library; personal access tokens work for MCP only; the smoke test covers build, save, reload, restore and publish, and does not sign in because there is no sign-in until M6.
 - ADR-015: the task runner is npm scripts, not `tasks.py`; `httpx2` for the test client (approved).
 
 ## Open issues and notes
 
-- Dashboards have no per-dashboard permissions yet: anyone with `dashboards:edit` can edit any dashboard, and viewers see every published one. Sharing and access arrive in M6.
-- Cross-filter, drill and filter values are not kept in the URL, so a reload returns to the defaults.
-- A new visual is placed beside the last one when it fits, otherwise below. The grid packs tiles upward, so empty rows cannot be kept.
-- The JSON tab's message for broken JSON is the browser's own parser message (position, line and column), not a JSON pointer, because there is no document to point into yet.
-- Two open editors on one dashboard: the second save gets a 409 and a message. Live updates arrive with the SSE channel in M5.
-- Bundle size: the main chunk is 755 kB (236 kB gzipped), ECharts 562 kB and Monaco 3.4 MB, both lazy. Acceptable for a self-hosted tool; could be trimmed in M8.
-- Joins are one hop from the query's dataset (two-hop joins: M8 backlog).
-- The query builder has one filter row. The API accepts any number.
+- **Row-level security and raw previews (see Q1).** The REST preview of a dataset (`GET /api/datasets/{id}/preview`, the Datasets page) shows raw rows to anyone with `datasets:edit`, including an editor to whom an RLS rule applies. That is M2 behaviour. The MCP tools refuse in that case; the REST endpoint does not yet.
+- The MCP SDK resolved to version 2.3, a new major version. The server uses its low-level API. Expect to revisit on SDK upgrades.
+- The live event hub is in the memory of the single api process. Two api processes would need Postgres LISTEN/NOTIFY (R5).
+- The audit log has rows for every agent write but no screen to browse them yet (M6).
+- The Access tokens link sits in the "Admin" group of the navigation, although every role can use it.
+- A right-hand axis that shows counts can have decimal tick labels, because its ticks are aligned to the left axis.
+- If a smoke run is killed half-way it can leave a `smoke_...` dataset and connection behind; a completed run removes what it made.
+- `deploy/windows/README.md` and `deploy/proxmox/README.md` are still not written. The Claude Code and Claude Desktop set-up is in the main README for now.
+- Dashboards have no per-dashboard permissions yet (M6). Cross-filter, drill and filter values are not in the URL (M6).
+- Two people editing one dashboard: the second save is refused, and now the second editor is told as soon as the first one saves.
+- Bundle size: main chunk about 760 kB (240 kB gzipped), ECharts 562 kB and Monaco 3.4 MB, both lazy.
+- Joins are one hop (two-hop: M8). The query builder has one filter row.
 - A server install is not usable until M6 (sign-in).
-- Merge refresh does not remove rows deleted in the source. A full rebuild does.
-- One job runs at a time per install. No cancel or progress for a running job.
-- Datasets cannot be edited after creation.
+- Merge refresh does not remove rows deleted in the source. One job runs at a time. Datasets cannot be edited after creation.
 - `cloudflared` and `ollama` images are on `latest` until M6 and M7.
-- `deploy/proxmox/README.md` and `deploy/windows/README.md` are not written yet. No `.mcp.json` yet (M5).
-- Risks still open: R2 (DuckDB memory in the api process; per-query limit and concurrency cap set), R3 (snapshot rewrite cost), R5 (single api process), R6 (MCP mounting), R8 (hot reload on the Windows filesystem), R10 (share links on RLS datasets; `may_be_exempt=False` is ready for them).
+- Risks still open: R2 (DuckDB memory in the api process), R3 (snapshot rewrite cost), R5 (single api process), R8 (hot reload on the Windows filesystem), R10 (share links on RLS datasets). R6 (mounting MCP in the api) is closed: it runs at the root and under the sub-path.
 
 ## Backlog agreed at reviews
 
-- **M6:** "View as" a specific user or role on a dashboard; share links and anonymous access never inherit an RLS exemption; per-dashboard access; named theme presets from branding.
-- **M8:** bulk export and import of a `models/` folder; two-hop joins; the 10 million row check; a Playwright smoke test (could come earlier if wanted, see Q2).
+- **M6:** "View as" a specific user or role; share links and anonymous access never inherit an RLS exemption; per-dashboard access; named theme presets from branding; filter, cross-filter and drill state in the URL; the `share_dashboard` and `create_share_link` tools; a screen for the audit log; the smoke test signs in.
+- **M8:** bulk export and import of a `models/` folder; two-hop joins; the 10 million row check; drag-and-drop of fields into wells.
+- **Later (brief):** OAuth for the MCP server so it can be a claude.ai connector.
 
 ## Questions for review
 
-- **Q1. Field wells.** Fields are added to a visual's roles from a selector, not dragged from a field list. Is that acceptable for v1, or do you want drag-and-drop of fields before M5?
-- **Q2. Playwright.** All browser checks so far are manual. Do you want a small Playwright smoke test (build a dashboard, save, reload, restore) added at the start of M5, run at the root and under /opsis, rather than waiting for M8?
-- **Q3. Combo chart.** It has one value axis by design (ADR-021). Say if you need a second axis as an option despite the risk of misleading comparisons.
-- **Q4. View state in the URL.** Should filter values, cross-filters and drill grains be kept in the URL so a filtered view can be bookmarked and shared? Small to add; natural to do with share links in M6.
+- **Q1. Raw previews and row-level security.** Should the REST dataset preview follow the same rule as the MCP tools, and refuse raw rows to a user an RLS rule applies to? I recommend yes. It changes M2 behaviour for editors on datasets with rules; admins are unaffected.
+- **Q2. Tokens for the REST API.** Personal access tokens currently work for MCP only. Do you want them accepted by the REST API as well (for scripts), in M6 with the rest of sign-in?
+- **Q3. Stateless MCP.** The endpoint answers each request with plain JSON and keeps no session, which is the most robust choice behind your proxy. The cost is no server-to-client notifications, which no tool uses. Say if you would rather have the streaming, stateful mode.
+- **Q4. Sonnet results.** When you test with Sonnet, the most useful thing to send back is the tool call that went wrong and the error text it got. Those are quick to turn into a better description or message.
 
 ## Exact next step
 
-After review, start **M5 (MCP)**. Read the M5 section of BUILD_BRIEF.md first. In outline:
+After review, start **M6 (Auth and sharing)**. Read the M6 section of BUILD_BRIEF.md first. In outline:
 
-1. Mount the MCP server in the api under the base path (risk R6), with the streaming settings from section 3.1, and add `.mcp.json`.
-2. Tools over the existing services: list datasets and models, read and validate a model, run a semantic query, list and read dashboards, validate a spec, write a dashboard as JSON Patch plus `base_version` (409 when stale), with every agent write recorded as an agent-authored version and in the audit log.
-3. The dashboard SSE channel (`version_created`) so an open editor reloads the draft and offers Undo.
-4. Verify with a real MCP client at the root and under /opsis through the `proxytest` profile.
+1. Sign-in: `AUTH_MODE=local` (passwords with argon2, sessions in the `sessions` table, first-run admin) and `AUTH_MODE=full` (Google OIDC through Authlib), replacing the 401 in `get_principal`. Users page, roles, attributes for RLS.
+2. Sharing: per-dashboard access, share links behind `FEATURE_PUBLIC_SHARE_LINKS` that never inherit an RLS exemption, "View as", view state in the URL.
+3. The two sharing tools for MCP, tokens for REST if wanted (Q2), and a screen for the audit log.
+4. Extend the Playwright tests to sign in, and run them at both URLs.

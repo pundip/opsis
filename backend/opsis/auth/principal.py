@@ -58,6 +58,12 @@ class Principal:
     attributes: Mapping[str, Any] = field(default_factory=dict)
     # None means unrestricted. Personal access tokens narrow this (M5).
     allowed: frozenset[Permission] | None = None
+    # None means not limited by token scopes (a signed-in person, or MCP_AUTH=none).
+    # A personal access token sets this to its scopes: read, edit, publish, admin.
+    scopes: frozenset[str] | None = None
+
+    def has_scope(self, scope: str) -> bool:
+        return self.scopes is None or scope in self.scopes
 
     @property
     def permissions(self) -> frozenset[Permission]:

@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Header, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from opsis.api.deps import get_db, get_settings, require
+from opsis.api.sse import sse_response
 from opsis.auth.principal import Permission, Principal
-from opsis.services import dashboards
+from opsis.services import dashboards, events
 from opsis.settings import Settings
 
 router = APIRouter(prefix="/api")
+
+# A random id the editor sends with its own writes, so it can ignore the events they cause.
+ClientId = Header(default=None, alias="X-Opsis-Client", max_length=64)
 
 view = require(Permission.DASHBOARDS_VIEW)
 edit = require(Permission.DASHBOARDS_EDIT)
@@ -105,6 +111,7 @@ def save_dashboard(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     actor: Principal = Depends(edit),
+    client_id: str | None = ClientId,
 ) -> dict[str, Any]:
     saved = dashboards.save(
         db,
@@ -114,6 +121,7 @@ def save_dashboard(
         body.spec,
         base_version=body.baseVersion,
         message=body.message,
+        client_id=client_id,
     )
     return dashboards.detail(db, saved, actor)
 
@@ -149,8 +157,11 @@ def restore_version(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     actor: Principal = Depends(edit),
+    client_id: str | None = ClientId,
 ) -> dict[str, Any]:
-    restored = dashboards.restore(db, settings, actor, dashboards.get(db, dashboard_id), version)
+    restored = dashboards.restore(
+        db, settings, actor, dashboards.get(db, dashboard_id), version, client_id=client_id
+    )
     return dashboards.detail(db, restored, actor)
 
 
@@ -160,9 +171,10 @@ def publish_dashboard(
     body: PublishIn | None = None,
     db: Session = Depends(get_db),
     actor: Principal = Depends(publish_permission),
+    client_id: str | None = ClientId,
 ) -> dict[str, Any]:
     target = dashboards.get(db, dashboard_id)
-    dashboards.publish(db, actor, target, body.version if body else None)
+    dashboards.publish(db, actor, target, body.version if body else None, client_id=client_id)
     return dashboards.detail(db, target, actor)
 
 
@@ -175,6 +187,31 @@ def unpublish_dashboard(
     target = dashboards.get(db, dashboard_id)
     dashboards.unpublish(db, actor, target)
     return dashboards.detail(db, target, actor)
+
+
+@router.get("/dashboards/{dashboard_id}/events")
+async def dashboard_events(
+    dashboard_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    _: Principal = Depends(edit),
+) -> StreamingResponse:
+    """Server-sent events for an open editor: `version_created` and `published`.
+
+    The first event is `hello` with the current version, so a client that
+    reconnects can tell whether it missed anything.
+    """
+    current = dashboards.get(db, dashboard_id)
+    hello = {"dashboardId": str(current.id), "version": current.version}
+    # The stream can stay open for hours. Give the database connection back now.
+    db.close()
+
+    async def stream() -> AsyncIterator[tuple[str, Any]]:
+        yield "hello", hello
+        async for event in events.hub.subscribe(events.dashboard_channel(dashboard_id)):
+            yield event
+
+    return sse_response(stream(), settings.sse_keepalive_seconds)
 
 
 @router.post("/dashboards/{dashboard_id}/data")

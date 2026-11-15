@@ -8,6 +8,7 @@ import {
   type Item,
   type Spec,
   bindingField,
+  bindingAxis,
   bindingGrain,
   defaultConfig,
   newId,
@@ -131,6 +132,18 @@ export function ItemPanel({ item, datasets, fields, onChange, onRemove }: ItemPa
                                   {GRAIN_LABELS[grain]}
                                 </option>
                               ))}
+                            </select>
+                          )}
+                          {rule.axis && (
+                            <select
+                              aria-label={`Value axis for ${fieldLabel(fields, ref)}`}
+                              title="Which value axis this measure is drawn against. Use the right axis for a measure in a different unit, such as a count next to an amount."
+                              className="rounded border border-zinc-300 bg-transparent text-xs dark:border-zinc-600"
+                              value={bindingAxis(entry)}
+                              onChange={(e) => replace(e.target.value === "right" ? { field: ref, axis: "right" } : ref)}
+                            >
+                              <option value="left">Left axis</option>
+                              <option value="right">Right axis</option>
                             </select>
                           )}
                           <button

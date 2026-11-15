@@ -13,6 +13,7 @@
     "lint:backend": "docker compose -f compose.yml -f compose.dev.yml run --rm --build tools sh -c \"ruff check --no-cache opsis tests && ruff format --no-cache --check opsis tests && mypy --cache-dir=/tmp/mypy\"",
     "format:backend": "docker run --rm -v ./backend:/app -w /app python:3.12-slim-bookworm sh -c \"pip install -q --root-user-action=ignore ruff && ruff format --no-cache opsis tests && ruff check --no-cache --fix opsis tests\"",
     "lock:backend": "docker run --rm -v ./backend:/app -w /app -e UV_LINK_MODE=copy python:3.12-slim-bookworm sh -c \"pip install -q --root-user-action=ignore uv==0.13.8 && uv lock\"",
+    "smoke": "node scripts/smoke.mjs",
     "check-config": "docker compose run --rm --no-deps api check-config"
   }
 }

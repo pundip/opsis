@@ -67,7 +67,7 @@ describe("navItems", () => {
 
   it("follows permissions", () => {
     const viewer: Me = { ...admin, role: "viewer", permissions: ["dashboards:view"] };
-    expect(paths(config, viewer)).toEqual(["/dashboards"]);
+    expect(paths(config, viewer)).toEqual(["/dashboards", "/tokens"]);
   });
 });
 

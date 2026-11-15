@@ -1,10 +1,13 @@
 // Types and data hooks for dashboards.
 import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiDelete, apiGet, apiPost, apiPut } from "./api";
+import { useEffect, useRef } from "react";
+import { CLIENT_ID, apiDelete, apiGet, apiPost, apiPut } from "./api";
+import { url } from "./runtime";
 import type { Field, Grain, ModelDetail, ResultColumn, SemanticQuery } from "./semantic";
 import type { ThemeSpec } from "./theme";
 
-export type Binding = string | { field: string; grain?: Grain };
+export type Axis = "left" | "right";
+export type Binding = string | { field: string; grain?: Grain; axis?: Axis };
 
 export interface Position {
   x: number;
@@ -55,6 +58,8 @@ export interface Role {
   max: number;
   label?: string;
   types?: string[];
+  /** Measures in this role may choose the left or right value axis. */
+  axis?: boolean;
 }
 
 export interface Manifest {
@@ -128,6 +133,7 @@ export type DataSource = { kind: "draft" | "published" } | { kind: "inline"; spe
 
 export const bindingField = (binding: Binding) => (typeof binding === "string" ? binding : binding.field);
 export const bindingGrain = (binding: Binding) => (typeof binding === "string" ? undefined : binding.grain);
+export const bindingAxis = (binding: Binding): Axis => (typeof binding === "string" ? "left" : (binding.axis ?? "left"));
 
 /** Fields bound to a role, in order. */
 export function bound(item: Item, role: string): string[] {
@@ -226,6 +232,47 @@ export const useRestoreDashboard = (id: string) =>
   useDashboardMutation(id, (version: number) =>
     apiPost<DashboardDetail>(`/api/dashboards/${id}/versions/${version}/restore`),
   );
+
+/** A change to a dashboard made somewhere else: another tab, another person, or the assistant. */
+export interface DashboardEvent {
+  kind: "hello" | "version_created" | "published";
+  version: number;
+  publishedVersion?: number | null;
+  authorType?: "user" | "agent" | "system";
+  authorName?: string;
+  message?: string | null;
+}
+
+/**
+ * Listen to a dashboard's live event stream while the editor is open.
+ * Events caused by this tab are dropped. The browser reconnects by itself, and
+ * the first event after each connect ("hello") carries the current version so
+ * nothing is missed in between.
+ */
+export function useDashboardEvents(id: string, onEvent: (event: DashboardEvent) => void): void {
+  const handler = useRef(onEvent);
+  useEffect(() => {
+    handler.current = onEvent;
+  });
+  useEffect(() => {
+    if (typeof EventSource === "undefined") return;
+    const source = new EventSource(url(`/api/dashboards/${id}/events`));
+    const listen = (kind: DashboardEvent["kind"]) =>
+      source.addEventListener(kind, (message) => {
+        try {
+          const data = JSON.parse((message as MessageEvent<string>).data) as DashboardEvent & { clientId?: string | null };
+          if (data.clientId && data.clientId === CLIENT_ID) return;
+          handler.current({ ...data, kind });
+        } catch {
+          // A malformed event is ignored; the next one corrects the state.
+        }
+      });
+    listen("hello");
+    listen("version_created");
+    listen("published");
+    return () => source.close();
+  }, [id]);
+}
 
 export function useDashboardVersions(id: string) {
   return useQuery({
