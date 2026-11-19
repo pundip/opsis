@@ -95,6 +95,7 @@ def serialize(
         "cursorField": dataset.cursor_field,
         "primaryKey": dataset.primary_key,
         "columns": dataset.columns,
+        "restricted": dataset.restricted,
         "snapshot": snapshot_dict(snapshot, True) if snapshot else None,
         "lastJob": job_dict(job) if job else None,
         "createdAt": dataset.created_at.isoformat(),
@@ -252,7 +253,21 @@ def list_snapshots(db: Session, dataset: Dataset) -> list[dict[str, Any]]:
     return [snapshot_dict(s, s.id == dataset.current_snapshot_id) for s in rows]
 
 
-def preview(db: Session, settings: Settings, dataset: Dataset, limit: int) -> dict[str, Any]:
+def preview(
+    db: Session,
+    settings: Settings,
+    dataset: Dataset,
+    limit: int,
+    *,
+    principal: Principal | None = None,
+    runtime: Any | None = None,
+) -> dict[str, Any]:
+    """The first rows of the current snapshot.
+
+    With a `principal`, row-level security is applied: when a rule of the
+    dataset's model restricts that user, the rows are read through the same
+    filtered scan as every query, so a preview never shows a hidden row.
+    """
     limit = max(1, min(limit, MAX_PREVIEW_ROWS))
     snapshot = (
         db.get(Snapshot, dataset.current_snapshot_id) if dataset.current_snapshot_id else None
@@ -262,12 +277,27 @@ def preview(db: Session, settings: Settings, dataset: Dataset, limit: int) -> di
             409, "no_data", "This dataset has no data yet. Wait for the first refresh to finish."
         )
     path = snapshots.snapshot_dir(settings, dataset.id, snapshot.id)
+    restricted = False
+    rows: list[list[Any]] | None = None
+    if principal is not None:
+        from opsis.services import query as queries  # avoids an import cycle
+
+        source = queries.load_sources(db, settings, {dataset.name}).get(dataset.name)
+        user = queries.user_context(principal, None)
+        if source is not None and queries.rls_applies(source, user):
+            if runtime is None:
+                raise ApiError(403, "forbidden", "Row-level security applies to this dataset.")
+            db.rollback()
+            rows = queries.secured_preview(settings, runtime, source, user, limit)
+            restricted = True
     return {
         "snapshotId": str(snapshot.id),
         "columns": snapshot.columns,
-        "rows": snapshots.preview(path, limit),
-        "rowCount": snapshot.row_count,
+        "rows": rows if rows is not None else snapshots.preview(path, limit),
+        # With row-level security the total would reveal how much is hidden.
+        "rowCount": None if restricted else snapshot.row_count,
         "limit": limit,
+        "rlsApplied": restricted,
     }
 
 

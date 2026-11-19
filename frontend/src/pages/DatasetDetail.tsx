@@ -1,7 +1,8 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import type { AppConfig } from "../lib/config";
+import { DatasetAccessPanel } from "../components/DatasetAccessPanel";
+import type { AppConfig, Me } from "../lib/config";
 import {
   type Job,
   isActive,
@@ -50,7 +51,7 @@ export function JobRow({ job, timezone, name }: { job: Job; timezone: string; na
   );
 }
 
-export function DatasetDetail({ config }: { config: AppConfig }) {
+export function DatasetDetail({ config, me }: { config: AppConfig; me: Me }) {
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const client = useQueryClient();
@@ -127,6 +128,7 @@ export function DatasetDetail({ config }: { config: AppConfig }) {
         }
       />
       <ErrorNote error={refresh.error ?? remove.error} />
+      {config.authMode !== "none" && me.permissions.includes("settings:manage") && <DatasetAccessPanel datasetId={id} />}
 
       <Card className="mb-5 p-4">
         <dl className="grid grid-cols-2 gap-4 md:grid-cols-5">
@@ -218,8 +220,9 @@ export function DatasetDetail({ config }: { config: AppConfig }) {
               </table>
             </div>
             <p className="border-t border-zinc-200 px-3 py-2 text-xs text-zinc-500 dark:border-zinc-800">
-              Showing {formatNumber(preview.data.rows.length)} of{" "}
-              {formatNumber(preview.data.rowCount)} rows, {preview.data.columns.length} columns.
+              {preview.data.rowCount === null
+                ? `Showing ${formatNumber(preview.data.rows.length)} rows, ${preview.data.columns.length} columns. Row-level security applies to you: only rows you may see are shown.`
+                : `Showing ${formatNumber(preview.data.rows.length)} of ${formatNumber(preview.data.rowCount)} rows, ${preview.data.columns.length} columns.`}
             </p>
           </>
         ) : (

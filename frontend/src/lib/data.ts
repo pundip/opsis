@@ -114,8 +114,10 @@ export interface Preview {
   snapshotId: string;
   columns: Column[];
   rows: unknown[][];
-  rowCount: number;
+  // Null when row-level security applies: the total would reveal how much is hidden.
+  rowCount: number | null;
   limit: number;
+  rlsApplied?: boolean;
 }
 
 export const isActive = (job: Job | null | undefined) =>

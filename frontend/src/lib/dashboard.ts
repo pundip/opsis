@@ -83,6 +83,8 @@ export interface DashboardSummary {
   hasUnpublishedChanges: boolean;
   ownerName: string | null;
   updatedAt: string;
+  canEdit?: boolean;
+  access?: "admin" | "owner" | "editor" | "viewer" | null;
 }
 
 export interface DashboardDetail extends DashboardSummary {
@@ -90,6 +92,9 @@ export interface DashboardDetail extends DashboardSummary {
   spec: Spec;
   canEdit: boolean;
   canPublish: boolean;
+  canShare: boolean;
+  isOwner: boolean;
+  access: "admin" | "owner" | "editor" | "viewer" | null;
 }
 
 export interface DashboardVersion {
@@ -129,7 +134,22 @@ export interface ItemData {
   query?: SemanticQuery;
 }
 
-export type DataSource = { kind: "draft" | "published" } | { kind: "inline"; spec: Spec };
+/** Who row-level security sees when an admin uses View as. */
+export type ViewAs = { label: string } & ({ userId: string } | { role: string; attributes: Record<string, unknown> });
+
+export type DataSource =
+  | { kind: "draft" | "published"; viewAs?: ViewAs | null }
+  | { kind: "inline"; spec: Spec }
+  // A public share link: the token is all the API needs.
+  | { kind: "link"; token: string };
+
+function viewAsBody(source: DataSource): Record<string, unknown> | undefined {
+  if ((source.kind !== "draft" && source.kind !== "published") || !source.viewAs) return undefined;
+  // The label is for the screen only; the API needs the rest.
+  return "userId" in source.viewAs
+    ? { userId: source.viewAs.userId }
+    : { role: source.viewAs.role, attributes: source.viewAs.attributes };
+}
 
 export const bindingField = (binding: Binding) => (typeof binding === "string" ? binding : binding.field);
 export const bindingGrain = (binding: Binding) => (typeof binding === "string" ? undefined : binding.grain);
@@ -305,15 +325,19 @@ export function useItemData(dashboardId: string, item: Item, spec: Spec, source:
     grains: state.grains[item.id] ? { [item.id]: state.grains[item.id] } : {},
   };
   const key = source.kind === "inline" ? dataFingerprint(spec, item) : source.kind;
+  const viewAs = viewAsBody(source);
   return useQuery({
-    queryKey: ["item-data", dashboardId, item.id, key, JSON.stringify(relevant)],
+    queryKey: ["item-data", dashboardId, item.id, key, JSON.stringify(relevant), JSON.stringify(viewAs ?? null)],
     queryFn: () =>
-      apiPost<ItemData>(`/api/dashboards/${dashboardId}/data`, {
-        itemId: item.id,
-        source: source.kind,
-        spec: source.kind === "inline" ? source.spec : undefined,
-        state: relevant,
-      }),
+      source.kind === "link"
+        ? apiPost<ItemData>(`/api/public/links/${source.token}/data`, { itemId: item.id, state: relevant })
+        : apiPost<ItemData>(`/api/dashboards/${dashboardId}/data`, {
+            itemId: item.id,
+            source: source.kind,
+            spec: source.kind === "inline" ? source.spec : undefined,
+            state: relevant,
+            viewAs,
+          }),
     placeholderData: keepPreviousData,
     retry: false,
     staleTime: 30_000,
@@ -322,11 +346,20 @@ export function useItemData(dashboardId: string, item: Item, spec: Spec, source:
 
 export function useFilterOptions(dashboardId: string, filter: FilterControl, source: DataSource, enabled: boolean) {
   return useQuery({
-    queryKey: ["filter-options", dashboardId, filter.id, filter.field, source.kind],
+    queryKey: ["filter-options", dashboardId, filter.id, filter.field, source.kind, JSON.stringify(viewAsBody(source) ?? null)],
     queryFn: () =>
       apiPost<{ values: (string | number | boolean)[]; truncated: boolean }>(
-        `/api/dashboards/${dashboardId}/filter-options`,
-        { filterId: filter.id, source: source.kind, spec: source.kind === "inline" ? source.spec : undefined },
+        source.kind === "link"
+          ? `/api/public/links/${source.token}/filter-options`
+          : `/api/dashboards/${dashboardId}/filter-options`,
+        source.kind === "link"
+          ? { filterId: filter.id }
+          : {
+              filterId: filter.id,
+              source: source.kind,
+              spec: source.kind === "inline" ? source.spec : undefined,
+              viewAs: viewAsBody(source),
+            },
       ),
     enabled,
     retry: false,

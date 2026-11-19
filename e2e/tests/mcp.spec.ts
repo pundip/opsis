@@ -4,7 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { expect, test } from "@playwright/test";
 import { baseURL } from "../playwright.config";
-import { createDataset, removeFixture, tiles, watchPage, type Fixture } from "./helpers";
+import { api, createDataset, removeFixture, tiles, watchPage, type Fixture } from "./helpers";
 
 interface ToolOutcome {
   ok: boolean;
@@ -12,10 +12,20 @@ interface ToolOutcome {
   data: any;
 }
 
-async function connect(): Promise<Client> {
+/** An MCP client. With MCP_AUTH=token it sends a personal access token, as Claude Code would. */
+async function connect(token?: string): Promise<Client> {
   const client = new Client({ name: "opsis-e2e", version: "1.0.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL("mcp", baseURL)));
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  await client.connect(new StreamableHTTPClientTransport(new URL("mcp", baseURL), { requestInit: { headers } }));
   return client;
+}
+
+/** A token for the MCP client when the stack wants one; undefined otherwise. */
+async function mcpToken(page: import("@playwright/test").Page, scopes: string[]): Promise<string | undefined> {
+  const config = await api(page, "GET", "api/config");
+  if (config.mcpAuth !== "token") return undefined;
+  const made = await api(page, "POST", "api/tokens", { name: "smoke test", scopes, days: 1 });
+  return made.token as string;
 }
 
 async function call(client: Client, name: string, args: Record<string, unknown> = {}): Promise<ToolOutcome> {
@@ -40,7 +50,7 @@ test("an agent builds a dashboard over MCP and an open editor follows it live", 
   try {
     fixture = await createDataset(page);
     const dataset = fixture.dataset;
-    client = await connect();
+    client = await connect(await mcpToken(page, ["read", "edit", "publish"]));
 
     await test.step("discover", async () => {
       const listed = await client!.listTools();

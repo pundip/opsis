@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from opsis.api.deps import get_db, get_settings, require
 from opsis.api.sse import sse_response
 from opsis.auth.principal import Permission, Principal
-from opsis.services import dashboards, events
+from opsis.services import access, dashboards, events
 from opsis.settings import Settings
 
 router = APIRouter(prefix="/api")
@@ -23,7 +23,10 @@ router = APIRouter(prefix="/api")
 ClientId = Header(default=None, alias="X-Opsis-Client", max_length=64)
 
 view = require(Permission.DASHBOARDS_VIEW)
+# POSTs that only read: an access token with the read scope may use them.
+view_read = require(Permission.DASHBOARDS_VIEW, read_only=True)
 edit = require(Permission.DASHBOARDS_EDIT)
+edit_read = require(Permission.DASHBOARDS_EDIT, read_only=True)
 publish_permission = require(Permission.DASHBOARDS_PUBLISH)
 
 
@@ -51,6 +54,8 @@ class DataIn(BaseModel):
     source: Literal["draft", "published", "inline"] = "draft"
     spec: dict[str, Any] | None = None  # with source "inline": the unsaved spec to preview
     state: dict[str, Any] | None = None  # {"filters": {...}, "cross": [...], "grains": {...}}
+    # Admins only: see the data as {"userId": ...} or {"role": ..., "attributes": {...}}.
+    viewAs: dict[str, Any] | None = None
 
 
 class OptionsIn(BaseModel):
@@ -58,6 +63,7 @@ class OptionsIn(BaseModel):
     source: Literal["draft", "published", "inline"] = "draft"
     spec: dict[str, Any] | None = None
     search: str | None = Field(default=None, max_length=200)
+    viewAs: dict[str, Any] | None = None
 
 
 @router.get("/visuals")
@@ -91,9 +97,9 @@ def validate_spec(
     body: ValidateIn,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    _: Principal = Depends(edit),
+    principal: Principal = Depends(edit_read),
 ) -> dict[str, Any]:
-    found = dashboards.problems(db, settings, body.spec)
+    found = dashboards.problems(db, settings, body.spec, principal)
     return {"valid": not found, "problems": found}
 
 
@@ -135,9 +141,9 @@ def delete_dashboard(
 
 @router.get("/dashboards/{dashboard_id}/versions")
 def list_versions(
-    dashboard_id: uuid.UUID, db: Session = Depends(get_db), _: Principal = Depends(edit)
+    dashboard_id: uuid.UUID, db: Session = Depends(get_db), principal: Principal = Depends(edit)
 ) -> list[dict[str, Any]]:
-    return dashboards.list_versions(db, dashboards.get(db, dashboard_id))
+    return dashboards.list_versions(db, dashboards.get(db, dashboard_id), principal)
 
 
 @router.get("/dashboards/{dashboard_id}/versions/{version}")
@@ -145,9 +151,9 @@ def get_version(
     dashboard_id: uuid.UUID,
     version: int,
     db: Session = Depends(get_db),
-    _: Principal = Depends(edit),
+    principal: Principal = Depends(edit),
 ) -> dict[str, Any]:
-    return dashboards.get_version(db, dashboards.get(db, dashboard_id), version)
+    return dashboards.get_version(db, dashboards.get(db, dashboard_id), version, principal)
 
 
 @router.post("/dashboards/{dashboard_id}/versions/{version}/restore")
@@ -194,7 +200,7 @@ async def dashboard_events(
     dashboard_id: uuid.UUID,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    _: Principal = Depends(edit),
+    principal: Principal = Depends(edit),
 ) -> StreamingResponse:
     """Server-sent events for an open editor: `version_created` and `published`.
 
@@ -202,6 +208,7 @@ async def dashboard_events(
     reconnects can tell whether it missed anything.
     """
     current = dashboards.get(db, dashboard_id)
+    access.require_dashboard(db, current, principal, "edit")
     hello = {"dashboardId": str(current.id), "version": current.version}
     # The stream can stay open for hours. Give the database connection back now.
     db.close()
@@ -221,7 +228,7 @@ def item_data(
     request: Request,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    principal: Principal = Depends(view),
+    principal: Principal = Depends(view_read),
 ) -> dict[str, Any]:
     return dashboards.item_data(
         db,
@@ -233,6 +240,7 @@ def item_data(
         source=body.source,
         inline_spec=body.spec,
         state=body.state,
+        view_as=body.viewAs,
     )
 
 
@@ -243,7 +251,7 @@ def filter_options(
     request: Request,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    principal: Principal = Depends(view),
+    principal: Principal = Depends(view_read),
 ) -> dict[str, Any]:
     return dashboards.filter_options(
         db,
@@ -255,4 +263,5 @@ def filter_options(
         source=body.source,
         inline_spec=body.spec,
         search=body.search,
+        view_as=body.viewAs,
     )

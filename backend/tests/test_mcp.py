@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import threading
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -17,7 +18,15 @@ from sqlalchemy.orm import Session
 
 from opsis.auth.principal import Principal
 from opsis.dashboards import patch as patches
-from opsis.db.models import AccessToken, AuditLog, DashboardVersion, User
+from opsis.db.models import (
+    AccessToken,
+    AuditLog,
+    DashboardShare,
+    DashboardVersion,
+    Dataset,
+    SemanticModel,
+    User,
+)
 from opsis.errors import ApiError
 from opsis.mcp import tools
 from opsis.services import events, tokens, users
@@ -506,7 +515,17 @@ def test_access_tokens_scopes_and_roles(
         "create_dashboard", title="No", spec=spec
     )
     assert as_viewer.call("list_dashboards")["dashboards"] == []  # nothing is published yet
-    assert "not been published" in as_viewer.fail("get_dashboard", id=created["id"])
+    # Not shared with them: as if it did not exist.
+    assert "no dashboard with the id or title" in as_viewer.fail("get_dashboard", id=created["id"])
+    db.add(
+        DashboardShare(
+            dashboard_id=uuid.UUID(created["id"]), grantee=f"user:{viewer.user_id}", role="viewer"
+        )
+    )
+    db.commit()
+    assert "no dashboard with the id or title" in as_viewer.fail(
+        "get_dashboard", id=created["id"]
+    )  # not published
     everything = Mcp(client, token_for(db, admin_principal, "read", "edit", "publish"))
     everything.call("publish_dashboard", id=created["id"])
     assert as_viewer.call("get_dashboard", id=created["id"])["version"] == 1
@@ -575,15 +594,42 @@ def test_row_level_security_holds_through_the_tools(
     )
     assert rows == [["VIC", vic]]
 
-    # The tools that read rows directly would show what the rule hides, so they refuse.
-    for tool, arguments in (("preview_dataset", {}), ("profile_column", {"column": "region"})):
-        refused = mcp.fail(tool, dataset="gifts", **arguments)
-        assert "Error (forbidden)" in refused and "Use run_query instead" in refused
+    # The tools that read rows directly go through the same filter (decided at the M5
+    # review), and do not reveal how many rows are hidden.
+    preview = mcp.call("preview_dataset", dataset="gifts", limit=100)
+    region = [c["name"] for c in preview["columns"]].index("region")
+    assert preview["rowsShown"] == 100 and {row[region] for row in preview["rows"]} == {"VIC"}
+    assert preview["rowCount"] is None and "Row-level security applies" in preview["note"]
+    profile = mcp.call("profile_column", dataset="gifts", column="region")
+    assert profile["rows"] == vic and profile["distinctValues"] == 1
+    assert (
+        profile["mostCommon"] == [{"value": "VIC", "rows": vic}]
+        and "only your rows" in profile["note"]
+    )
     described = mcp.call("describe_dataset", dataset="gifts")
-    assert all("sampleValues" not in d for d in described["dimensions"])
-    assert "row-level security" in described["sampleValuesNote"]
+    samples = {d["ref"]: d.get("sampleValues") for d in described["dimensions"]}
+    assert samples["gifts.region"] == ["VIC"] and described["rowCount"] is None
+    assert "row-level security" in described["sampleValuesNote"].lower()
     # A dataset without rules is unaffected.
-    assert mcp.call("preview_dataset", dataset="donors", limit=2)["rowsShown"] == 2
+    donors = mcp.call("preview_dataset", dataset="donors", limit=2)
+    assert donors["rowsShown"] == 2 and donors["rowCount"] == 40
+
+    # A rule that cannot be applied (here: its column has gone) refuses; it never shows
+    # raw rows instead.
+    record = db.scalar(
+        select(SemanticModel)
+        .join(Dataset, Dataset.id == SemanticModel.dataset_id)
+        .where(Dataset.name == "gifts")
+    )
+    assert record is not None and record.definition["rls"]
+    record.definition = {
+        **record.definition,
+        "rls": [{"filter": "vanished_column IN {{ user.attributes.regions }}"}],
+    }
+    db.commit()
+    for tool, arguments in (("preview_dataset", {}), ("profile_column", {"column": "fund"})):
+        refused = mcp.fail(tool, dataset="gifts", **arguments)
+        assert "Error (invalid_model)" in refused and "row-level security rule" in refused
 
     # An admin is exempt from the rule, as in the rest of the app.
     admin = users.to_principal(users.get_builtin_admin(db), "none")  # type: ignore[arg-type]

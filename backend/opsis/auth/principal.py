@@ -61,6 +61,21 @@ class Principal:
     # None means not limited by token scopes (a signed-in person, or MCP_AUTH=none).
     # A personal access token sets this to its scopes: read, edit, publish, admin.
     scopes: frozenset[str] | None = None
+    # The browser session behind this request (its stored id), if any.
+    session_id: str | None = None
+    must_change_password: bool = False
+
+    @property
+    def is_admin(self) -> bool:
+        return self.can(Permission.SETTINGS_MANAGE)
+
+    @property
+    def grantees(self) -> frozenset[str]:
+        """How sharing rows can name this principal: as a user, a group member,
+        or part of everyone."""
+        return frozenset(
+            {f"user:{self.user_id}", "everyone", *(f"group:{group}" for group in self.groups)}
+        )
 
     def has_scope(self, scope: str) -> bool:
         return self.scopes is None or scope in self.scopes

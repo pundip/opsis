@@ -456,35 +456,10 @@ class _Compiler:
 
     def _table(self, source: Source) -> exp.Expr:
         """A dataset's snapshot, with its row-level security applied inside."""
-        alias = source.model.dataset
-        scan = sqlglot.parse_one("SELECT * FROM read_parquet('x')", read=DIALECT)
-        literal, table = scan.find(exp.Literal), scan.find(exp.Table)
-        assert isinstance(scan, exp.Select) and literal is not None and table is not None
-        # The path is ours (a snapshot directory), and still goes in as a literal.
-        literal.replace(exp.Literal.string(f"{source.table.path}/part-*.parquet"))
-        table.set("alias", exp.TableAlias(this=exp.to_identifier(alias, quoted=True)))
-        conditions = []
-        for index, rule in enumerate(source.model.rls):
-            if self.user.role not in rule.roles and self.user.may_be_exempt:
-                self.rls_bypassed = True  # reported to the user, never silent
-                continue
-            try:
-                conditions.append(
-                    expressions.rls_expression(
-                        rule.filter, alias, list(source.columns), self.user.values()
-                    )
-                )
-            except ExpressionError as exc:
-                # A broken rule must never fail open.
-                raise ApiError(
-                    409,
-                    "invalid_model",
-                    f"A row-level security rule of {alias!r} is invalid, so its data cannot be "
-                    f"queried until the model is fixed (rule {index + 1}: {exc})",
-                ) from exc
-        if conditions:
-            scan = scan.where(exp.and_(*[exp.Paren(this=c) for c in conditions]))
-        return scan.subquery(exp.to_identifier(alias, quoted=True))
+        scan, bypassed = secured_scan(source, self.user)
+        if bypassed:
+            self.rls_bypassed = True  # reported to the user, never silent
+        return scan.subquery(exp.to_identifier(source.model.dataset, quoted=True))
 
     # ---- the whole query -----------------------------------------------------------
 
@@ -670,6 +645,44 @@ def _measure_type(source: Source, measure: Measure) -> ColumnType:
     if measure.agg in ("sum", "min", "max") and measure.column in source.columns:
         return ColumnType(source.columns[str(measure.column)])
     return ColumnType.FLOAT
+
+
+def secured_scan(source: Source, user: UserContext) -> tuple[exp.Select, bool]:
+    """`SELECT * FROM <snapshot> WHERE <row-level security>` for one dataset.
+
+    This is the only way rows are read from a snapshot on behalf of a user:
+    semantic queries build on it, and so do previews and column profiles, so
+    nothing can show a row that a rule hides. The second value is True when a
+    rule exists but does not apply to this user's role.
+    """
+    alias = source.model.dataset
+    scan = sqlglot.parse_one("SELECT * FROM read_parquet('x')", read=DIALECT)
+    literal, table = scan.find(exp.Literal), scan.find(exp.Table)
+    assert isinstance(scan, exp.Select) and literal is not None and table is not None
+    # The path is ours (a snapshot directory), and still goes in as a literal.
+    literal.replace(exp.Literal.string(f"{source.table.path}/part-*.parquet"))
+    table.set("alias", exp.TableAlias(this=exp.to_identifier(alias, quoted=True)))
+    conditions = []
+    bypassed = False
+    for index, rule in enumerate(source.model.rls):
+        if user.role not in rule.roles and user.may_be_exempt:
+            bypassed = True
+            continue
+        try:
+            conditions.append(
+                expressions.rls_expression(rule.filter, alias, list(source.columns), user.values())
+            )
+        except ExpressionError as exc:
+            # A broken rule must never fail open.
+            raise ApiError(
+                409,
+                "invalid_model",
+                f"A row-level security rule of {alias!r} is invalid, so its data cannot be "
+                f"queried until the model is fixed (rule {index + 1}: {exc})",
+            ) from exc
+    if conditions:
+        scan = scan.where(exp.and_(*[exp.Paren(this=c) for c in conditions]))
+    return scan, bypassed
 
 
 def compile_query(

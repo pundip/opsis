@@ -37,6 +37,9 @@ SERVER: dict[str, Any] = {
     "trusted_proxies": "192.168.1.10",
     "postgres_password": "Zq7-fake-test-value-41",
     "encryption_key": TEST_KEY,
+    "admin_email": "admin@example.test",
+    "google_client_id": "client-123",
+    "google_client_secret": "test-client-key-0099",
 }
 
 

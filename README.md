@@ -2,7 +2,7 @@
 
 A self-hosted, AI-native business intelligence platform. Open source, Docker-based, and built so that a person and an AI agent edit the same dashboards.
 
-**Status:** early development. You can connect to CSV or Excel files, PostgreSQL and MySQL, pull tables into local storage, define a semantic model for each dataset (dimensions, measures, joins, row-level security) run queries against it, build dashboards on top with a drag-and-resize editor, and let an AI agent do the same through the built-in MCP server. Sign-in and sharing are being built milestone by milestone. See [PROGRESS.md](PROGRESS.md).
+**Status:** early development. You can connect to CSV or Excel files, PostgreSQL and MySQL, pull tables into local storage, define a semantic model for each dataset (dimensions, measures, joins, row-level security), run queries against it, build dashboards on top with a drag-and-resize editor, let an AI agent do the same through the built-in MCP server, and, on a server, sign in (local accounts and Google), share dashboards with people and groups, and publish read-only share links. More connectors and hardening come next. See [PROGRESS.md](PROGRESS.md).
 
 ## Quick start
 
@@ -112,7 +112,7 @@ The tools: `list_datasets`, `describe_dataset`, `list_visuals`, `get_spec_schema
 cp .env.server.example .env
 ```
 
-Edit `.env` and set every value marked `CHANGE` (public URL, trusted proxy, database password, encryption key). Generate the encryption key with:
+Edit `.env` and set every value marked `CHANGE` (public URL, trusted proxy, database password, encryption key, the first admin, and the Google client). Generate the encryption key with:
 
 ```
 docker compose run --rm --no-deps api generate-key
@@ -124,7 +124,22 @@ Then:
 docker compose up -d
 ```
 
-The stack refuses to start while a `CHANGE` value is still a placeholder. Server mode adds a worker container. Sign-in (local accounts and Google) is part of a later milestone, so a server install currently shows a sign-in notice and nothing else.
+The stack refuses to start while a `CHANGE` value is still a placeholder. Server mode adds a worker container. The full walk-through for a Proxmox container, with Nginx and Caddy configurations, firewalling, backups and Google set-up, is in [deploy/proxmox/README.md](deploy/proxmox/README.md).
+
+### Signing in and sharing
+
+With `AUTH_MODE=local` (email and password) or `AUTH_MODE=full` (also Sign in with Google), people sign in. On the first start `ADMIN_EMAIL` and `ADMIN_INITIAL_PASSWORD` create the first admin, who must choose a new password at the first sign-in.
+
+- **People:** admins invite people from **Users**. An invitation is a one-time link (valid 7 days) that the admin passes on; the person sets a password with it, or, with Google sign-in on, simply signs in with Google as that address. Admins can change roles, deactivate people, give them attributes for row-level security, put them in groups, and make password reset links. Locked out completely? `docker compose exec api python -m opsis reset-link <email>` prints a link.
+- **Roles:** viewers see published dashboards shared with them; editors build datasets, models and dashboards; admins can do everything.
+- **Sharing a dashboard:** **Share** on the dashboard page shares it with people, groups or everyone, as viewers (the published version) or editors (the draft too).
+- **Restricted datasets:** on a dataset's page an admin can restrict it to named people and groups. Dashboards built on it stay viewable by those they are shared with, with row-level security applied as the viewer.
+- **Share links** (server mode, `FEATURE_PUBLIC_SHARE_LINKS=true`): a public, read-only link to the published version, optionally with an expiry and a password, revocable, with a view count. Row-level security shows nothing through a link unless its maker chose otherwise.
+- **View as:** an admin can look at a dashboard's data as a particular person, or as a viewer with given attributes, to check row-level security.
+- **Audit log:** sign-ins, people and group changes, sharing, links, publishing and every change made through MCP, for admins.
+- **Access tokens** (**Account**, **Access tokens**) work for MCP clients and for scripts on the REST API, with the scopes read, edit, publish and admin; a token never does more than its owner may.
+
+Filter values, cross-filters and drill levels are kept in the address bar, so a filtered view can be bookmarked or sent.
 
 ### Behind a reverse proxy at a sub-path
 
@@ -190,7 +205,12 @@ Everything is set in `.env`. The two templates document each value. After a chan
 | `QUERY_MAX_ROWS` | Most rows one query may return | `10000` | same |
 | `QUERY_MEMORY_LIMIT_MB` | Memory one query may use before spilling to disk | `1024` | same |
 | `QUERY_MAX_CONCURRENT` | Queries that run at once; others wait | `4` | same |
-| `ENCRYPTION_KEY` | Encrypts saved connection passwords | empty (generated and kept in the data volume) | required |
+| `ENCRYPTION_KEY` | Encrypts saved connection passwords, and sign-in cookies for Google and share links | empty (generated and kept in the data volume) | required |
+| `ADMIN_EMAIL`, `ADMIN_INITIAL_PASSWORD` | The first admin, created on the first start (sign-in modes) | not used | required, then ignored |
+| `SESSION_IDLE_HOURS`, `SESSION_MAX_DAYS` | A session ends after this long unused, and after this long anyway | `12`, `14` | same |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Sign in with Google (`AUTH_MODE=full`) | not used | required for `full` |
+| `GOOGLE_ALLOWED_DOMAINS`, `GOOGLE_ALLOWED_EMAILS` | Who may sign in with Google | not used | your domain |
+| `GOOGLE_AUTO_PROVISION` | Give an allowed but uninvited Google user a viewer account | not used | `false` |
 | `POSTGRES_PASSWORD` | Password of the internal metadata database | template value | required, 12 characters or more |
 | `APP_NAME` | Product name shown in the UI | `Opsis` | same |
 
@@ -214,7 +234,7 @@ The only tools needed on the host are Docker and Node.js (for the frontend tests
 | `npm run test:backend` | pytest in the dev image, against a throwaway `opsis_test` database and the sample MySQL |
 | `npm run lint:backend` | ruff and mypy (strict) |
 | `npm run test:frontend` | TypeScript, ESLint and Vitest |
-| `npm run smoke` | Playwright browser tests, including an MCP client, at http://localhost:8080 and then behind nginx at http://localhost:8088/opsis/. Add `-- --no-build` to skip the image rebuild |
+| `npm run smoke` | Playwright browser tests at http://localhost:8080, then behind nginx at http://localhost:8088/opsis/, then against a throwaway server-mode stack with sign-in, a fake Google, share links and access tokens. Add `-- --no-build` to skip the image rebuild, or `-- --root`, `-- --subpath`, `-- --server` for one stage |
 | `npm run lock:backend` | Regenerate `backend/uv.lock` after editing `pyproject.toml` |
 | `node scripts/benchmark.mjs --rows 5000000` | Load a synthetic dataset into the running stack and time ingestion and queries |
 

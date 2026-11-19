@@ -41,7 +41,7 @@ async function body(response: APIResponse, what: string): Promise<any> {
   return response.status() === 204 ? null : response.json();
 }
 
-export async function api(page: Page, method: "GET" | "POST" | "DELETE", path: string, data?: unknown): Promise<any> {
+export async function api(page: Page, method: "GET" | "POST" | "PUT" | "DELETE", path: string, data?: unknown): Promise<any> {
   const headers = method === "GET" ? {} : await csrf(page);
   const response = await page.request.fetch(path, { method, headers, data });
   return body(response, `${method} ${path}`);

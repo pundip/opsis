@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from opsis import __version__
 from opsis.api.deps import get_db, get_principal, get_settings
 from opsis.auth.principal import Principal
+from opsis.db.models import User
 from opsis.settings import Settings
 
 health_router = APIRouter()
@@ -92,7 +93,10 @@ def get_schemas(
 
 
 @router.get("/me")
-def get_me(principal: Principal = Depends(get_principal)) -> dict[str, Any]:
+def get_me(
+    principal: Principal = Depends(get_principal), db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    user = db.get(User, principal.user_id)
     return {
         "id": str(principal.user_id),
         "email": principal.email,
@@ -100,4 +104,8 @@ def get_me(principal: Principal = Depends(get_principal)) -> dict[str, Any]:
         "role": principal.role.value,
         "authMethod": principal.auth_method,
         "permissions": sorted(p.value for p in principal.permissions),
+        "groups": sorted(principal.groups),
+        "mustChangePassword": principal.must_change_password,
+        "hasPassword": bool(user and user.password_hash),
+        "google": bool(user and user.google_sub),
     }

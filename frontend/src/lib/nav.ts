@@ -32,8 +32,7 @@ const RULES: NavRule[] = [
     feature: "sqlLab",
   },
   { path: "/users", label: "Users", group: "Admin", permission: "users:manage" },
-  // Everyone may hold tokens: a token never exceeds its owner's role.
-  { path: "/tokens", label: "Access tokens", group: "Admin", permission: "dashboards:view" },
+  { path: "/audit", label: "Audit log", group: "Admin", permission: "audit:view" },
   { path: "/settings", label: "Settings", group: "Admin", permission: "settings:manage" },
 ];
 

@@ -11,13 +11,23 @@ from sqlalchemy.orm import Session
 
 from opsis.api.deps import get_db, get_settings, require
 from opsis.auth.principal import Permission, Principal
-from opsis.services import models, query
+from opsis.db.models import Dataset
+from opsis.services import access, models, query
 from opsis.settings import Settings
 
 router = APIRouter(prefix="/api")
 
 read = require(Permission.DASHBOARDS_EDIT)
+# POSTs that change nothing: an access token with the read scope may use them.
+read_post = require(Permission.DASHBOARDS_EDIT, read_only=True)
 write = require(Permission.MODELS_EDIT)
+
+
+def _dataset(db: Session, name: str, principal: Principal) -> Dataset:
+    """A dataset by name, if the caller may use it (restricted datasets)."""
+    target = models.dataset_by_name(db, name)
+    access.require_datasets(db, principal, {target.name})
+    return target
 
 
 class ModelIn(BaseModel):
@@ -37,16 +47,17 @@ class QueryIn(BaseModel):
 
 @router.get("/models")
 def list_models(
-    db: Session = Depends(get_db), _: Principal = Depends(read)
+    db: Session = Depends(get_db), principal: Principal = Depends(read)
 ) -> list[dict[str, Any]]:
-    return models.list_models(db)
+    blocked = access.blocked_datasets(db, principal)
+    return [m for m in models.list_models(db) if m["dataset"] not in blocked]
 
 
 @router.get("/models/{dataset}")
 def get_model(
-    dataset: str, db: Session = Depends(get_db), _: Principal = Depends(read)
+    dataset: str, db: Session = Depends(get_db), principal: Principal = Depends(read)
 ) -> dict[str, Any]:
-    return models.describe(db, models.dataset_by_name(db, dataset))
+    return models.describe(db, _dataset(db, dataset, principal))
 
 
 @router.put("/models/{dataset}")
@@ -57,7 +68,7 @@ def save_model(
     settings: Settings = Depends(get_settings),
     actor: Principal = Depends(write),
 ) -> dict[str, Any]:
-    target = models.dataset_by_name(db, dataset)
+    target = _dataset(db, dataset, actor)
     models.save(
         db,
         settings,
@@ -72,16 +83,16 @@ def save_model(
 
 @router.get("/models/{dataset}/versions")
 def list_model_versions(
-    dataset: str, db: Session = Depends(get_db), _: Principal = Depends(read)
+    dataset: str, db: Session = Depends(get_db), principal: Principal = Depends(read)
 ) -> list[dict[str, Any]]:
-    return models.list_versions(db, models.dataset_by_name(db, dataset))
+    return models.list_versions(db, _dataset(db, dataset, principal))
 
 
 @router.get("/models/{dataset}/versions/{version}")
 def get_model_version(
-    dataset: str, version: int, db: Session = Depends(get_db), _: Principal = Depends(read)
+    dataset: str, version: int, db: Session = Depends(get_db), principal: Principal = Depends(read)
 ) -> dict[str, Any]:
-    return models.get_version(db, models.dataset_by_name(db, dataset), version)
+    return models.get_version(db, _dataset(db, dataset, principal), version)
 
 
 @router.post("/models/{dataset}/versions/{version}/restore")
@@ -92,7 +103,7 @@ def restore_model_version(
     settings: Settings = Depends(get_settings),
     actor: Principal = Depends(write),
 ) -> dict[str, Any]:
-    target = models.dataset_by_name(db, dataset)
+    target = _dataset(db, dataset, actor)
     models.restore(db, settings, actor, target, version)
     return models.describe(db, target)
 
@@ -103,29 +114,29 @@ def validate_model(
     body: ModelIn,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    _: Principal = Depends(read),
+    principal: Principal = Depends(read_post),
 ) -> dict[str, Any]:
-    target = models.dataset_by_name(db, dataset)
+    target = _dataset(db, dataset, principal)
     found = models.problems(db, settings, target, models.resolve_input(body.definition, body.yaml))
     return {"valid": not found, "problems": found}
 
 
 @router.get("/models/{dataset}/starter")
 def starter_model(
-    dataset: str, db: Session = Depends(get_db), _: Principal = Depends(read)
+    dataset: str, db: Session = Depends(get_db), principal: Principal = Depends(read)
 ) -> dict[str, Any]:
     """A freshly generated model for the dataset's current columns. Not saved."""
-    target = models.dataset_by_name(db, dataset)
+    target = _dataset(db, dataset, principal)
     definition = models.starter(target, models.current_columns(db, target))
     return {"definition": definition, "yaml": models.to_yaml(target.name, definition)}
 
 
 @router.get("/models/{dataset}/export", response_class=PlainTextResponse)
 def export_model(
-    dataset: str, db: Session = Depends(get_db), _: Principal = Depends(read)
+    dataset: str, db: Session = Depends(get_db), principal: Principal = Depends(read)
 ) -> PlainTextResponse:
     """The model as a YAML file, for version control (models/<dataset>.yml)."""
-    target = models.dataset_by_name(db, dataset)
+    target = _dataset(db, dataset, principal)
     return PlainTextResponse(
         models.describe(db, target)["yaml"],
         media_type="application/yaml",
@@ -139,7 +150,7 @@ def run_query(
     request: Request,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    principal: Principal = Depends(read),
+    principal: Principal = Depends(read_post),
 ) -> dict[str, Any]:
     return query.run(
         db,

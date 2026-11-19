@@ -1,4 +1,5 @@
 import { NavLink } from "react-router-dom";
+import { useSignOut } from "../lib/access";
 import type { AppConfig, Me } from "../lib/config";
 import type { NavItem } from "../lib/nav";
 
@@ -19,6 +20,7 @@ const linkClass = ({ isActive }: { isActive: boolean }) =>
 
 export function Layout({ config, me, items, children }: Props) {
   const groups = ["Build", "Admin"] as const;
+  const signOut = useSignOut();
   return (
     <div className="flex min-h-screen">
       <aside className="flex w-56 shrink-0 flex-col border-r border-zinc-200 bg-white px-3 py-4 dark:border-zinc-800 dark:bg-zinc-900">
@@ -54,6 +56,19 @@ export function Layout({ config, me, items, children }: Props) {
           <p className="truncate">
             {me.role} · v{config.version}
           </p>
+          <nav aria-label="Your account" className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+            <NavLink to="/account" className="text-brand underline">
+              Account
+            </NavLink>
+            <NavLink to="/tokens" className="text-brand underline">
+              Access tokens
+            </NavLink>
+            {config.authMode !== "none" && (
+              <button type="button" className="text-brand underline" onClick={() => signOut.mutate()}>
+                Sign out
+              </button>
+            )}
+          </nav>
         </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">

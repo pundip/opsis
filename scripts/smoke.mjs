@@ -1,42 +1,51 @@
-// Runs the browser smoke tests twice: at the root (http://localhost:8080) and
-// behind the proxytest nginx at a sub-path (http://localhost:8088/opsis/).
+// Browser smoke tests in three places:
+//   1. at the root, http://localhost:8080 (your stack, AUTH_MODE=none)
+//   2. behind the proxytest nginx at a sub-path, http://localhost:8088/opsis/
+//   3. server mode at the sub-path: sign-in (local accounts and a fake Google),
+//      share links, access tokens for MCP and the REST API, and the worker. This
+//      is a separate, disposable stack (project opsis-servertest) with fresh
+//      random secrets; it is removed afterwards, data and all.
 //
-//   npm run smoke                 both, rebuilding the image first
-//   npm run smoke -- --no-build   both, with the image as it is
-//   npm run smoke -- --root       only the root
-//   npm run smoke -- --subpath    only the sub-path
+//   npm run smoke                  all three, rebuilding the image first
+//   npm run smoke -- --no-build    all three, with the image as it is
+//   npm run smoke -- --root        only 1
+//   npm run smoke -- --subpath     only 2
+//   npm run smoke -- --server      only 3
 //
 // It expects .env to be in plain local mode (PUBLIC_BASE_URL=http://localhost:8080).
-// The stack is left running at the root when it finishes.
+// Your stack is left running at the root when it finishes.
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
-const only = args.includes("--root") ? "root" : args.includes("--subpath") ? "subpath" : "both";
+const stages = ["--root", "--subpath", "--server"].filter((flag) => args.includes(flag));
+const run = (stage) => stages.length === 0 || stages.includes(stage);
 const build = args.includes("--no-build") ? [] : ["--build"];
-const extra = args.filter((arg) => !["--root", "--subpath", "--no-build"].includes(arg));
+const extra = args.filter((arg) => !["--root", "--subpath", "--server", "--no-build"].includes(arg));
 
-function run(command, commandArgs, options = {}) {
+function exec(command, commandArgs, options = {}) {
   console.log(`\n> ${command} ${commandArgs.join(" ")}`);
   const result = spawnSync(command, commandArgs, { cwd: root, stdio: "inherit", shell: process.platform === "win32", ...options });
   return result.status ?? 1;
 }
 
 function must(command, commandArgs, options) {
-  const status = run(command, commandArgs, options);
+  const status = exec(command, commandArgs, options);
   if (status !== 0) {
     console.error(`\nFailed: ${command} ${commandArgs.join(" ")}`);
     process.exit(status);
   }
 }
 
-const SUBPATH = ["-f", "compose.yml", "-f", "compose.subpath.yml", "--profile", "proxytest"];
-
-function playwright(url) {
-  return run("npx", ["playwright", "test", ...extra], { cwd: join(root, "e2e"), env: { ...process.env, OPSIS_URL: url } });
+function playwright(url, env = {}) {
+  return exec("npx", ["playwright", "test", ...extra], {
+    cwd: join(root, "e2e"),
+    env: { ...process.env, OPSIS_URL: url, ...env },
+  });
 }
 
 if (!existsSync(join(root, "e2e", "node_modules"))) {
@@ -44,18 +53,65 @@ if (!existsSync(join(root, "e2e", "node_modules"))) {
   must("npx", ["playwright", "install", "chromium"], { cwd: join(root, "e2e") });
 }
 
-let failed = 0;
-if (only !== "subpath") {
+const SUBPATH = ["-f", "compose.yml", "-f", "compose.subpath.yml", "--profile", "proxytest"];
+const SERVER_ENV = join(root, ".env.servertest");
+const SERVER = [
+  "-p", "opsis-servertest", "--env-file", ".env.servertest",
+  "-f", "compose.yml", "-f", "compose.servertest.yml", "--profile", "server", "--profile", "proxytest",
+];
+
+const failed = [];
+let built = false;
+if (run("--root")) {
   must("docker", ["compose", "up", "-d", ...build, "--wait"]);
-  failed += playwright("http://localhost:8080/") === 0 ? 0 : 1;
+  built = true;
+  if (playwright("http://localhost:8080/") !== 0) failed.push("root");
 }
-if (only !== "root") {
-  must("docker", ["compose", ...SUBPATH, "up", "-d", ...(only === "subpath" ? build : []), "--wait"]);
-  failed += playwright("http://localhost:8088/opsis/") === 0 ? 0 : 1;
-  // Back to the root, and stop the test proxy.
-  run("docker", ["compose", ...SUBPATH, "stop", "proxytest"]);
+if (run("--subpath")) {
+  must("docker", ["compose", ...SUBPATH, "up", "-d", ...(built ? [] : build), "--wait"]);
+  built = true;
+  if (playwright("http://localhost:8088/opsis/") !== 0) failed.push("sub-path");
+  // Back to the root, and free port 8088 for the server-mode stack.
+  exec("docker", ["compose", ...SUBPATH, "stop", "proxytest"]);
   must("docker", ["compose", "up", "-d", "--wait"]);
 }
+if (run("--server")) {
+  const secret = (bytes) => randomBytes(bytes).toString("base64url");
+  const admin = { email: "admin@smoke.test", initial: `Initial-${secret(12)}`, chosen: `Chosen-${secret(12)}` };
+  writeFileSync(
+    SERVER_ENV,
+    [
+      "# Written by scripts/smoke.mjs for one run, then deleted. Test values only.",
+      "POSTGRES_USER=opsis",
+      `POSTGRES_PASSWORD=${secret(24)}`,
+      // A Fernet key: 32 random bytes, URL-safe base64 with padding.
+      `ENCRYPTION_KEY=${randomBytes(32).toString("base64").replace(/\+/g, "-").replace(/\//g, "_")}`,
+      `ADMIN_EMAIL=${admin.email}`,
+      `ADMIN_INITIAL_PASSWORD=${admin.initial}`,
+      `GOOGLE_CLIENT_SECRET=${secret(24)}`,
+      "BIND_ADDRESS=127.0.0.1",
+      "HTTP_PORT=8081",
+      "",
+    ].join("\n"),
+  );
+  try {
+    // Always start from nothing, even after an interrupted run.
+    exec("docker", ["compose", ...SERVER, "down", "-v", "--remove-orphans"]);
+    exec("docker", ["compose", "stop", "proxytest"]);
+    must("docker", ["compose", ...SERVER, "up", "-d", ...(built ? [] : build), "--wait"]);
+    const status = playwright("http://localhost:8088/opsis/", {
+      OPSIS_MODE: "server",
+      OPSIS_ADMIN_EMAIL: admin.email,
+      OPSIS_ADMIN_PASSWORD: admin.initial,
+      OPSIS_ADMIN_NEW_PASSWORD: admin.chosen,
+    });
+    if (status !== 0) failed.push("server mode");
+  } finally {
+    exec("docker", ["compose", ...SERVER, "down", "-v", "--remove-orphans"]);
+    rmSync(SERVER_ENV, { force: true });
+    rmSync(join(root, "e2e", ".auth"), { recursive: true, force: true });
+  }
+}
 
-console.log(failed === 0 ? "\nSmoke tests passed." : `\nSmoke tests FAILED in ${failed} run(s).`);
-process.exit(failed === 0 ? 0 : 1);
+console.log(failed.length === 0 ? "\nSmoke tests passed." : `\nSmoke tests FAILED: ${failed.join(", ")}.`);
+process.exit(failed.length === 0 ? 0 : 1);

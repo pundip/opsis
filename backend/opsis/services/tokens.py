@@ -156,4 +156,5 @@ def authenticate(db: Session, secret: str) -> Principal | None:
     if row.last_used_at is None or now - row.last_used_at > TOUCH_EVERY:
         row.last_used_at = now
         db.commit()
-    return dataclasses.replace(users.to_principal(user, "token"), scopes=frozenset(row.scopes))
+    principal = users.principal_for(db, user, "token")
+    return dataclasses.replace(principal, scopes=frozenset(row.scopes))

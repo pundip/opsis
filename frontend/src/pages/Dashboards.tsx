@@ -76,7 +76,7 @@ export function Dashboards({ me }: { me: Me }) {
                   <td className={TD}>{dashboard.ownerName}</td>
                   <td className={TD}>{timeAgo(dashboard.updatedAt)}</td>
                   <td className={`${TD} text-right whitespace-nowrap`}>
-                    {canEdit && (
+                    {(dashboard.access === "admin" || dashboard.access === "owner") && (
                       <>
                         <Link to={`/dashboards/${dashboard.id}/edit`} className="mr-3 text-sm text-brand underline">
                           Edit

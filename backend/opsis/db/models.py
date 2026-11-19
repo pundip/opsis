@@ -147,6 +147,8 @@ class Dataset(Base):
     state: Mapped[dict[str, Any] | None] = mapped_column(JSONB)  # connector cursor state
     # Points at the snapshot readers use. Updated in one transaction with `state`.
     current_snapshot_id: Mapped[uuid.UUID | None] = mapped_column()
+    # When true, only admins and the grantees in dataset_grants may use the dataset.
+    restricted: Mapped[bool] = mapped_column(default=False, server_default=false())
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
@@ -313,3 +315,124 @@ class AccessToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (Index("ix_access_tokens_user_id", "user_id"),)
+
+
+# ---- M6: sign-in, groups, access and sharing ---------------------------------------
+#
+# A "grantee" is written "user:<uuid>", "group:<uuid>" or "everyone" (every active
+# user), so one column covers people, groups and the whole workspace.
+
+
+class Group(Base):
+    __tablename__ = "groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    description: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GroupMember(Base):
+    __tablename__ = "group_members"
+
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DashboardShare(Base):
+    """Who may view or edit a dashboard, besides its owner and the admins."""
+
+    __tablename__ = "dashboard_shares"
+    __table_args__ = (UniqueConstraint("dashboard_id", "grantee"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    dashboard_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("dashboards.id", ondelete="CASCADE"), index=True
+    )
+    grantee: Mapped[str] = mapped_column(String(60))
+    role: Mapped[str] = mapped_column(String(10))  # viewer | editor
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DatasetGrant(Base):
+    """Who may use a restricted dataset (datasets.restricted), besides the admins."""
+
+    __tablename__ = "dataset_grants"
+    __table_args__ = (UniqueConstraint("dataset_id", "grantee"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    dataset_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("datasets.id", ondelete="CASCADE"), index=True
+    )
+    grantee: Mapped[str] = mapped_column(String(60))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ShareLink(Base):
+    """A public, read-only link to the published version of a dashboard.
+    Only the SHA-256 of the token is stored; the link is shown once."""
+
+    __tablename__ = "share_links"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    dashboard_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("dashboards.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    prefix: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str | None] = mapped_column(String(100))
+    # The user attributes row-level security sees for everyone who opens the link.
+    # Empty means every rule denies.
+    attributes: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=EMPTY_JSON
+    )
+    password_hash: Mapped[str | None] = mapped_column(String(255))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    view_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class LoginAttempt(Base):
+    """Failed sign-in attempts per key ("email:...", "ip:...", "link:..."), for lockouts."""
+
+    __tablename__ = "login_attempts"
+
+    key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    first_failure_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class UserLink(Base):
+    """A one-time link to set a password: an invitation or a reset by an admin."""
+
+    __tablename__ = "user_links"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(10))  # invite | reset
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

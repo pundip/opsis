@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from opsis.api.deps import get_db, get_principal, get_settings
+from opsis.api.deps import get_db, get_settings, signed_in_person
 from opsis.auth.principal import Principal
 from opsis.services import tokens
 from opsis.settings import Settings
@@ -27,7 +27,7 @@ class TokenIn(BaseModel):
 def list_tokens(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    principal: Principal = Depends(get_principal),
+    principal: Principal = Depends(signed_in_person),
 ) -> dict[str, Any]:
     return {
         "tokens": tokens.list_tokens(db, principal),
@@ -39,7 +39,7 @@ def list_tokens(
 
 @router.post("/tokens", status_code=201)
 def create_token(
-    body: TokenIn, db: Session = Depends(get_db), principal: Principal = Depends(get_principal)
+    body: TokenIn, db: Session = Depends(get_db), principal: Principal = Depends(signed_in_person)
 ) -> dict[str, Any]:
     """The response is the only time the token itself is returned."""
     described, secret = tokens.create(
@@ -52,7 +52,7 @@ def create_token(
 def revoke_token(
     token_id: uuid.UUID,
     db: Session = Depends(get_db),
-    principal: Principal = Depends(get_principal),
+    principal: Principal = Depends(signed_in_person),
 ) -> dict[str, Any]:
     return tokens.revoke(db, principal, token_id)
 
@@ -61,6 +61,6 @@ def revoke_token(
 def delete_token(
     token_id: uuid.UUID,
     db: Session = Depends(get_db),
-    principal: Principal = Depends(get_principal),
+    principal: Principal = Depends(signed_in_person),
 ) -> None:
     tokens.delete(db, principal, token_id)

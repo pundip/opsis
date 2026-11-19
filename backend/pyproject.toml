@@ -23,6 +23,8 @@ dependencies = [
     "sqlglot>=25",
     "pyyaml>=6",
     "mcp>=1.12",
+    "argon2-cffi>=23.1",
+    "authlib>=1.3",
 ]
 
 [dependency-groups]
@@ -57,7 +59,7 @@ plugins = ["pydantic.mypy"]
 files = ["opsis"]
 
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "pymysql.*", "openpyxl.*", "jsonschema.*", "duckdb.*", "yaml.*"]
+module = ["authlib.*", "pyarrow.*", "pymysql.*", "openpyxl.*", "jsonschema.*", "duckdb.*", "yaml.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -68,3 +68,29 @@ def decrypt(settings: Settings, token: str | None) -> dict[str, Any]:
             "Restore the original key, or enter the connection's secrets again."
         ) from None
     return data
+
+
+def seal(settings: Settings, purpose: str, values: dict[str, Any]) -> str:
+    """Encrypt and sign a small value for a cookie. `purpose` is bound into the
+    token, so a value sealed for one use is never accepted for another."""
+    payload = json.dumps({"p": purpose, "v": values}, separators=(",", ":"))
+    return _fernet(settings).encrypt(payload.encode()).decode()
+
+
+def unseal(
+    settings: Settings, purpose: str, token: str, max_age_seconds: int
+) -> dict[str, Any] | None:
+    """The values sealed by `seal`, or None if the token is forged, expired or
+    was sealed for another purpose."""
+    try:
+        data = json.loads(_fernet(settings).decrypt(token.encode(), ttl=max_age_seconds))
+    except (InvalidToken, ValueError, TypeError):
+        return None
+    if (
+        not isinstance(data, dict)
+        or data.get("p") != purpose
+        or not isinstance(data.get("v"), dict)
+    ):
+        return None
+    values: dict[str, Any] = data["v"]
+    return values

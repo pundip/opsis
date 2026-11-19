@@ -1,4 +1,9 @@
-"""Dashboards: versions, draft and published states, and the data behind each item."""
+"""Dashboards: versions, draft and published states, and the data behind each item.
+
+Every function that reads or changes a dashboard checks access here
+(services/access.py), so the REST API, the MCP tools and share links all
+follow the same rules.
+"""
 
 from __future__ import annotations
 
@@ -9,13 +14,15 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from opsis.auth.principal import Permission, Principal
+from opsis.auth.principal import Principal
 from opsis.dashboards import patch as patches
 from opsis.dashboards import spec as specs
 from opsis.dashboards.manifests import Manifest, load_manifests
 from opsis.db.models import Dashboard, DashboardVersion, Dataset, User
 from opsis.errors import ApiError
+from opsis.semantic.compiler import UserContext
 from opsis.semantic.model import Model, Problem, schema_problems, schema_validator
+from opsis.services import access as acl
 from opsis.services import audit, events
 from opsis.services import query as queries
 from opsis.services.query import QueryRuntime
@@ -28,16 +35,52 @@ def manifests(settings: Settings) -> dict[str, Manifest]:
     return load_manifests(settings.visuals_dir, settings.spec_dir)
 
 
-def all_models(db: Session, settings: Settings) -> dict[str, Model]:
-    """The semantic model of every dataset that has data."""
+def all_models(
+    db: Session, settings: Settings, principal: Principal | None = None
+) -> dict[str, Model]:
+    """The semantic model of every dataset that has data, and that `principal`
+    (when given) may use."""
     names = set(db.scalars(select(Dataset.name)).all())
+    if principal is not None:
+        names -= acl.blocked_datasets(db, principal)
     return {
         name: source.model for name, source in queries.load_sources(db, settings, names).items()
     }
 
 
-def problems(db: Session, settings: Settings, spec: Any) -> list[Problem]:
-    return specs.validate(settings.spec_dir, spec, manifests(settings), all_models(db, settings))
+def problems(
+    db: Session, settings: Settings, spec: Any, principal: Principal | None = None
+) -> list[Problem]:
+    """Everything wrong with a spec. With a principal, a dataset they may not
+    use counts as missing, so nobody can build on data they cannot query."""
+    return specs.validate(
+        settings.spec_dir, spec, manifests(settings), all_models(db, settings, principal)
+    )
+
+
+def spec_datasets(spec: Mapping[str, Any]) -> set[str]:
+    """Every dataset a spec reads: item datasets, bound fields and filter fields."""
+    names: set[str] = set()
+    for item in spec.get("items") or []:
+        if not isinstance(item, Mapping):
+            continue
+        if isinstance(item.get("dataset"), str):
+            names.add(item["dataset"])
+        for entries in (item.get("bindings") or {}).values():
+            for entry in entries if isinstance(entries, list) else []:
+                ref = (
+                    entry
+                    if isinstance(entry, str)
+                    else entry.get("field")
+                    if isinstance(entry, Mapping)
+                    else None
+                )
+                if isinstance(ref, str):
+                    names.add(ref.partition(".")[0])
+    for control in spec.get("filters") or []:
+        if isinstance(control, Mapping) and isinstance(control.get("field"), str):
+            names.add(control["field"].partition(".")[0])
+    return names
 
 
 def get(db: Session, dashboard_id: uuid.UUID) -> Dashboard:
@@ -58,25 +101,31 @@ def _version_row(db: Session, dashboard: Dashboard, number: int) -> DashboardVer
     return row
 
 
-def can_edit(principal: Principal) -> bool:
-    return principal.can(Permission.DASHBOARDS_EDIT)
-
-
-def spec_for(
-    db: Session, dashboard: Dashboard, principal: Principal, source: str
-) -> dict[str, Any]:
-    """The spec a caller may see. Only editors can read the draft."""
-    if source == "draft" and can_edit(principal):
-        return _version_row(db, dashboard, dashboard.version).spec
+def published_spec(db: Session, dashboard: Dashboard) -> dict[str, Any]:
     if dashboard.published_version is None:
         raise ApiError(404, "not_published", "This dashboard has not been published yet.")
     return _version_row(db, dashboard, dashboard.published_version).spec
 
 
-def summary(dashboard: Dashboard, owner: str | None = None) -> dict[str, Any]:
-    return {
+def spec_for(
+    db: Session, dashboard: Dashboard, principal: Principal, source: str
+) -> dict[str, Any]:
+    """The spec a caller may see. Only those who may edit can read the draft."""
+    access = acl.require_dashboard(db, dashboard, principal, "view")
+    if source == "draft" and access.edit:
+        return _version_row(db, dashboard, dashboard.version).spec
+    return published_spec(db, dashboard)
+
+
+def summary(
+    dashboard: Dashboard,
+    owner: str | None = None,
+    access: acl.DashboardAccess | None = None,
+    title: str | None = None,
+) -> dict[str, Any]:
+    result = {
         "id": str(dashboard.id),
-        "title": dashboard.title,
+        "title": title or dashboard.title,
         "version": dashboard.version,
         "publishedVersion": dashboard.published_version,
         "hasUnpublishedChanges": dashboard.published_version != dashboard.version,
@@ -84,29 +133,64 @@ def summary(dashboard: Dashboard, owner: str | None = None) -> dict[str, Any]:
         "createdAt": dashboard.created_at.isoformat(),
         "updatedAt": dashboard.updated_at.isoformat(),
     }
+    if access is not None:
+        result["canEdit"] = access.edit
+        result["access"] = access.via
+        if not access.edit:
+            # Viewers only know the published version; the draft is none of their business.
+            result["hasUnpublishedChanges"] = False
+    return result
+
+
+def published_titles(db: Session, ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+    """The title of the published version of each dashboard (dashboards.title follows the draft)."""
+    if not ids:
+        return {}
+    rows = db.execute(
+        select(DashboardVersion.dashboard_id, DashboardVersion.spec["title"].astext)
+        .join(Dashboard, Dashboard.id == DashboardVersion.dashboard_id)
+        .where(
+            DashboardVersion.dashboard_id.in_(ids),
+            DashboardVersion.version == Dashboard.published_version,
+        )
+    ).all()
+    return {dashboard_id: title for dashboard_id, title in rows if title}
 
 
 def list_dashboards(db: Session, principal: Principal) -> list[dict[str, Any]]:
+    visible = acl.visible_dashboards(db, principal)
     query = (
         select(Dashboard, User.display_name)
         .outerjoin(User, User.id == Dashboard.owner_id)
         .order_by(func.lower(Dashboard.title))
     )
-    if not can_edit(principal):
-        query = query.where(Dashboard.published_version.is_not(None))
-    return [summary(d, owner) for d, owner in db.execute(query).all()]
+    if visible is not None:
+        query = query.where(Dashboard.id.in_(list(visible)))
+    rows = db.execute(query).all()
+    full = acl.DashboardAccess(True, True, True, True, "admin")
+    titles = published_titles(
+        db, [d.id for d, _ in rows if visible is not None and not visible[d.id].edit]
+    )
+    result = [
+        summary(d, owner, full if visible is None else visible[d.id], titles.get(d.id))
+        for d, owner in rows
+    ]
+    return sorted(result, key=lambda d: str(d["title"]).lower())
 
 
 def detail(db: Session, dashboard: Dashboard, principal: Principal) -> dict[str, Any]:
     """The dashboard as this caller sees it: editors get the draft, others the published version."""
-    source = "draft" if can_edit(principal) else "published"
+    access = acl.require_dashboard(db, dashboard, principal, "view")
+    source = "draft" if access.edit else "published"
     owner = db.scalar(select(User.display_name).where(User.id == dashboard.owner_id))
+    spec = spec_for(db, dashboard, principal, source)
     return {
-        **summary(dashboard, owner),
+        **summary(dashboard, owner, access, spec.get("title")),
         "source": source,
-        "spec": spec_for(db, dashboard, principal, source),
-        "canEdit": can_edit(principal),
-        "canPublish": principal.can(Permission.DASHBOARDS_PUBLISH),
+        "spec": spec,
+        "canPublish": access.publish,
+        "canShare": access.share,
+        "isOwner": access.via == "owner",
     }
 
 
@@ -158,8 +242,8 @@ def _announce(
     )
 
 
-def _checked(db: Session, settings: Settings, spec: Any) -> dict[str, Any]:
-    found = problems(db, settings, spec)
+def _checked(db: Session, settings: Settings, spec: Any, actor: Principal) -> dict[str, Any]:
+    found = problems(db, settings, spec, actor)
     if found:
         raise ApiError(422, "invalid_spec", "The dashboard is not valid.", found)
     checked: dict[str, Any] = spec
@@ -176,7 +260,9 @@ def create(
     author_type: str = "user",
     message: str | None = None,
 ) -> Dashboard:
-    content = _checked(db, settings, spec) if spec is not None else specs.blank_spec(title.strip())
+    content = (
+        _checked(db, settings, spec, actor) if spec is not None else specs.blank_spec(title.strip())
+    )
     dashboard = Dashboard(title=content["title"], owner_id=actor.user_id, version=0)
     db.add(dashboard)
     db.flush()
@@ -192,6 +278,16 @@ def create(
     )
     db.commit()
     return dashboard
+
+
+def _conflict(base_version: int, current: int) -> ApiError:
+    return ApiError(
+        409,
+        "version_conflict",
+        f"The dashboard has changed since version {base_version} (it is now version "
+        f"{current}). Load the latest version and apply your change again.",
+        [{"path": "/baseVersion", "message": f"Current version is {current}."}],
+    )
 
 
 def save(
@@ -214,15 +310,12 @@ def save(
     dashboard = db.scalar(select(Dashboard).where(Dashboard.id == dashboard_id).with_for_update())
     if dashboard is None:
         raise ApiError(404, "not_found", "Dashboard not found.")
+    acl.require_dashboard(db, dashboard, actor, "edit")
     if base_version is not None and base_version != dashboard.version:
-        raise ApiError(
-            409,
-            "version_conflict",
-            f"The dashboard has changed since version {base_version} (it is now version "
-            f"{dashboard.version}). Load the latest version and apply your change again.",
-            [{"path": "/baseVersion", "message": f"Current version is {dashboard.version}."}],
-        )
-    _write_version(db, dashboard, _checked(db, settings, spec), author_type, actor.user_id, message)
+        raise _conflict(base_version, dashboard.version)
+    _write_version(
+        db, dashboard, _checked(db, settings, spec, actor), author_type, actor.user_id, message
+    )
     db.commit()
     _announce(
         dashboard, "version_created", actor, author_type, message=message, client_id=client_id
@@ -247,14 +340,9 @@ def patch(
     a stale one is refused with 409 before anything is applied.
     """
     dashboard = get(db, dashboard_id)
+    acl.require_dashboard(db, dashboard, actor, "edit")
     if base_version != dashboard.version:
-        raise ApiError(
-            409,
-            "version_conflict",
-            f"The dashboard has changed since version {base_version} (it is now version "
-            f"{dashboard.version}). Load the latest version and apply your change again.",
-            [{"path": "/baseVersion", "message": f"Current version is {dashboard.version}."}],
-        )
+        raise _conflict(base_version, dashboard.version)
     current = _version_row(db, dashboard, dashboard.version).spec
     patched = patches.apply(current, ops)
     return save(
@@ -269,7 +357,8 @@ def patch(
     )
 
 
-def list_versions(db: Session, dashboard: Dashboard) -> list[dict[str, Any]]:
+def list_versions(db: Session, dashboard: Dashboard, principal: Principal) -> list[dict[str, Any]]:
+    acl.require_dashboard(db, dashboard, principal, "edit")
     rows = db.execute(
         select(DashboardVersion, User.display_name)
         .outerjoin(User, User.id == DashboardVersion.author_id)
@@ -292,7 +381,10 @@ def list_versions(db: Session, dashboard: Dashboard) -> list[dict[str, Any]]:
     ]
 
 
-def get_version(db: Session, dashboard: Dashboard, number: int) -> dict[str, Any]:
+def get_version(
+    db: Session, dashboard: Dashboard, number: int, principal: Principal
+) -> dict[str, Any]:
+    acl.require_dashboard(db, dashboard, principal, "edit")
     return {"version": number, "spec": _version_row(db, dashboard, number).spec}
 
 
@@ -306,6 +398,7 @@ def restore(
     author_type: str = "user",
     client_id: str | None = None,
 ) -> Dashboard:
+    acl.require_dashboard(db, dashboard, actor, "edit")
     old = _version_row(db, dashboard, number).spec
     return save(
         db,
@@ -328,6 +421,7 @@ def publish(
     author_type: str = "user",
     client_id: str | None = None,
 ) -> Dashboard:
+    acl.require_dashboard(db, dashboard, actor, "publish")
     target = number if number is not None else dashboard.version
     _version_row(db, dashboard, target)
     dashboard.published_version = target
@@ -346,6 +440,7 @@ def publish(
 
 
 def unpublish(db: Session, actor: Principal, dashboard: Dashboard) -> Dashboard:
+    acl.require_dashboard(db, dashboard, actor, "publish")
     dashboard.published_version = None
     audit.record(
         db,
@@ -360,6 +455,9 @@ def unpublish(db: Session, actor: Principal, dashboard: Dashboard) -> Dashboard:
 
 
 def delete(db: Session, actor: Principal, dashboard: Dashboard) -> None:
+    access = acl.require_dashboard(db, dashboard, actor, "edit")
+    if access.via not in ("admin", "owner"):
+        raise ApiError(403, "forbidden", "Only the owner or an admin can delete this dashboard.")
     audit.record(
         db,
         action="dashboard.deleted",
@@ -382,20 +480,30 @@ def _resolve_spec(
     dashboard: Dashboard,
     source: str,
     inline: Any | None,
-) -> dict[str, Any]:
-    """Which spec a data request runs against.
+) -> tuple[dict[str, Any], acl.DashboardAccess]:
+    """Which spec a data request runs against, and the caller's access.
 
-    "inline" lets the editor preview unsaved changes: only editors may send one,
-    and it is checked for structure (the compiler reports anything else).
+    "inline" lets the editor preview unsaved changes: only those who may edit
+    can send one, it is checked for structure (the compiler reports anything
+    else), and it may only read datasets the caller may use.
     """
+    access = acl.require_dashboard(db, dashboard, principal, "view")
     if source != "inline":
-        return spec_for(db, dashboard, principal, source)
-    if not can_edit(principal):
+        return spec_for(db, dashboard, principal, source), access
+    if not access.edit:
         raise ApiError(403, "forbidden", "Only editors can preview unsaved changes.")
     found = schema_problems(schema_validator(settings.spec_dir, "dashboard.schema.json"), inline)
     if found or not isinstance(inline, dict):
         raise ApiError(422, "invalid_spec", "The dashboard is not valid.", found)
-    return inline
+    acl.require_datasets(db, principal, spec_datasets(inline))
+    return inline, access
+
+
+def viewer_context(
+    db: Session, principal: Principal, view_as: Mapping[str, Any] | None
+) -> UserContext:
+    """Who row-level security sees: the caller, or (for an admin) "View as"."""
+    return queries.user_context(principal, view_as, db=db)
 
 
 def item_data(
@@ -409,9 +517,28 @@ def item_data(
     source: str,
     inline_spec: Any | None,
     state: Mapping[str, Any] | None,
+    view_as: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Rows for one dashboard item, derived from its bindings and the filter state."""
-    spec = _resolve_spec(db, settings, principal, dashboard, source, inline_spec)
+    spec, access = _resolve_spec(db, settings, principal, dashboard, source, inline_spec)
+    user = viewer_context(db, principal, view_as)
+    return data_for_spec(
+        db, settings, runtime, spec, item_id, state, user=user, include_query=access.edit
+    )
+
+
+def data_for_spec(
+    db: Session,
+    settings: Settings,
+    runtime: QueryRuntime,
+    spec: Mapping[str, Any],
+    item_id: str,
+    state: Mapping[str, Any] | None,
+    *,
+    user: UserContext,
+    include_query: bool,
+) -> dict[str, Any]:
+    """Rows for one item of an already authorised spec, as `user` may see them."""
     item = next((i for i in spec["items"] if i["id"] == item_id), None)
     if item is None:
         raise ApiError(404, "not_found", f"The dashboard has no item with the id {item_id!r}.")
@@ -446,7 +573,6 @@ def item_data(
             409, "no_data", f"Dataset {query['dataset']!r} has no data yet. Refresh it first."
         )
     queries.check_query(settings, query)
-    user = queries.user_context(principal, None)
     _, body = queries.execute(settings, runtime, sources, user, query)
     body["itemId"] = item_id
 
@@ -456,8 +582,11 @@ def item_data(
         if compared is not None:
             _, previous = queries.execute(settings, runtime, sources, user, compared[0])
             body["comparison"] = {"mode": mode, "range": compared[1], "rows": previous["rows"]}
-    if can_edit(principal):
+    if include_query:
         body["query"] = query
+    else:
+        # Which snapshot answered is internal; viewers and share links do not need it.
+        body.pop("snapshots", None)
     return body
 
 
@@ -472,9 +601,24 @@ def filter_options(
     source: str,
     inline_spec: Any | None,
     search: str | None,
+    view_as: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Distinct values for a select or multiSelect filter, with RLS applied."""
-    spec = _resolve_spec(db, settings, principal, dashboard, source, inline_spec)
+    spec, _ = _resolve_spec(db, settings, principal, dashboard, source, inline_spec)
+    user = viewer_context(db, principal, view_as)
+    return options_for_spec(db, settings, runtime, spec, filter_id, search, user=user)
+
+
+def options_for_spec(
+    db: Session,
+    settings: Settings,
+    runtime: QueryRuntime,
+    spec: Mapping[str, Any],
+    filter_id: str,
+    search: str | None,
+    *,
+    user: UserContext,
+) -> dict[str, Any]:
     control = next((f for f in spec.get("filters") or [] if f["id"] == filter_id), None)
     if control is None:
         raise ApiError(404, "not_found", f"The dashboard has no filter with the id {filter_id!r}.")
@@ -493,8 +637,6 @@ def filter_options(
     if dataset not in sources:
         return {"values": [], "truncated": False}
     queries.check_query(settings, query)
-    _, body = queries.execute(
-        settings, runtime, sources, queries.user_context(principal, None), query
-    )
+    _, body = queries.execute(settings, runtime, sources, user, query)
     values = [row[0] for row in body["rows"] if row[0] is not None]
     return {"values": values, "truncated": body["truncated"]}

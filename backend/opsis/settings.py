@@ -110,6 +110,24 @@ class Settings(BaseSettings):
     # empty value means "generate one and keep it in the data volume".
     encryption_key: SecretStr | None = None
 
+    # Sign-in (AUTH_MODE=local or full)
+    # The first admin, created on the first start while no admin exists. The
+    # password must be changed at the first sign-in; afterwards it is ignored.
+    admin_email: str = ""
+    admin_initial_password: SecretStr | None = None
+    # A session ends after this long without a request, and after this long in any case.
+    session_idle_hours: float = Field(default=12, gt=0, le=24 * 30)
+    session_max_days: float = Field(default=14, gt=0, le=365)
+    # Sign in with Google (AUTH_MODE=full)
+    google_client_id: str = ""
+    google_client_secret: SecretStr | None = None
+    google_allowed_domains: str = ""  # comma-separated; empty means any domain
+    google_allowed_emails: str = ""  # comma-separated
+    # Create an account (as a viewer) for an allowed Google user who was not invited.
+    google_auto_provision: bool = False
+    # Change only to test against another OpenID Connect provider.
+    google_discovery_url: str = "https://accounts.google.com/.well-known/openid-configuration"
+
     # Data and limits
     max_upload_mb: int = Field(default=200, ge=1, le=10_000)
     snapshot_retention: int = Field(default=3, ge=2, le=100)
@@ -175,6 +193,13 @@ class Settings(BaseSettings):
             ) from exc
         return value
 
+    @field_validator("admin_initial_password", "google_client_secret")
+    @classmethod
+    def _empty_secret_is_unset(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None or not value.get_secret_value().strip():
+            return None
+        return value
+
     @field_validator("encryption_key")
     @classmethod
     def _check_encryption_key(cls, value: SecretStr | None) -> SecretStr | None:
@@ -205,6 +230,12 @@ class Settings(BaseSettings):
                     "Set BIND_ADDRESS=127.0.0.1, or set AUTH_MODE=local or AUTH_MODE=full."
                 )
         if self.mcp_auth == "none":
+            if self.auth_mode != "none" and not server:
+                problems.append(
+                    f"MCP_AUTH=none only works with AUTH_MODE=none. With "
+                    f"AUTH_MODE={self.auth_mode} people sign in, so MCP clients must too: "
+                    "set MCP_AUTH=token and use an access token."
+                )
             if server:
                 problems.append(
                     "MCP_AUTH=none is not allowed with DEPLOY_MODE=server. Set MCP_AUTH=token."
@@ -213,6 +244,34 @@ class Settings(BaseSettings):
                 problems.append(
                     f"MCP_AUTH=none requires a loopback BIND_ADDRESS (got {self.bind_address}). "
                     "Set BIND_ADDRESS=127.0.0.1 or MCP_AUTH=token."
+                )
+        if self.auth_mode in ("local", "full"):
+            if "@" not in self.admin_email:
+                problems.append(
+                    f"AUTH_MODE={self.auth_mode} needs ADMIN_EMAIL: the email of the first admin "
+                    "account, created on the first start."
+                )
+            if (
+                server
+                and self.admin_initial_password is not None
+                and looks_like_placeholder(self.admin_initial_password.get_secret_value())
+            ):
+                problems.append(
+                    "ADMIN_INITIAL_PASSWORD is a placeholder or too short for DEPLOY_MODE=server. "
+                    "Use at least 12 characters; it must be changed at the first sign-in anyway."
+                )
+        if self.auth_mode == "full":
+            if not self.google_client_id.strip() or self.google_client_secret is None:
+                problems.append(
+                    "AUTH_MODE=full needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET for Sign in "
+                    "with Google. Use AUTH_MODE=local for email and password only."
+                )
+            if self.google_auto_provision and not (
+                self.google_domain_list or self.google_email_list
+            ):
+                problems.append(
+                    "GOOGLE_AUTO_PROVISION=true needs GOOGLE_ALLOWED_DOMAINS or "
+                    "GOOGLE_ALLOWED_EMAILS; otherwise any Google account could sign in."
                 )
         if self.feature_public_share_links:
             if self.auth_mode == "none":
@@ -281,6 +340,23 @@ class Settings(BaseSettings):
         return datetime.now(ZoneInfo(self.workspace_timezone)).date()
 
     @property
+    def google_domain_list(self) -> list[str]:
+        return [
+            d.strip().lower().lstrip("@")
+            for d in self.google_allowed_domains.split(",")
+            if d.strip()
+        ]
+
+    @property
+    def google_email_list(self) -> list[str]:
+        return [e.strip().lower() for e in self.google_allowed_emails.split(",") if e.strip()]
+
+    @property
+    def sign_in(self) -> bool:
+        """True when people sign in (AUTH_MODE=local or full)."""
+        return self.auth_mode != "none"
+
+    @property
     def trusted_proxy_list(self) -> list[str]:
         return [e for e in self.trusted_proxies.split(",") if e]
 
@@ -307,7 +383,12 @@ def _problems_from(exc: ValidationError) -> list[str]:
         if err["loc"]:
             name = str(err["loc"][0]).upper()
             got = err.get("input")
-            secret = name in ("ENCRYPTION_KEY", "POSTGRES_PASSWORD")
+            secret = name in (
+                "ENCRYPTION_KEY",
+                "POSTGRES_PASSWORD",
+                "ADMIN_INITIAL_PASSWORD",
+                "GOOGLE_CLIENT_SECRET",
+            )
             shown = f" (got {got!r})" if isinstance(got, str | int | bool) and not secret else ""
             problems.append(f"{name}{shown}: {message}")
         else:

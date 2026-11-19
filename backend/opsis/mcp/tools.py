@@ -24,7 +24,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-import sqlglot
 from jsonschema import Draft202012Validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -34,19 +33,18 @@ from opsis.auth.principal import Permission, Principal
 from opsis.dashboards import patch as patches
 from opsis.db.models import Dashboard, Dataset
 from opsis.errors import ApiError
-from opsis.query.engine import CompiledQuery
-from opsis.semantic import model as semantic
 from opsis.services import (
+    access,
     audit,
     connections,
     dashboards,
     datasets,
+    links,
     models,
 )
 from opsis.services import query as queries
 from opsis.services.query import QueryRuntime
 from opsis.settings import Settings
-from opsis.storage import snapshots
 
 MAX_QUERY_ROWS = 1000
 MAX_PREVIEW_ROWS = 100
@@ -168,10 +166,23 @@ def _suggest(wanted: str, known: list[str], what: str, lister: str) -> str:
 # ---- lookups ----------------------------------------------------------------------
 
 
-def _dataset(db: Session, name: Any) -> Dataset:
+def _dataset(ctx: ToolContext, db: Session, name: Any) -> Dataset:
+    """A dataset by name, if the caller may use it. Datasets they may not use are
+    reported as forbidden, and are left out of suggestions."""
+    blocked = access.blocked_datasets(db, ctx.principal)
     found = db.scalar(select(Dataset).where(Dataset.name == str(name).strip()))
+    if found is not None and found.name in blocked:
+        raise _fail(
+            "forbidden",
+            f"You do not have access to the dataset {found.name!r}.",
+            hint="Tell the user; an admin can give access. Do not retry.",
+        )
     if found is None:
-        known = list(db.scalars(select(Dataset.name).order_by(Dataset.name)).all())
+        known = [
+            n
+            for n in db.scalars(select(Dataset.name).order_by(Dataset.name)).all()
+            if n not in blocked
+        ]
         raise _fail(
             "not_found",
             f"There is no dataset called {str(name)!r}.",
@@ -180,15 +191,27 @@ def _dataset(db: Session, name: Any) -> Dataset:
     return found
 
 
-def _dashboard(db: Session, ref: Any) -> Dashboard:
-    """A dashboard by id. A title is accepted too when exactly one dashboard has it."""
+def _dashboard(ctx: ToolContext, db: Session, ref: Any) -> Dashboard:
+    """A dashboard by id. A title is accepted too when exactly one dashboard has it.
+    Only dashboards the caller can see are found, matched or suggested."""
     text = str(ref).strip()
+    visible = access.visible_dashboards(db, ctx.principal)
+
+    def seen(dashboard: Dashboard | None) -> bool:
+        return dashboard is not None and (visible is None or dashboard.id in visible)
+
     try:
-        found = db.get(Dashboard, uuid.UUID(text))
+        found: Dashboard | None = db.get(Dashboard, uuid.UUID(text))
+        if not seen(found):
+            found = None
     except ValueError:
-        matches = db.scalars(
-            select(Dashboard).where(func.lower(Dashboard.title) == text.lower())
-        ).all()
+        matches = [
+            d
+            for d in db.scalars(
+                select(Dashboard).where(func.lower(Dashboard.title) == text.lower())
+            ).all()
+            if seen(d)
+        ]
         if len(matches) > 1:
             raise _fail(
                 "ambiguous",
@@ -197,7 +220,11 @@ def _dashboard(db: Session, ref: Any) -> Dashboard:
             ) from None
         found = matches[0] if matches else None
     if found is None:
-        titles = list(db.scalars(select(Dashboard.title).order_by(Dashboard.title)).all())
+        titles = [
+            d.title
+            for d in db.scalars(select(Dashboard).order_by(Dashboard.title)).all()
+            if seen(d)
+        ]
         raise _fail(
             "not_found",
             f"There is no dashboard with the id or title {text!r}.",
@@ -215,26 +242,14 @@ def _urls(settings: Settings, dashboard_id: Any) -> dict[str, str]:
     }
 
 
-def _rls_applies(model: semantic.Model, principal: Principal) -> bool:
-    """True when a row-level security rule restricts what this caller may see."""
-    return any(principal.role.value in rule.roles for rule in model.rls)
-
-
-def _raw_source(ctx: ToolContext, db: Session, dataset: Dataset, tool: str) -> Any:
-    """The dataset's snapshot for reading rows directly, which skips the semantic
-    layer. Refused when row-level security applies to the caller, because raw
-    rows would show what a query hides."""
+def _raw_source(ctx: ToolContext, db: Session, dataset: Dataset) -> Any:
+    """The dataset's snapshot, for tools that read rows rather than run a
+    semantic query. Rows are always read through `queries.secured_select`, so
+    row-level security applies to them exactly as it does to a query."""
     sources = queries.load_sources(db, ctx.settings, {dataset.name})
     source = sources.get(dataset.name)
     if source is None:
         raise _fail("no_data", f"Dataset {dataset.name!r} has no data yet.")
-    if _rls_applies(source.model, ctx.principal):
-        raise _fail(
-            "forbidden",
-            f"Dataset {dataset.name!r} has row-level security rules that apply to you, so "
-            f"{tool} cannot read its rows directly.",
-            hint="Use run_query instead. It applies the rules and returns the rows you may see.",
-        )
     return source
 
 
@@ -258,8 +273,11 @@ def list_connections(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any
 
 def list_datasets(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     by_name = {row["name"]: row for row in datasets.list_datasets(db)}
+    blocked = access.blocked_datasets(db, ctx.principal)
     result = []
     for entry in models.list_models(db):
+        if entry["dataset"] in blocked:
+            continue
         row = by_name.get(entry["dataset"], {})
         snapshot = row.get("snapshot") or {}
         result.append(
@@ -281,7 +299,8 @@ def list_datasets(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
 
 def _sample_values(ctx: ToolContext, source: Any) -> dict[str, list[Any]]:
-    rows = snapshots.preview(_path(source), SAMPLE_ROWS)
+    user = queries.user_context(ctx.principal, None)
+    rows = queries.secured_preview(ctx.settings, ctx.runtime, source, user, SAMPLE_ROWS)
     names = list(source.columns)
     samples: dict[str, list[Any]] = {}
     for position, name in enumerate(names):
@@ -297,14 +316,8 @@ def _sample_values(ctx: ToolContext, source: Any) -> dict[str, list[Any]]:
     return samples
 
 
-def _path(source: Any) -> Any:
-    from pathlib import Path
-
-    return Path(source.table.path)
-
-
 def describe_dataset(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    dataset = _dataset(db, args["dataset"])
+    dataset = _dataset(ctx, db, args["dataset"])
     described = models.describe(db, dataset)
     detail = datasets.detail(db, dataset)
     snapshot = detail.get("snapshot") or {}
@@ -312,12 +325,18 @@ def describe_dataset(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any
 
     samples: dict[str, list[Any]] = {}
     sample_note = None
+    restricted = False
     if described["dataset"]["hasData"]:
         source = queries.load_sources(db, ctx.settings, {dataset.name}).get(dataset.name)
-        if source is not None and not _rls_applies(source.model, ctx.principal):
+        if source is not None:
+            restricted = queries.rls_applies(source, queries.user_context(ctx.principal, None))
+            db.rollback()
             samples = _sample_values(ctx, source)
-        elif source is not None:
-            sample_note = "Sample values are hidden because row-level security applies to you."
+            if restricted:
+                sample_note = (
+                    "Row-level security applies to you: sample values come only from the rows "
+                    "you may see, and the row count is not shown."
+                )
 
     definition = described["definition"]
     column_of = {
@@ -354,7 +373,7 @@ def describe_dataset(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any
         "dataset": dataset.name,
         "label": dataset.label,
         "hasData": described["dataset"]["hasData"],
-        "rowCount": snapshot.get("rowCount"),
+        "rowCount": None if restricted else snapshot.get("rowCount"),
         "refreshedAt": snapshot.get("createdAt"),
         "lastRefresh": {"status": job.get("status"), "error": job.get("error")} if job else None,
         "modelVersion": described["version"],
@@ -385,7 +404,7 @@ def _first_time(dimensions: list[dict[str, Any]], dataset: str) -> str:
 
 
 def get_semantic_model(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    dataset = _dataset(db, args["dataset"])
+    dataset = _dataset(ctx, db, args["dataset"])
     described = models.describe(db, dataset)
     return {
         "dataset": dataset.name,
@@ -492,7 +511,7 @@ def list_visuals(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     dataset_name = args.get("dataset")
     fields: list[dict[str, Any]] = []
     if dataset_name:
-        dataset = _dataset(db, dataset_name)
+        dataset = _dataset(ctx, db, dataset_name)
         dataset_name = dataset.name
         fields = [f for f in models.describe(db, dataset)["fields"] if f["kind"] != "segment"]
     visuals = []
@@ -583,11 +602,13 @@ def get_spec_schema(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
 
 def preview_dataset(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    dataset = _dataset(db, args["dataset"])
-    _raw_source(ctx, db, dataset, "preview_dataset")
+    dataset = _dataset(ctx, db, args["dataset"])
+    _raw_source(ctx, db, dataset)
     limit = max(1, min(int(args.get("limit") or 20), MAX_PREVIEW_ROWS))
-    preview = datasets.preview(db, ctx.settings, dataset, limit)
-    return {
+    preview = datasets.preview(
+        db, ctx.settings, dataset, limit, principal=ctx.principal, runtime=ctx.runtime
+    )
+    result = {
         "dataset": dataset.name,
         "columns": [{"name": c["name"], "type": c["type"]} for c in preview["columns"]],
         "rows": preview["rows"],
@@ -595,6 +616,12 @@ def preview_dataset(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
         "rowCount": preview["rowCount"],
         "note": "These are raw source columns. For totals and groupings use run_query.",
     }
+    if preview["rlsApplied"]:
+        result["note"] += (
+            " Row-level security applies to you, so only rows you may see are shown and the "
+            "total row count is not given."
+        )
+    return result
 
 
 def run_query(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
@@ -623,13 +650,8 @@ def run_query(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     return result
 
 
-def _profile_sql(path: str, column: str, top: bool) -> str:
-    scan = sqlglot.parse_one("SELECT * FROM read_parquet('x')", read="duckdb")
-    literal = scan.find(exp.Literal)
-    assert isinstance(scan, exp.Select) and literal is not None
-    literal.replace(exp.Literal.string(f"{path}/part-*.parquet"))
+def _profile_sql(source: exp.Subquery, column: str, top: bool) -> str:
     col = exp.column(column, quoted=True)
-    source = scan.subquery("t")
     if top:
         count = exp.Count(this=exp.Star())
         query = (
@@ -652,8 +674,8 @@ def _profile_sql(path: str, column: str, top: bool) -> str:
 
 
 def profile_column(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    dataset = _dataset(db, args["dataset"])
-    source = _raw_source(ctx, db, dataset, "profile_column")
+    dataset = _dataset(ctx, db, args["dataset"])
+    source = _raw_source(ctx, db, dataset)
     wanted = str(args["column"]).strip()
     # Accept a field ref ("gifts.fund") for a dimension that reads one column.
     if wanted.startswith(f"{dataset.name}."):
@@ -667,18 +689,12 @@ def profile_column(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
             hint=_suggest(wanted, list(source.columns), "columns", "describe_dataset"),
         )
     db.rollback()
+    user = queries.user_context(ctx.principal, None)
 
     def run(top: bool) -> list[list[Any]]:
-        compiled = CompiledQuery(
-            sql=_profile_sql(source.table.path, wanted, top),
-            params=(),
-            tables=(source.table,),
-            row_limit=TOP_VALUES,
-            timeout_s=ctx.settings.query_timeout_seconds,
-        )
-        table = ctx.runtime.execute(compiled, wait_seconds=ctx.settings.query_timeout_seconds).table
-        columns = [column.to_pylist() for column in table.columns]
-        return [[queries._json(column[i]) for column in columns] for i in range(table.num_rows)]
+        # Row-level security is inside the scan, so the figures cover only visible rows.
+        sql = _profile_sql(queries.secured_select(source, user), wanted, top)
+        return queries.run_raw(ctx.settings, ctx.runtime, source, sql, TOP_VALUES, numbers=True)
 
     rows, non_null, distinct, low, high = run(False)[0]
     return {
@@ -691,6 +707,11 @@ def profile_column(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
         "min": low,
         "max": high,
         "mostCommon": [{"value": value, "rows": count} for value, count in run(True)],
+        **(
+            {"note": "Row-level security applies to you: these figures cover only your rows."}
+            if queries.rls_applies(source, user)
+            else {}
+        ),
     }
 
 
@@ -698,13 +719,13 @@ def profile_column(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
 
 def validate_model(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    dataset = _dataset(db, args["dataset"])
+    dataset = _dataset(ctx, db, args["dataset"])
     found = models.problems(db, ctx.settings, dataset, args["definition"])
     return {"valid": not found, "problems": found[:50]}
 
 
 def patch_semantic_model(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    dataset = _dataset(db, args["dataset"])
+    dataset = _dataset(ctx, db, args["dataset"])
     described = models.describe(db, dataset)
     base = int(args["base_version"])
     if base != described["version"]:
@@ -752,12 +773,10 @@ def list_dashboards(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
 
 def get_dashboard(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    dashboard = _dashboard(db, args["id"])
+    dashboard = _dashboard(ctx, db, args["id"])
     wanted = args.get("version")
     if wanted is not None:
-        if not dashboards.can_edit(ctx.principal):
-            raise _fail("forbidden", "Only editors can read old versions of a dashboard.")
-        spec = dashboards.get_version(db, dashboard, int(wanted))["spec"]
+        spec = dashboards.get_version(db, dashboard, int(wanted), ctx.principal)["spec"]
         version: int | None = int(wanted)
     else:
         detail = dashboards.detail(db, dashboard, ctx.principal)
@@ -784,7 +803,7 @@ def get_dashboard(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
 
 def _saved(ctx: ToolContext, db: Session, dashboard: Dashboard, what: str) -> dict[str, Any]:
-    spec = dashboards.get_version(db, dashboard, dashboard.version)["spec"]
+    spec = dashboards.get_version(db, dashboard, dashboard.version, ctx.principal)["spec"]
     return {
         "id": str(dashboard.id),
         "title": dashboard.title,
@@ -826,7 +845,7 @@ def create_dashboard(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any
 
 
 def patch_dashboard(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    dashboard = _dashboard(db, args["id"])
+    dashboard = _dashboard(ctx, db, args["id"])
     patched = dashboards.patch(
         db,
         ctx.settings,
@@ -841,7 +860,7 @@ def patch_dashboard(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
 
 def validate_spec(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    found = dashboards.problems(db, ctx.settings, args["spec"])
+    found = dashboards.problems(db, ctx.settings, args["spec"], ctx.principal)
     result: dict[str, Any] = {"valid": not found, "problems": found[:50]}
     if found:
         result["whatToDo"] = GENERAL_HINTS["invalid_spec"]
@@ -849,8 +868,8 @@ def validate_spec(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
 
 def list_versions(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    dashboard = _dashboard(db, args["id"])
-    rows = dashboards.list_versions(db, dashboard)[:50]
+    dashboard = _dashboard(ctx, db, args["id"])
+    rows = dashboards.list_versions(db, dashboard, ctx.principal)[:50]
     return {
         "id": str(dashboard.id),
         "latestVersion": dashboard.version,
@@ -869,7 +888,7 @@ def list_versions(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
 
 def restore_version(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    dashboard = _dashboard(db, args["id"])
+    dashboard = _dashboard(ctx, db, args["id"])
     number = int(args["version"])
     restored = dashboards.restore(
         db, ctx.settings, ctx.principal, dashboard, number, author_type=ctx.author_type
@@ -880,7 +899,7 @@ def restore_version(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
 
 def publish_dashboard(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    dashboard = _dashboard(db, args["id"])
+    dashboard = _dashboard(ctx, db, args["id"])
     version = args.get("version")
     published = dashboards.publish(
         db,
@@ -899,11 +918,63 @@ def publish_dashboard(ctx: ToolContext, db: Session, args: dict[str, Any]) -> An
     }
 
 
+def share_dashboard(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
+    dashboard = _dashboard(ctx, db, args["id"])
+    grantee = access.find_grantee(db, str(args["with"]))
+    result = access.share_with(
+        db, ctx.principal, dashboard, grantee, str(args.get("role") or "viewer")
+    )
+    return {
+        "id": str(dashboard.id),
+        "title": dashboard.title,
+        "owner": (result["owner"] or {}).get("name"),
+        "sharedWith": [
+            {"who": s.get("email") or s["name"], "kind": s["kind"], "role": s["role"]}
+            for s in result["shares"]
+        ],
+        "publishedVersion": dashboard.published_version,
+        **_urls(ctx.settings, dashboard.id),
+        "note": (
+            "Viewers see only the published version."
+            if dashboard.published_version is not None
+            else "Not published yet: viewers will see nothing until publish_dashboard is called."
+        ),
+    }
+
+
+def create_share_link(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
+    dashboard = _dashboard(ctx, db, args["id"])
+    attributes = "mine" if args.get("attributes") == "mine" else None
+    described, url = links.create(
+        db,
+        ctx.settings,
+        ctx.principal,
+        dashboard,
+        name=args.get("name"),
+        expires_in_days=args.get("expires_in_days"),
+        password=args.get("password"),
+        attributes=attributes,
+    )
+    return {
+        "url": url,
+        "id": str(dashboard.id),
+        "linkId": described["id"],
+        "dashboard": dashboard.title,
+        "expiresAt": described["expiresAt"],
+        "hasPassword": described["hasPassword"],
+        "note": (
+            "Give the user this URL now: it is shown only once. Anyone with it can see the "
+            "published version of the dashboard. It can be revoked in Opsis, on the dashboard's "
+            "Share panel."
+        ),
+    }
+
+
 # ---- operations ---------------------------------------------------------------------
 
 
 def trigger_refresh(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    dataset = _dataset(db, args["dataset"])
+    dataset = _dataset(ctx, db, args["dataset"])
     job = datasets.request_refresh(db, ctx.principal, dataset, full=bool(args.get("full")))
     return {
         "jobId": str(job.id),
@@ -1305,6 +1376,57 @@ TOOLS: tuple[Tool, ...] = (
         writes=True,
     ),
     Tool(
+        "share_dashboard",
+        "Share a dashboard",
+        "Share a dashboard with a person (by email), a group (by name) or everyone in the "
+        "workspace, as a viewer or an editor, or stop sharing with them (role none). Other "
+        "shares are kept. Viewers only see the published version, so publish too if the user "
+        "wants people to see it. Only do this when the user asks. "
+        'Example input: {"id": "3f2b6c1e-8d4a-4f0b-9c7e-2a1d5e6f7a8b", "with": '
+        '"sam@example.com", "role": "viewer"}',
+        _schema(
+            {
+                "id": _DASHBOARD_ID,
+                "with": {
+                    "type": "string",
+                    "description": 'An email address, a group name, or "everyone".',
+                },
+                "role": {"enum": ["viewer", "editor", "none"], "default": "viewer"},
+            },
+            ["id", "with"],
+        ),
+        share_dashboard,
+        "publish",
+        Permission.DASHBOARDS_PUBLISH,
+        writes=True,
+        feature="sign_in",
+    ),
+    Tool(
+        "create_share_link",
+        "Create a public share link",
+        "Create a public link to the published version of a dashboard: anyone with the link "
+        "can view it without signing in. The URL is returned once. Optional: `expires_in_days`, "
+        'a `password`, and `attributes` ("none", the default, means data protected by '
+        'row-level security shows nothing; "mine" shows what you can see). Only do this when the '
+        "user asks for a public link. "
+        'Example input: {"id": "3f2b6c1e-8d4a-4f0b-9c7e-2a1d5e6f7a8b", "expires_in_days": 30}',
+        _schema(
+            {
+                "id": _DASHBOARD_ID,
+                "name": {"type": "string", "maxLength": 100},
+                "expires_in_days": {"type": "integer", "minimum": 1, "maximum": 366},
+                "password": {"type": "string", "minLength": 12, "maxLength": 200},
+                "attributes": {"enum": ["none", "mine"], "default": "none"},
+            },
+            ["id"],
+        ),
+        create_share_link,
+        "publish",
+        Permission.DASHBOARDS_PUBLISH,
+        writes=True,
+        feature="feature_public_share_links",
+    ),
+    Tool(
         "trigger_refresh",
         "Refresh a dataset",
         "Reload a dataset from its source so it has the latest data. Returns a `jobId`; the "
@@ -1443,7 +1565,7 @@ def call(ctx: ToolContext, name: str, arguments: Mapping[str, Any] | None) -> An
                     actor=ctx.principal,
                     actor_type=ctx.author_type,
                     target_type="dashboard"
-                    if "dashboard" in tool.name or "version" in tool.name
+                    if any(word in tool.name for word in ("dashboard", "version", "share"))
                     else "dataset",
                     target_id=str(result.get("id") or result.get("dataset") or "")[:100] or None,
                     detail={

@@ -172,8 +172,8 @@ All modes resolve every request to a `Principal` (user id, role, groups, attribu
 | `AUTH_MODE=none` | Every request is the built-in admin. Startup refuses this mode unless the bind address is loopback. |
 | Local login | `POST /api/auth/login` checks argon2id and the lockout table, creates a server-side session row, and sets an opaque HttpOnly cookie plus a CSRF token cookie. State-changing requests must echo the CSRF token in a header. |
 | Google (`AUTH_MODE=full`) | See the diagram below. |
-| MCP and API tokens | `Authorization: Bearer <PAT>`. The token is looked up by hash, checked for expiry and revocation, and the request runs as that user limited to the token scopes. `MCP_AUTH=none` is accepted only on loopback and maps to the built-in admin. |
-| Share link | `GET /s/<token>`: token looked up by hash, checked for expiry, revocation and optional password. Serves the published version read-only as a synthetic principal carrying the attribute set chosen by the link owner (empty by default, so RLS denies). |
+| MCP and API tokens | `Authorization: Bearer <PAT>`. The token is looked up by hash, checked for expiry and revocation, and the request runs as that user limited to the token scopes. An Authorization header never falls back to a session cookie. `MCP_AUTH=none` is accepted only on loopback with `AUTH_MODE=none`, and maps to the built-in admin. |
+| Share link | The page `/s/<token>` calls `/api/public/links/<token>`: the token is looked up by hash and checked for expiry, revocation, a published version and the optional password (unlocked by an encrypted 12-hour cookie). It serves the published version read-only as a synthetic viewer carrying the attribute set chosen when the link was made (empty by default, so RLS denies) and never exempt from a rule. |
 
 ```mermaid
 sequenceDiagram
@@ -181,22 +181,24 @@ sequenceDiagram
   participant A as api
   participant G as Google
 
-  B->>A: GET /api/auth/google/login
-  A->>A: create state, nonce and PKCE verifier (short-lived signed cookie)
-  A-->>B: 302 to Google (scopes: openid email profile)
+  B->>A: GET /api/auth/google/start?next=/path
+  A->>A: create state, nonce and PKCE verifier (10-minute encrypted cookie)
+  A-->>B: 303 to Google (scopes: openid email profile)
   B->>G: sign in and consent
   G-->>B: 302 to PUBLIC_BASE_URL/api/auth/google/callback?code&state
   B->>A: callback
-  A->>A: check state
+  A->>A: check state against the cookie (bound to this browser)
   A->>G: exchange code with PKCE verifier
   G-->>A: ID token
   A->>A: verify signature, issuer, audience, nonce, email_verified
   A->>A: apply allowed domains and emails, then invited-only or auto-provision
   A->>A: link to a local account only if the verified email matches
-  A-->>B: session cookie, 302 to the app
+  A-->>B: session cookie, 303 to the app (next path, never another site)
 ```
 
-Bootstrap: on first start, `ADMIN_EMAIL` and `ADMIN_INITIAL_PASSWORD` create the first admin with a forced password change.
+Bootstrap: on first start, `ADMIN_EMAIL` and `ADMIN_INITIAL_PASSWORD` create the first admin with a forced password change. Switching from `AUTH_MODE=none` to a sign-in mode switches the built-in admin off, which also stops its access tokens. Recovery without any admin: `python -m opsis reset-link <email>` on the server.
+
+**Access (M6).** Dashboards belong to their owner and are shared with users, groups or everyone as viewers or editors; admins can do everything. Viewers see the published version only (title included); a viewer-role person shared as an editor is still a viewer. A dashboard someone cannot view answers 404. Datasets are open to everyone who builds unless restricted to admins and named users or groups; viewing a dashboard needs no dataset access, because the dashboard grants its own questions, with RLS applied as the viewer. All of this lives in `services/access.py` and is checked in the service layer, so REST, MCP and share links share it. Details in ADR-023.
 
 ## 6. Contracts to review
 

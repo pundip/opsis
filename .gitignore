@@ -29,3 +29,6 @@ Thumbs.db
 # Claude desktop app local settings (launch.json stays tracked)
 .claude/settings.local.json
 .claude/worktrees/
+
+# Playwright sign-in state (written by e2e/global-setup.ts)
+e2e/.auth/

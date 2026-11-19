@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
@@ -11,9 +12,10 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlglot import exp
 
 from opsis.auth.principal import Permission, Principal, Role
-from opsis.db.models import Dataset, SemanticModel, Snapshot
+from opsis.db.models import Dataset, SemanticModel, Snapshot, User
 from opsis.errors import ApiError
 from opsis.query.duckdb_engine import ResultCache
 from opsis.query.engine import (
@@ -26,7 +28,7 @@ from opsis.query.engine import (
     TableRef,
 )
 from opsis.semantic import model as semantic
-from opsis.semantic.compiler import Source, UserContext, compile_query
+from opsis.semantic.compiler import Source, UserContext, compile_query, secured_scan
 from opsis.services import models
 from opsis.settings import Settings
 from opsis.storage import snapshots
@@ -101,13 +103,34 @@ def _json(value: Any) -> Any:
     return snapshots._jsonable(value)
 
 
-def user_context(principal: Principal, preview_as: Mapping[str, Any] | None) -> UserContext:
-    """Who the query runs as. Admins may preview as another role and attribute set,
-    to check row-level security rules before anyone relies on them."""
+def user_context(
+    principal: Principal, preview_as: Mapping[str, Any] | None, *, db: Session | None = None
+) -> UserContext:
+    """Who the query runs as, for row-level security.
+
+    Admins may look as someone else ("View as"): a real user (`{"userId": ...}`),
+    or a role and attribute set, to check rules before anyone relies on them.
+    A share link never inherits an exemption, whatever its rules' role lists say.
+    """
     if preview_as is None:
-        return UserContext(principal.role.value, principal.email, dict(principal.attributes))
+        return UserContext(
+            principal.role.value,
+            principal.email,
+            dict(principal.attributes),
+            may_be_exempt=principal.auth_method != "share_link",
+        )
     if not principal.can(Permission.SETTINGS_MANAGE):
-        raise ApiError(403, "forbidden", "Only an admin can preview a query as another user.")
+        raise ApiError(403, "forbidden", "Only an admin can view data as another user.")
+    if preview_as.get("userId"):
+        if db is None:
+            raise ApiError(422, "invalid_request", "View as a user is not available here.")
+        try:
+            target = db.get(User, uuid.UUID(str(preview_as["userId"])))
+        except ValueError:
+            target = None
+        if target is None:
+            raise ApiError(404, "not_found", "The user to view as does not exist.")
+        return UserContext(target.role, target.email, dict(target.attributes))
     try:
         role = Role(str(preview_as.get("role", "viewer")))
     except ValueError:
@@ -118,6 +141,56 @@ def user_context(principal: Principal, preview_as: Mapping[str, Any] | None) -> 
     if not isinstance(attributes, dict):
         raise ApiError(422, "invalid_request", "previewAs.attributes must be an object.")
     return UserContext(role.value, str(preview_as.get("email", "")), attributes)
+
+
+def rls_applies(source: Source, user: UserContext) -> bool:
+    """True when a row-level security rule restricts what this user may see."""
+    return any(user.role in rule.roles or not user.may_be_exempt for rule in source.model.rls)
+
+
+def secured_select(source: Source, user: UserContext) -> exp.Subquery:
+    """The dataset's rows as this user may see them, for use as a FROM clause."""
+    scan, _ = secured_scan(source, user)
+    return scan.subquery("t")
+
+
+def run_raw(
+    settings: Settings,
+    runtime: QueryRuntime,
+    source: Source,
+    sql: str,
+    limit: int,
+    *,
+    numbers: bool = False,
+) -> list[list[Any]]:
+    """Run SQL built over `secured_select` and return JSON-safe rows.
+    With `numbers`, decimals become floats (for statistics) instead of text."""
+    compiled = CompiledQuery(
+        sql=sql,
+        params=(),
+        tables=(source.table,),
+        row_limit=limit,
+        timeout_s=settings.query_timeout_seconds,
+    )
+    try:
+        table = runtime.execute(compiled, wait_seconds=settings.query_timeout_seconds).table
+    except QueryTimeoutError as exc:
+        raise ApiError(408, "query_timeout", str(exc)) from exc
+    except QueryError as exc:
+        raise ApiError(
+            400, "query_failed", f"The rows could not be read: {str(exc).splitlines()[0][:300]}"
+        ) from exc
+    columns = [column.to_pylist() for column in table.columns]
+    convert = _json if numbers else snapshots._jsonable
+    return [[convert(column[i]) for column in columns] for i in range(table.num_rows)]
+
+
+def secured_preview(
+    settings: Settings, runtime: QueryRuntime, source: Source, user: UserContext, limit: int
+) -> list[list[Any]]:
+    """The first rows of a dataset with its row-level security applied."""
+    sql = exp.select("*").from_(secured_select(source, user)).limit(limit).sql(dialect="duckdb")
+    return run_raw(settings, runtime, source, sql, limit)
 
 
 def check_query(settings: Settings, query: Any) -> None:
@@ -197,7 +270,11 @@ def run(
     today: date | None = None,
 ) -> dict[str, Any]:
     check_query(settings, query)
-    sources = load_sources(db, settings, referenced_datasets(query))
+    names = referenced_datasets(query)
+    from opsis.services import access  # import here: access imports nothing from queries
+
+    access.require_datasets(db, principal, names)
+    sources = load_sources(db, settings, names)
     base = str(query["dataset"])
     if base not in sources:
         exists = db.scalar(select(Dataset).where(Dataset.name == base))
@@ -214,7 +291,7 @@ def run(
         settings,
         runtime,
         sources,
-        user_context(principal, preview_as),
+        user_context(principal, preview_as, db=db),
         query,
         max_rows=max_rows,
         today=today,

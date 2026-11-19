@@ -42,6 +42,10 @@ export interface Me {
   role: "admin" | "editor" | "viewer";
   authMethod: string;
   permissions: string[];
+  groups: string[];
+  mustChangePassword: boolean;
+  hasPassword: boolean;
+  google: boolean;
 }
 
 export function useConfig() {
@@ -53,8 +57,9 @@ export function useConfig() {
 }
 
 /** The signed-in user, or null when nobody is signed in. */
-export function useMe() {
+export function useMe(enabled = true) {
   return useQuery({
+    enabled,
     queryKey: ["me"],
     queryFn: async () => {
       try {

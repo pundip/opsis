@@ -22,13 +22,13 @@ from sqlalchemy.orm import sessionmaker
 from starlette.routing import Route
 
 from opsis import __version__
-from opsis.api import dashboards, ingestion, semantic, system, tokens
+from opsis.api import admin, auth, dashboards, ingestion, semantic, sharing, system, tokens
 from opsis.api.errors import ApiError, install_error_handlers
 from opsis.auth import cookies
 from opsis.jobs.worker import InlineRunner
 from opsis.mcp.server import OpsisMcp
 from opsis.query.duckdb_engine import DuckDBEngine, ResultCache
-from opsis.services import users
+from opsis.services import accounts, users
 from opsis.services.query import QueryRuntime
 from opsis.settings import Settings, load_settings
 
@@ -62,8 +62,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        if settings.auth_mode == "none":
-            with session_factory() as db:
+        with session_factory() as db:
+            if settings.sign_in:
+                accounts.ensure_first_admin(db, settings)
+            else:
                 users.ensure_builtin_admin(db)
         log.info(
             "%s %s started: deploy_mode=%s auth_mode=%s job_runner=%s base_path=%r",
@@ -136,7 +138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api = APIRouter(prefix=base)
     api.include_router(system.health_router)
     api.include_router(system.router)
-    register_feature_routers(api)
+    register_feature_routers(api, settings)
     app.include_router(api)
     # The MCP endpoint is an ASGI app of its own (Streamable HTTP), mounted as one
     # exact path so that no redirect is ever needed behind the proxy.
@@ -145,12 +147,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-def register_feature_routers(api: APIRouter) -> None:
-    """Every feature router is included here, under the base path."""
+def register_feature_routers(api: APIRouter, settings: Settings) -> None:
+    """Every feature router is included here, under the base path. Routes of a
+    mode or feature that is off are not registered at all, so they answer 404."""
     api.include_router(ingestion.router)
     api.include_router(semantic.router)
     api.include_router(dashboards.router)
     api.include_router(tokens.router)
+    api.include_router(admin.audit_router)
+    if settings.sign_in:
+        api.include_router(auth.router)
+        api.include_router(admin.users_router)
+        api.include_router(sharing.router)
+    if settings.feature_public_share_links:
+        api.include_router(sharing.links_router)
+        api.include_router(sharing.public_router)
 
 
 def render_index(settings: Settings) -> str | None:

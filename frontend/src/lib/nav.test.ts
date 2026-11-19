@@ -36,6 +36,10 @@ const admin: Me = {
   displayName: "Local admin",
   role: "admin",
   authMethod: "none",
+  groups: [],
+  mustChangePassword: false,
+  hasPassword: false,
+  google: false,
   permissions: [
     "dashboards:view", "datasets:edit", "models:edit", "connections:manage",
     "sql_lab:use", "users:manage", "settings:manage",
@@ -67,7 +71,7 @@ describe("navItems", () => {
 
   it("follows permissions", () => {
     const viewer: Me = { ...admin, role: "viewer", permissions: ["dashboards:view"] };
-    expect(paths(config, viewer)).toEqual(["/dashboards", "/tokens"]);
+    expect(paths(config, viewer)).toEqual(["/dashboards"]);
   });
 });
 

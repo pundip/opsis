@@ -298,3 +298,38 @@ Short ADR entries. Newest at the bottom. "Brief" means `BUILD_BRIEF.md`. An entr
 
 **Testing**
 - Playwright (`e2e/`, run with `npm run smoke`) drives a real browser, and the official MCP TypeScript client, against the running stack at the root and at the sub-path. It replaces manual browser checks from M5 on.
+
+## ADR-023: Sign-in, access lists, share links and tokens on the REST API
+- **Status:** accepted, M6
+
+**Sign-in**
+- Passwords are hashed with argon2id (`argon2-cffi` defaults). Rules: at least 12 characters, not the email, at least four different characters. A failed sign-in takes as long for an unknown email as for a wrong password, and the message is the same.
+- Sessions are rows in `sessions` keyed by the SHA-256 of a random cookie value (`opsis_session`, HttpOnly, SameSite=Lax, Secure under https, `Path` = base path). They end after `SESSION_IDLE_HOURS` without use (default 12), after `SESSION_MAX_DAYS` (default 14), on sign-out, on "sign out everywhere", when the password changes (other sessions only) and when the user is deactivated. `last_seen_at` is written at most once a minute.
+- A password set by someone else (`ADMIN_INITIAL_PASSWORD`) must be changed before anything else works: every other route answers 403 `password_change_required`.
+- Lockouts (`login_attempts`): failures are counted per email (5), per client address (30) and per share link (5) within 15 minutes; each failure past the limit locks the key for 1, 2, 4 ... minutes, at most an hour. Counting in Postgres makes it hold across restarts and processes. A lockout can be used to annoy someone; it is short and backs off, which is the usual trade-off.
+- Invitations and admin resets are one-time links (`/set-password/<token>`, stored hashed, 7 days and 24 hours), shown once to the admin to pass on. `FEATURE_EMAIL` (M8) will send them instead.
+- **Deviation:** `ADMIN_INITIAL_PASSWORD` is not required. With `AUTH_MODE=full` the first admin can sign in with Google instead; otherwise the log says how to get a link with `python -m opsis reset-link`. `ADMIN_EMAIL` is required.
+
+**Google**
+- Authorization code flow with PKCE (S256), state and nonce, scopes `openid email profile`. The flow's secrets travel in a 10-minute encrypted cookie (Fernet with `ENCRYPTION_KEY`, bound to its purpose), so a callback from another browser is refused. The ID token is verified against the provider's published keys: signature (RS256), issuer, audience, expiry and nonce; the keys are fetched again once if they have rotated.
+- Only a Google-verified email is used. The allowlists (domains, addresses) are checked first, then the account: linked by Google subject, else matched by email (which links it), else created as a viewer only with `GOOGLE_AUTO_PROVISION=true`, which in turn requires an allowlist. Each refusal returns to the sign-in page with a reason, and is audited.
+- **Deviation:** Authlib provides PKCE and token generation; the ID token is verified with `joserfc` (Authlib's JOSE library, which Authlib 1.9 depends on); the two HTTP calls use the standard library rather than an Authlib client, to avoid adding an HTTP client dependency.
+- `GOOGLE_DISCOVERY_URL` exists so the smoke tests can use a fake provider (`e2e/fake-oidc.mjs`). It defaults to Google.
+
+**Access**
+- Dashboards: owner, shares to `user:<id>`, `group:<id>` or `everyone` as viewer or editor, and admins. Viewers see the published version only, including its title in lists. Editing also needs the editor role; deleting needs the owner or an admin. A dashboard someone cannot view answers 404, so its existence is not revealed (MCP lookups by title and "Did you mean" follow the same rule).
+- Datasets: unrestricted by default; when restricted, only admins and granted users or groups may query, preview, model or build on them. A dataset someone may not use counts as missing when they validate or save a dashboard. Viewing a dashboard built on it needs no grant: the dashboard decides the questions, and RLS applies as the viewer.
+- **Decided at the M5 review:** raw previews (REST and MCP) read through the same RLS-filtered scan as queries (`compiler.secured_scan`), and leave out the total row count when a rule applies. A rule that cannot be applied refuses.
+- "View as" (admins): data requests may carry `viewAs`, a user id or a role and attribute set; RLS then applies as for that user. It shows their data, not whether they may open the dashboard.
+
+**Share links**
+- 32 random bytes, stored as a SHA-256, shown once; optional expiry and password; revocable; view count. They serve only the published version, and stop when the dashboard is unpublished.
+- The link's attribute set is chosen when it is made. Empty (the default) means every RLS rule denies. Only an admin may choose any set; others may give none or their own, so a link can never show more than its maker can see. The link's viewer is never exempt from a rule.
+- Available only with `FEATURE_PUBLIC_SHARE_LINKS`, which needs server mode and sign-in; otherwise the routes are not registered.
+
+**Access tokens on the REST API (decided at the M5 review)**
+- The same personal access tokens as MCP, with the same scopes: `read` for reading (including POSTs that change nothing, such as queries and validation), `edit` for changes, `publish` for publishing and sharing, `admin` for admin work. A token never exceeds its owner's role.
+- Tokens cannot create tokens, change passwords or sign out sessions: those need a person in a browser.
+
+**Local mode**
+- With `AUTH_MODE=none` none of the sign-in, people, groups, sharing or share-link routes exist (404). The audit log page works in every mode.

@@ -17,8 +17,9 @@ from sqlalchemy.orm import Session
 from opsis.api.deps import get_db, get_settings, require
 from opsis.auth.principal import Permission, Principal
 from opsis.connectors.file import ALLOWED_SUFFIXES
+from opsis.db.models import Dataset
 from opsis.errors import ApiError
-from opsis.services import connections, datasets
+from opsis.services import access, connections, datasets
 from opsis.settings import Settings
 
 router = APIRouter(prefix="/api")
@@ -212,11 +213,19 @@ class RefreshIn(BaseModel):
     full: bool = False  # rebuild from scratch, ignoring the incremental cursor
 
 
+def _allowed(db: Session, dataset_id: uuid.UUID, principal: Principal) -> Dataset:
+    """A dataset, if the caller may use it (restricted datasets)."""
+    dataset = datasets.get(db, dataset_id)
+    access.require_datasets(db, principal, {dataset.name})
+    return dataset
+
+
 @router.get("/datasets")
 def list_datasets(
-    db: Session = Depends(get_db), _: Principal = Depends(edit)
+    db: Session = Depends(get_db), principal: Principal = Depends(edit)
 ) -> list[dict[str, Any]]:
-    return datasets.list_datasets(db)
+    blocked = access.blocked_datasets(db, principal)
+    return [d for d in datasets.list_datasets(db) if d["name"] not in blocked]
 
 
 @router.post("/datasets", status_code=201)
@@ -246,9 +255,9 @@ def create_dataset(
 
 @router.get("/datasets/{dataset_id}")
 def get_dataset(
-    dataset_id: uuid.UUID, db: Session = Depends(get_db), _: Principal = Depends(edit)
+    dataset_id: uuid.UUID, db: Session = Depends(get_db), principal: Principal = Depends(edit)
 ) -> dict[str, Any]:
-    return datasets.detail(db, datasets.get(db, dataset_id))
+    return datasets.detail(db, _allowed(db, dataset_id, principal))
 
 
 @router.delete("/datasets/{dataset_id}", status_code=204)
@@ -258,7 +267,7 @@ def delete_dataset(
     settings: Settings = Depends(get_settings),
     actor: Principal = Depends(edit),
 ) -> None:
-    datasets.delete(db, settings, actor, datasets.get(db, dataset_id))
+    datasets.delete(db, settings, actor, _allowed(db, dataset_id, actor))
 
 
 @router.post("/datasets/{dataset_id}/refresh", status_code=202)
@@ -269,7 +278,7 @@ def refresh_dataset(
     actor: Principal = Depends(edit),
 ) -> dict[str, Any]:
     job = datasets.request_refresh(
-        db, actor, datasets.get(db, dataset_id), full=bool(body and body.full)
+        db, actor, _allowed(db, dataset_id, actor), full=bool(body and body.full)
     )
     return datasets.job_dict(job)
 
@@ -277,19 +286,27 @@ def refresh_dataset(
 @router.get("/datasets/{dataset_id}/preview")
 def preview_dataset(
     dataset_id: uuid.UUID,
+    request: Request,
     limit: int = 100,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    _: Principal = Depends(edit),
+    principal: Principal = Depends(edit),
 ) -> dict[str, Any]:
-    return datasets.preview(db, settings, datasets.get(db, dataset_id), limit)
+    return datasets.preview(
+        db,
+        settings,
+        _allowed(db, dataset_id, principal),
+        limit,
+        principal=principal,
+        runtime=request.app.state.query_runtime,
+    )
 
 
 @router.get("/datasets/{dataset_id}/snapshots")
 def list_snapshots(
-    dataset_id: uuid.UUID, db: Session = Depends(get_db), _: Principal = Depends(edit)
+    dataset_id: uuid.UUID, db: Session = Depends(get_db), principal: Principal = Depends(edit)
 ) -> list[dict[str, Any]]:
-    return datasets.list_snapshots(db, datasets.get(db, dataset_id))
+    return datasets.list_snapshots(db, _allowed(db, dataset_id, principal))
 
 
 # ---- Jobs -----------------------------------------------------------------------

@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from opsis.auth.principal import Principal, Role
 from opsis.dashboards import spec as specs
-from opsis.db.models import AuditLog, Dashboard
+from opsis.db.models import AuditLog, Dashboard, DashboardShare
 from opsis.errors import ApiError
 from opsis.semantic.calendar import CalendarConfig
 from opsis.services import dashboards
@@ -422,10 +422,18 @@ def test_filter_options_inline_preview_and_published_access(
         "session",
         attributes={"regions": ["VIC"]},
     )
+    # Not shared with the viewer: invisible, published or not (M6 access lists).
     assert dashboards.list_dashboards(db, viewer) == []
     with pytest.raises(ApiError) as info:
         dashboards.detail(db, record, viewer)
-    assert info.value.code == "not_published"
+    assert info.value.status == 404
+    db.add(DashboardShare(dashboard_id=record.id, grantee="everyone", role="viewer"))
+    db.commit()
+    # Shared now, but viewers only see a published version and there is none yet.
+    assert dashboards.list_dashboards(db, viewer) == []
+    with pytest.raises(ApiError) as info:
+        dashboards.detail(db, record, viewer)
+    assert info.value.status == 404
 
     ok(client.post(f"/api/dashboards/{dashboard}/publish"))
     ok(
@@ -441,7 +449,8 @@ def test_filter_options_inline_preview_and_published_access(
         "Gifts overview",
         False,
     )
-    assert [d["title"] for d in dashboards.list_dashboards(db, viewer)] == ["Draft title"]
+    # Viewers see the published title too: the draft does not leak through the list.
+    assert [d["title"] for d in dashboards.list_dashboards(db, viewer)] == ["Gifts overview"]
     kwargs: dict[str, Any] = {
         "item_id": "v_table",
         "inline_spec": None,
