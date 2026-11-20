@@ -132,9 +132,31 @@ export interface Share {
   email?: string;
 }
 
+/** A restricted dataset a dashboard uses, and who may already use it. */
+export interface RestrictedData {
+  dataset: string;
+  label: string;
+  owner: { id: string; name: string } | null;
+  inDraft: boolean;
+  inPublished: boolean;
+  /** True when you may show it to people outside its list (its owner or an admin). */
+  canOpenUp: boolean;
+  insideUserIds: string[];
+  insideGroupIds: string[];
+}
+
 export interface DashboardAccess {
   owner: { id: string; name: string; email: string } | null;
   shares: Share[];
+  restricted?: RestrictedData[];
+}
+
+/** True when a share would show this dataset's data to someone outside its list. */
+export function outsideOf(data: RestrictedData, grantee: string): boolean {
+  const [kind, id] = grantee.split(":");
+  if (kind === "user") return !data.insideUserIds.includes(id ?? "");
+  if (kind === "group") return !data.insideGroupIds.includes(id ?? "");
+  return true; // everyone
 }
 
 export function useDashboardAccess(id: string) {
@@ -150,9 +172,40 @@ export function useSetDashboardAccess(id: string) {
   });
 }
 
+export interface Exposure {
+  data: RestrictedData;
+  /** Who would see its data and may not use it: names, and whether they are new. */
+  outside: { name: string; isNew: boolean }[];
+  blocked: boolean;
+}
+
+/** Restricted datasets this dashboard would show to people outside their lists. */
+export function exposuresOf(restricted: RestrictedData[], shares: Share[], saved: Share[]): Exposure[] {
+  const before = new Map(saved.map((s) => [s.grantee, s.role]));
+  const result: Exposure[] = [];
+  for (const data of restricted) {
+    const outside = shares
+      .filter((share) => (data.inPublished || (share.role === "editor" && data.inDraft)) && outsideOf(data, share.grantee))
+      .map((share) => {
+        const was = before.get(share.grantee);
+        const gainsDraft = share.role === "editor" && was !== "editor" && data.inDraft && !data.inPublished;
+        return { name: share.email ?? share.name, isNew: was === undefined || gainsDraft };
+      });
+    if (outside.length > 0) result.push({ data, outside, blocked: !data.canOpenUp && outside.some((o) => o.isNew) });
+  }
+  return result;
+}
+
 export interface DatasetAccess {
   restricted: boolean;
   grants: { grantee: string; name: string; kind: string; email?: string }[];
+  owner: { id: string; name: string } | null;
+  restrictedBy: string | null;
+  restrictedByAdmin: boolean;
+  /** Dashboards that show this dataset's data outside its list, or through links. */
+  exposures: { id: string; title: string; outside: string[]; shareLinks: number }[];
+  canManage?: boolean;
+  canLift?: boolean;
 }
 
 export function useDatasetAccess(id: string, enabled: boolean) {

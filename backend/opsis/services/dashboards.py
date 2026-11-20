@@ -58,29 +58,7 @@ def problems(
     )
 
 
-def spec_datasets(spec: Mapping[str, Any]) -> set[str]:
-    """Every dataset a spec reads: item datasets, bound fields and filter fields."""
-    names: set[str] = set()
-    for item in spec.get("items") or []:
-        if not isinstance(item, Mapping):
-            continue
-        if isinstance(item.get("dataset"), str):
-            names.add(item["dataset"])
-        for entries in (item.get("bindings") or {}).values():
-            for entry in entries if isinstance(entries, list) else []:
-                ref = (
-                    entry
-                    if isinstance(entry, str)
-                    else entry.get("field")
-                    if isinstance(entry, Mapping)
-                    else None
-                )
-                if isinstance(ref, str):
-                    names.add(ref.partition(".")[0])
-    for control in spec.get("filters") or []:
-        if isinstance(control, Mapping) and isinstance(control.get("field"), str):
-            names.add(control["field"].partition(".")[0])
-    return names
+spec_datasets = specs.spec_datasets  # kept here for callers of this module
 
 
 def get(db: Session, dashboard_id: uuid.UUID) -> Dashboard:
@@ -313,9 +291,9 @@ def save(
     acl.require_dashboard(db, dashboard, actor, "edit")
     if base_version is not None and base_version != dashboard.version:
         raise _conflict(base_version, dashboard.version)
-    _write_version(
-        db, dashboard, _checked(db, settings, spec, actor), author_type, actor.user_id, message
-    )
+    checked = _checked(db, settings, spec, actor)
+    acl.check_draft(db, actor, dashboard, specs.spec_datasets(checked))
+    _write_version(db, dashboard, checked, author_type, actor.user_id, message)
     db.commit()
     _announce(
         dashboard, "version_created", actor, author_type, message=message, client_id=client_id
@@ -424,6 +402,7 @@ def publish(
     acl.require_dashboard(db, dashboard, actor, "publish")
     target = number if number is not None else dashboard.version
     _version_row(db, dashboard, target)
+    acl.check_publish(db, actor, dashboard, target)
     dashboard.published_version = target
     audit.record(
         db,
@@ -539,6 +518,16 @@ def data_for_spec(
     include_query: bool,
 ) -> dict[str, Any]:
     """Rows for one item of an already authorised spec, as `user` may see them."""
+    if state and state.get("cross"):
+        # A dashboard answers its own questions only: a cross-filter must be on a
+        # field the dashboard uses, not any field its datasets can reach.
+        allowed = specs.spec_fields(spec)
+        state = {
+            **state,
+            "cross": [
+                c for c in state["cross"] if isinstance(c, Mapping) and c.get("field") in allowed
+            ],
+        }
     item = next((i for i in spec["items"] if i["id"] == item_id), None)
     if item is None:
         raise ApiError(404, "not_found", f"The dashboard has no item with the id {item_id!r}.")

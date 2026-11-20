@@ -128,6 +128,25 @@ class Settings(BaseSettings):
     # Change only to test against another OpenID Connect provider.
     google_discovery_url: str = "https://accounts.google.com/.well-known/openid-configuration"
 
+    # In-app assistant (FEATURE_ASSISTANT, ASSISTANT_PROVIDER)
+    anthropic_api_key: SecretStr | None = None
+    anthropic_model: str = "claude-opus-5-5"
+    # How much Claude thinks before it acts. More is slower and costs more.
+    anthropic_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    # Re-run a request that Claude's safety checks decline on the model Anthropic
+    # recommends for it. Turn off for a model without server-side fallbacks.
+    anthropic_fallbacks: bool = True
+    # Change only to test against a fake server.
+    anthropic_base_url: str = ""
+    ollama_url: str = "http://host.docker.internal:11434"
+    ollama_model: str = "gemma4:12b"
+    # Budgets for one request to the assistant: tool calls, tokens the model may
+    # write, wall-clock time, and rows of a tool result shown to the model.
+    assistant_max_steps: int = Field(default=25, ge=1, le=200)
+    assistant_max_output_tokens: int = Field(default=100_000, ge=4_000, le=2_000_000)
+    assistant_timeout_seconds: float = Field(default=600, ge=10, le=3600)
+    assistant_max_rows: int = Field(default=100, ge=1, le=1000)
+
     # Data and limits
     max_upload_mb: int = Field(default=200, ge=1, le=10_000)
     snapshot_retention: int = Field(default=3, ge=2, le=100)
@@ -193,7 +212,15 @@ class Settings(BaseSettings):
             ) from exc
         return value
 
-    @field_validator("admin_initial_password", "google_client_secret")
+    @field_validator("ollama_url", "anthropic_base_url")
+    @classmethod
+    def _check_service_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if value and urlsplit(value).scheme not in ("http", "https"):
+            raise ValueError("must be an http or https URL, for example http://localhost:11434")
+        return value
+
+    @field_validator("admin_initial_password", "google_client_secret", "anthropic_api_key")
     @classmethod
     def _empty_secret_is_unset(cls, value: SecretStr | None) -> SecretStr | None:
         if value is None or not value.get_secret_value().strip():
@@ -283,6 +310,19 @@ class Settings(BaseSettings):
                 problems.append(
                     "FEATURE_PUBLIC_SHARE_LINKS=true is only available with DEPLOY_MODE=server."
                 )
+        if self.feature_assistant:
+            if self.assistant_provider == "anthropic" and self.anthropic_api_key is None:
+                problems.append(
+                    "ASSISTANT_PROVIDER=anthropic needs ANTHROPIC_API_KEY (create one in the "
+                    "Claude Console). Or set ASSISTANT_PROVIDER=ollama, or FEATURE_ASSISTANT=false."
+                )
+            if self.assistant_provider == "ollama" and not self.ollama_url:
+                problems.append("ASSISTANT_PROVIDER=ollama needs OLLAMA_URL.")
+            if not self.assistant_model:
+                problems.append(
+                    f"{self.assistant_provider.upper()}_MODEL is empty. Name the model the "
+                    "assistant should use."
+                )
         parts = urlsplit(self.public_base_url)
         if server and parts.scheme != "https" and parts.hostname not in LOCAL_HOSTNAMES:
             problems.append(
@@ -357,6 +397,13 @@ class Settings(BaseSettings):
         return self.auth_mode != "none"
 
     @property
+    def assistant_model(self) -> str:
+        """The model the in-app assistant uses with the configured provider."""
+        if self.assistant_provider == "anthropic":
+            return self.anthropic_model.strip()
+        return self.ollama_model.strip()
+
+    @property
     def trusted_proxy_list(self) -> list[str]:
         return [e for e in self.trusted_proxies.split(",") if e]
 
@@ -388,6 +435,7 @@ def _problems_from(exc: ValidationError) -> list[str]:
                 "POSTGRES_PASSWORD",
                 "ADMIN_INITIAL_PASSWORD",
                 "GOOGLE_CLIENT_SECRET",
+                "ANTHROPIC_API_KEY",
             )
             shown = f" (got {got!r})" if isinstance(got, str | int | bool) and not secret else ""
             problems.append(f"{name}{shown}: {message}")

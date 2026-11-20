@@ -12,8 +12,11 @@
 //   npm run smoke -- --subpath     only 2
 //   npm run smoke -- --server      only 3
 //
+// The assistant answers from a scripted fake model (e2e/fake-llm.mjs): Ollama's
+// API at the root and the sub-path (compose.fakellm.yml), Claude's in server mode.
+//
 // It expects .env to be in plain local mode (PUBLIC_BASE_URL=http://localhost:8080).
-// Your stack is left running at the root when it finishes.
+// Your stack is left running at the root when it finishes, as your .env has it.
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
@@ -44,7 +47,7 @@ function must(command, commandArgs, options) {
 function playwright(url, env = {}) {
   return exec("npx", ["playwright", "test", ...extra], {
     cwd: join(root, "e2e"),
-    env: { ...process.env, OPSIS_URL: url, ...env },
+    env: { ...process.env, OPSIS_URL: url, OPSIS_FAKE_MODEL: "1", ...env },
   });
 }
 
@@ -53,7 +56,8 @@ if (!existsSync(join(root, "e2e", "node_modules"))) {
   must("npx", ["playwright", "install", "chromium"], { cwd: join(root, "e2e") });
 }
 
-const SUBPATH = ["-f", "compose.yml", "-f", "compose.subpath.yml", "--profile", "proxytest"];
+const FAKE = ["-f", "compose.yml", "-f", "compose.fakellm.yml"];
+const SUBPATH = [...FAKE, "-f", "compose.subpath.yml", "--profile", "proxytest"];
 const SERVER_ENV = join(root, ".env.servertest");
 const SERVER = [
   "-p", "opsis-servertest", "--env-file", ".env.servertest",
@@ -63,7 +67,7 @@ const SERVER = [
 const failed = [];
 let built = false;
 if (run("--root")) {
-  must("docker", ["compose", "up", "-d", ...build, "--wait"]);
+  must("docker", ["compose", ...FAKE, "up", "-d", ...build, "--wait"]);
   built = true;
   if (playwright("http://localhost:8080/") !== 0) failed.push("root");
 }
@@ -71,9 +75,12 @@ if (run("--subpath")) {
   must("docker", ["compose", ...SUBPATH, "up", "-d", ...(built ? [] : build), "--wait"]);
   built = true;
   if (playwright("http://localhost:8088/opsis/") !== 0) failed.push("sub-path");
-  // Back to the root, and free port 8088 for the server-mode stack.
+  // Free port 8088 for the server-mode stack.
   exec("docker", ["compose", ...SUBPATH, "stop", "proxytest"]);
-  must("docker", ["compose", "up", "-d", "--wait"]);
+}
+if (run("--root") || run("--subpath")) {
+  // Back to your stack as .env has it: the root, your own model, no fake.
+  must("docker", ["compose", "up", "-d", "--wait", "--remove-orphans"]);
 }
 if (run("--server")) {
   const secret = (bytes) => randomBytes(bytes).toString("base64url");
@@ -89,6 +96,8 @@ if (run("--server")) {
       `ADMIN_EMAIL=${admin.email}`,
       `ADMIN_INITIAL_PASSWORD=${admin.initial}`,
       `GOOGLE_CLIENT_SECRET=${secret(24)}`,
+      // For the fake model only: it accepts any key.
+      `ANTHROPIC_API_KEY=sk-fake-${secret(16)}`,
       "BIND_ADDRESS=127.0.0.1",
       "HTTP_PORT=8081",
       "",

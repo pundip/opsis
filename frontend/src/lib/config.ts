@@ -18,6 +18,7 @@ export interface AppConfig {
   jobRunner: "inline" | "worker";
   mcpAuth: "none" | "token";
   assistantProvider: "anthropic" | "ollama" | null;
+  assistantModel: string | null;
   publicBaseUrl: string;
   basePath: string;
   maxUploadMb: number;

@@ -10,6 +10,7 @@ const config: AppConfig = {
   jobRunner: "inline",
   mcpAuth: "none",
   assistantProvider: "ollama",
+  assistantModel: "gemma4:12b",
   publicBaseUrl: "http://localhost:8080",
   basePath: "",
   maxUploadMb: 200,

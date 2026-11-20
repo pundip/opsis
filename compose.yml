@@ -103,9 +103,14 @@ services:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
     restart: unless-stopped
 
+  # With this profile set OLLAMA_URL=http://ollama:11434, then pull a model once:
+  #   docker compose exec ollama ollama pull gemma4:12b
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.40.16
     profiles: ["ollama"]
+    environment:
+      # The assistant's instructions and tools need more than Ollama's default context.
+      OLLAMA_CONTEXT_LENGTH: "32768"
     volumes:
       - ollama:/root/.ollama
     restart: unless-stopped

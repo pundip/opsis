@@ -25,12 +25,32 @@ export const CLIENT_ID =
     ? crypto.randomUUID()
     : `tab-${Math.random().toString(36).slice(2)}`;
 
+/** The headers every write sends: the CSRF token and this tab's id. */
+export function writeHeaders(): Record<string, string> {
+  return { "X-CSRF-Token": readCookie("opsis_csrf"), "X-Opsis-Client": CLIENT_ID };
+}
+
+/** The ApiError for a failed response, from its { error: ... } body when it has one. */
+export async function errorOf(response: Response): Promise<ApiError> {
+  let code = "http_error";
+  let message = `Request failed (${response.status})`;
+  let details: ErrorDetail[] = [];
+  try {
+    const parsed = (await response.json()) as {
+      error?: { code?: string; message?: string; details?: ErrorDetail[] };
+    };
+    code = parsed.error?.code ?? code;
+    message = parsed.error?.message ?? message;
+    details = parsed.error?.details ?? [];
+  } catch {
+    // Not JSON: keep the generic message.
+  }
+  return new ApiError(response.status, code, message, details);
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
-  if (method !== "GET") {
-    headers["X-CSRF-Token"] = readCookie("opsis_csrf");
-    headers["X-Opsis-Client"] = CLIENT_ID;
-  }
+  if (method !== "GET") Object.assign(headers, writeHeaders());
   let payload: BodyInit | undefined;
   if (body instanceof FormData) {
     payload = body;
@@ -44,22 +64,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     body: payload,
     credentials: "same-origin",
   });
-  if (!response.ok) {
-    let code = "http_error";
-    let message = `Request failed (${response.status})`;
-    let details: ErrorDetail[] = [];
-    try {
-      const parsed = (await response.json()) as {
-        error?: { code?: string; message?: string; details?: ErrorDetail[] };
-      };
-      code = parsed.error?.code ?? code;
-      message = parsed.error?.message ?? message;
-      details = parsed.error?.details ?? [];
-    } catch {
-      // Not JSON: keep the generic message.
-    }
-    throw new ApiError(response.status, code, message, details);
-  }
+  if (!response.ok) throw await errorOf(response);
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }

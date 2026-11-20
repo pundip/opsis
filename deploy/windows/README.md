@@ -30,12 +30,22 @@ For development with hot reload (`npm run dev`), file watching is much faster wh
 the repository lives inside the WSL filesystem (for example `\\wsl$\Ubuntu\home\you\opsis`)
 rather than on `C:\`.
 
-## 3. Ollama (optional, for the in-app assistant of a later release)
+## 3. Ollama (optional, for the in-app assistant)
 
-Install Ollama for Windows from https://ollama.com and pull a model, for example
-`ollama pull llama3.1`. Opsis reaches it at `http://host.docker.internal:11434`
-(`OLLAMA_URL`). Running Ollama natively uses the GPU; the `ollama` Compose profile
-runs it in a container instead, on the CPU.
+Install Ollama for Windows from https://ollama.com and pull a model that can call
+tools, for example `ollama pull gemma4:12b`, then set `OLLAMA_MODEL` in `.env`.
+Opsis reaches it at `http://host.docker.internal:11434` (`OLLAMA_URL`). Running
+Ollama natively uses the GPU; the `ollama` Compose profile runs it in a container
+instead, on the CPU.
+
+Ollama's default context (4,096 tokens) is too small for the assistant's instructions
+and tools. Give it more, once:
+
+1. Open **Settings > System > About > Advanced system settings > Environment Variables**.
+2. Under **User variables**, add `OLLAMA_CONTEXT_LENGTH` with the value `32768`.
+3. Quit Ollama from its tray icon and start it again.
+
+The assistant checks this and says what to do if the context is still too small.
 
 ## 4. Claude Code and Claude Desktop (MCP)
 

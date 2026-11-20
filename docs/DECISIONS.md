@@ -333,3 +333,47 @@ Short ADR entries. Newest at the bottom. "Brief" means `BUILD_BRIEF.md`. An entr
 
 **Local mode**
 - With `AUTH_MODE=none` none of the sign-in, people, groups, sharing or share-link routes exist (404). The audit log page works in every mode.
+
+## ADR-024: Dataset owners, sharing rights and restricted data through dashboards
+- **Status:** accepted, decided at the M6 review, built at the start of M7
+
+**Who restricts a dataset**
+- A dataset's owner is the person who created it. The owner (while an editor) and admins can restrict it and change its list; the owner is always on the list.
+- A restriction saved by an admin is admin-set (`datasets.restricted_by_admin`). Only an admin can lift an admin-set restriction. The owner can still change who is on its list (the review answer, read literally; it is a question for the M7 review). Restrictions made in M6, when only admins could make them, count as admin-set (migration 0008).
+
+**Who shares a dashboard**
+- Only the dashboard's owner and admins change its sharing: people, groups, everyone, and share links. Editors change content, not access. The MCP tools `share_dashboard` and `create_share_link` follow the same rule.
+
+**Restricted data cannot leave its list through a dashboard**
+- A dashboard built on a restricted dataset shows that dataset's data to everyone who can see the dashboard. So only the dataset's owner or an admin may show it to someone outside the dataset's list. The check runs wherever the audience or the data changes: sharing (new viewers against the published version's datasets, new or upgraded editors against the draft's), creating a share link (a link's audience is always outside), saving a draft (datasets new to the draft against everyone who edits it, its owner included), and publishing (datasets new to the published version against everyone who sees it, including active links). A refusal is 403 `restricted_data`, naming the dataset, its owner and who is outside.
+- The share dialog lists the restricted datasets a dashboard uses and who would gain access to their data, and blocks the save when the person may not allow that. The dataset access panel lists the dashboards that already show the dataset's data outside its list.
+- Cross-filters in data requests are limited to fields the dashboard itself uses, so a viewer cannot probe other fields of a dataset through a dashboard.
+
+## ADR-025: The in-app assistant
+- **Status:** accepted, M7
+
+**Providers** (`opsis/assistant/providers.py`)
+- `anthropic`: the official Python SDK (`anthropic` 2.x, which speaks API version 2026-10-21), streamed. Model `ANTHROPIC_MODEL` (default `claude-opus-5-5`). Thinking is adaptive (always on for current models) with `display: "updates"` (beta `thinking-display-updates-2026-08-18`), so the short notes the model writes between tool calls reach the panel. Effort comes from `ANTHROPIC_EFFORT` (default `medium`, the model's own default).
+- Refusal fallbacks are on: `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) re-runs a request the safety checks decline on the model Anthropic recommends for it, and the panel says which model answered. After a fallback in mid-reply, the declined part's thinking and tool calls are not sent back, as the API requires. `ANTHROPIC_FALLBACKS=false` turns this off, for a model without server-side fallbacks. A declined reply's partial output is dropped, not stored.
+- No forced tool use (current models refuse it) and no sampling parameters (API version 2026-10-21 refuses them). Every tool has `eager_input_streaming`; each input is checked against the tool's JSON Schema before it runs (the MCP `call` already does this), a reply cut off at `max_tokens` never runs its calls, and an input the SDK cannot parse at all is asked for again, at most twice.
+- Prompt caching: a breakpoint on the system prompt caches the tools and instructions, and automatic caching covers the conversation. The instructions never change (no date or state in them) and the tools are sorted by name, so the prefix is stable. The history is append-only and sent back byte for byte, thinking blocks included, which both the cache and Claude's preserved thinking need.
+- `ollama`: its OpenAI-compatible Chat Completions endpoint at `OLLAMA_URL`, streamed, over `httpx2` (the SDK is for Claude only). Model `OLLAMA_MODEL` (default `gemma4:12b`).
+- That endpoint cannot set the context size per request, and Ollama's default (4,096 tokens on this laptop) cuts off the instructions and tools (about 10,000 tokens). The assistant asks Ollama (`/api/ps`) what the model runs with, before and after the first call, and below 16,384 tokens says how to fix it (`OLLAMA_CONTEXT_LENGTH=32768` where Ollama runs). The `ollama` Compose service sets it, and is pinned to 0.40.16.
+- Fail fast: `ASSISTANT_PROVIDER=anthropic` needs `ANTHROPIC_API_KEY`; the URL settings must be http or https; the model must not be empty. `ANTHROPIC_BASE_URL` exists for the smoke tests' fake model.
+
+**The tool loop** (`opsis/assistant/loop.py`)
+- Our own loop rather than the SDK's beta tool runner: one loop drives both providers, enforces the budgets, stops on request, and stores each step as it happens.
+- Tools are 17 of the 23 MCP tools, called through `opsis.mcp.tools.call` with the person's own role and access, so every rule (RLS, restricted datasets, validation, audit as `agent.<tool>`) applies unchanged. Left out: `create_dashboard`, `publish_dashboard`, `share_dashboard` and `create_share_link` (the person does those with the editor's buttons), `list_connections` and `validate_model`. `patch_dashboard` and `restore_version` may change only the open dashboard.
+- Budgets per request: `ASSISTANT_MAX_STEPS` tool calls (25), `ASSISTANT_MAX_OUTPUT_TOKENS` written by the model (100,000; at most 32,000 per call), `ASSISTANT_TIMEOUT_SECONDS` (600), and `ASSISTANT_MAX_ROWS` rows of a tool result shown to the model (100), with every result cut at 40,000 characters. Every tool call gets a result, run or not, so the history stays valid for the next request.
+- Token usage per request is logged, audited (`assistant.request`, with tokens, cached tokens, model calls, steps, model and outcome) and added to the conversation's totals.
+- Small local models: with gemma4 12B, Ollama often could not convert a long nested `patch_dashboard` call from the model's own tool-call format to JSON, logged "tool call parsing failed", and sent only the text before it, or nothing. So for Ollama the instructions ask for one dashboard item per call (three of three such calls came through in testing, against about half of the all-at-once calls), and a reply that is empty, or only announces a step ("I will add ..."), is answered with a request to make the call again, at most twice a request; the panel says when that happened. Claude keeps the all-at-once instruction, and its replies are taken as they come.
+- Context per request: a `<context>` block at the start of the person's message with today's date, the open dashboard (id, version, items, filters), the selected item's spec and the datasets the person may use.
+
+**Conversations and runs**
+- Tables (migration 0009): `assistant_conversations` (one person, one dashboard, the provider and model), `assistant_messages` (the provider's own history, JSON rather than JSONB to keep key order, append-only) and `assistant_entries` (what the panel shows). Only the person can read their conversations, admins included. A conversation continues only on the provider and model that wrote it; after a change the next request starts a new one.
+- A request runs as a task of its own on the event loop (`opsis/assistant/runs.py`). `POST .../assistant/messages` streams its events as server-sent events, but closing the panel does not stop it; Stop does, keeping the text written so far. One request per conversation at a time (409). In-process, like the live-update hub (R5).
+- Only people use the panel, not access tokens: it spends the workspace's model budget on a person's behalf, and scripts and agents have MCP.
+
+**The panel**
+- A tab in the editor. Replies stream in; progress notes show in grey; each tool call is a step that opens to show its input and result; each change shows the version it saved, with **Undo** (restore the version before it) and **Undo all of this** per request. Undo is the ordinary restore: a new version, nothing lost.
+- Send waits until the editor's changes are saved, so the assistant works on what the person sees. With the tab open the editor reloads the assistant's versions without its "Updated by assistant" banner, since the panel shows each change.

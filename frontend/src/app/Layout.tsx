@@ -76,16 +76,6 @@ export function Layout({ config, me, items, children }: Props) {
           <span className="rounded-full border border-zinc-300 px-2.5 py-0.5 text-xs text-zinc-600 dark:border-zinc-700 dark:text-zinc-400">
             {config.deployMode} mode
           </span>
-          {config.features.assistant && (
-            <button
-              type="button"
-              disabled
-              title="The assistant arrives in a later milestone"
-              className="rounded-md bg-brand px-3 py-1 text-xs font-medium text-white opacity-60 dark:text-zinc-950"
-            >
-              Assistant
-            </button>
-          )}
         </header>
         <main className="min-w-0 flex-1 p-6">{children}</main>
       </div>

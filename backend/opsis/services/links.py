@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from opsis.auth import passwords
 from opsis.auth.principal import Permission, Principal, Role
+from opsis.dashboards.spec import spec_datasets
 from opsis.db.models import Dashboard, ShareLink, User
 from opsis.errors import ApiError
 from opsis.services import access as acl
@@ -100,7 +101,7 @@ def create(
 ) -> tuple[dict[str, Any], str]:
     """Make a link. Returns its description and URL; the URL is shown only now."""
     _require_feature(settings)
-    acl.require_dashboard(db, dashboard, actor, "publish")
+    acl.require_dashboard(db, dashboard, actor, "share")
     if dashboard.published_version is None:
         raise ApiError(
             409,
@@ -120,6 +121,15 @@ def create(
                 "Only an admin can choose the attributes of a share link. Give the link no "
                 'attributes (row-level security then shows nothing) or your own ("mine").',
             )
+    published = acl.version_spec(db, dashboard, dashboard.published_version)
+    acl.check_new_audience(
+        db,
+        actor,
+        spec_datasets(published),
+        [],
+        link=True,
+        doing="create a share link for it",
+    )
     if expires_in_days is not None and not 1 <= expires_in_days <= MAX_DAYS:
         raise ApiError(422, "invalid_request", f"A link can last from 1 to {MAX_DAYS} days.")
     if password:

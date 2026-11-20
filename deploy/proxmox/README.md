@@ -59,6 +59,7 @@ Edit `.env` and replace every value marked `CHANGE`:
 | `ADMIN_EMAIL`, `ADMIN_INITIAL_PASSWORD` | the first admin; you choose a new password at the first sign-in |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | from Google Cloud, see below |
 | `GOOGLE_ALLOWED_DOMAINS` / `GOOGLE_ALLOWED_EMAILS` | who may sign in with Google |
+| `ANTHROPIC_API_KEY` | for the editor's assistant (Claude), from the Claude Console. Or set `FEATURE_ASSISTANT=false`, or `ASSISTANT_PROVIDER=ollama` with an Ollama the LXC can reach (`OLLAMA_URL`) |
 
 **Which address goes in `TRUSTED_PROXIES`.** Opsis only believes `X-Forwarded-For`
 and `X-Forwarded-Proto` from these addresses. It must be the address the api sees,
@@ -76,6 +77,33 @@ create an OAuth client ID of type *Web application* with:
 
 Only people you invite can sign in with Google (`GOOGLE_AUTO_PROVISION=false`), and
 only if their address passes the allowlists. Google must report the email as verified.
+
+**Checklist: Google sign-in on the real server.** Run it once after the first start, and
+again after any change to the proxy or the OAuth client. It is part of the install check.
+
+1. In Google Cloud, the OAuth consent screen is set up (*Internal* if your accounts are
+   in one Google Workspace; otherwise *External*, with your test accounts added while it
+   is in testing), and the client's redirect URI and JavaScript origin are exactly as
+   above: `https`, no trailing slash on the origin, `/opsis` in the redirect URI.
+2. `.env` has `AUTH_MODE=full`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and
+   `GOOGLE_ALLOWED_DOMAINS` (or `GOOGLE_ALLOWED_EMAILS`); `docker compose up -d` after a change.
+3. The LXC can reach Google: `docker compose exec api python -c "import urllib.request; print(urllib.request.urlopen('https://accounts.google.com/.well-known/openid-configuration').status)"`
+   prints `200`.
+4. As an admin, invite an allowed address (Users, Invite) as a viewer.
+5. In a private window, open `https://urlloom.com/opsis/`, choose **Sign in with Google**
+   and pick that account. You land in Opsis signed in, and **Account** shows "Google: Linked".
+6. Refusals: a Google account outside the allowed domains gets "not allowed to sign in";
+   an allowed address that was not invited gets "has not been invited".
+7. In the browser's developer tools, the `opsis_session` cookie has `Path=/opsis`,
+   `Secure` and `HttpOnly`.
+8. **Audit log** shows `auth.login` with method `google` for step 5, and `auth.login_failed`
+   with the reasons for step 6, each from your own address (not the proxy's: see above).
+
+If Google reports `redirect_uri_mismatch`, the URI in Google Cloud differs from
+`PUBLIC_BASE_URL` + `/api/auth/google/callback`. If the sign-in page says it took too
+long or was started in another browser, the proxy is dropping cookies or the server's
+clock is far off. If it says Google could not be reached, the LXC has no outbound
+HTTPS (step 3).
 
 Start it:
 

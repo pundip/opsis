@@ -24,7 +24,7 @@ public_router = APIRouter(prefix="/api/public")
 
 edit = require(Permission.DASHBOARDS_EDIT)
 publish = require(Permission.DASHBOARDS_PUBLISH)
-admin = require(Permission.SETTINGS_MANAGE)
+build = require(Permission.DATASETS_EDIT)
 
 
 class ShareIn(BaseModel):
@@ -75,7 +75,7 @@ def dashboard_access(
 ) -> dict[str, Any]:
     dashboard = dashboards.get(db, dashboard_id)
     access.require_dashboard(db, dashboard, principal, "share")
-    return access.dashboard_shares(db, dashboard)
+    return access.dashboard_shares(db, dashboard, principal)
 
 
 @router.put("/dashboards/{dashboard_id}/access")
@@ -92,9 +92,11 @@ def set_dashboard_access(
 
 @router.get("/datasets/{dataset_id}/access")
 def dataset_access(
-    dataset_id: uuid.UUID, db: Session = Depends(get_db), _: Principal = Depends(admin)
+    dataset_id: uuid.UUID, db: Session = Depends(get_db), principal: Principal = Depends(build)
 ) -> dict[str, Any]:
-    return access.dataset_grants(db, datasets.get(db, dataset_id))
+    dataset = datasets.get(db, dataset_id)
+    access.require_datasets(db, principal, {dataset.name})
+    return access.dataset_grants(db, dataset, principal)
 
 
 @router.put("/datasets/{dataset_id}/access")
@@ -102,8 +104,9 @@ def set_dataset_access(
     dataset_id: uuid.UUID,
     body: DatasetAccessIn,
     db: Session = Depends(get_db),
-    actor: Principal = Depends(admin),
+    actor: Principal = Depends(build),
 ) -> dict[str, Any]:
+    """The dataset's owner (its creator) and admins; see services/access.py."""
     return access.set_dataset_grants(
         db, actor, datasets.get(db, dataset_id), body.restricted, body.grants
     )

@@ -1,6 +1,7 @@
 # Server mode on the laptop, for the smoke tests (scripts/smoke.mjs): sign-in with
-# local accounts and a fake Google, share links, access tokens for MCP, and the
-# worker container, behind the proxytest nginx at http://localhost:8088/opsis/.
+# local accounts and a fake Google, share links, access tokens for MCP, the
+# worker container, and the assistant on Claude's API (answered by a scripted
+# fake model), behind the proxytest nginx at http://localhost:8088/opsis/.
 #
 # Run it under its own project name so it gets its own database and volumes:
 #   docker compose -p opsis-servertest --env-file .env.servertest \
@@ -27,6 +28,10 @@ x-server: &server
   FEATURE_SCHEDULED_REFRESH: "false"
   FEATURE_SQL_LAB: "false"
   FEATURE_BACKUPS: "false"
+  FEATURE_ASSISTANT: "true"
+  ASSISTANT_PROVIDER: anthropic
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+  ANTHROPIC_BASE_URL: http://fake-llm:9500
 
 services:
   config-check:
@@ -35,6 +40,11 @@ services:
     environment: *server
   worker:
     environment: *server
+  fake-llm:
+    image: node:24-bookworm-slim
+    command: ["node", "/fake/fake-llm.mjs"]
+    volumes:
+      - ./e2e/fake-llm.mjs:/fake/fake-llm.mjs:ro
   fake-oidc:
     image: node:24-bookworm-slim
     command: ["node", "/fake/fake-oidc.mjs"]

@@ -54,6 +54,7 @@ def public_config(settings: Settings) -> dict[str, Any]:
         "jobRunner": settings.job_runner,
         "mcpAuth": settings.mcp_auth,
         "assistantProvider": settings.assistant_provider if settings.feature_assistant else None,
+        "assistantModel": settings.assistant_model if settings.feature_assistant else None,
         "publicBaseUrl": settings.public_base_url,
         "basePath": settings.base_path,
         "maxUploadMb": settings.max_upload_mb,

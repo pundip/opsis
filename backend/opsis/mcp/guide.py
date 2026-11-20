@@ -20,7 +20,9 @@ those. A version_conflict means: get_dashboard again, then retry with the new ve
 editUrl or viewUrl from the result.
 """
 
-GUIDE = """\
+# The reference part of the guide: words, the spec, items and filters. The in-app
+# assistant uses it too, with steps of its own.
+SPEC_GUIDE = """\
 # Building dashboards in Opsis
 
 ## Words
@@ -71,6 +73,11 @@ not overlap. A good layout: KPI cards (w 3, h 3) across the top at y 0, two char
 ```
 `type` is `select`, `multiSelect`, `dateRange` or `search`.
 
+"""
+
+GUIDE = (
+    SPEC_GUIDE
+    + """\
 ## Steps
 1. describe_dataset: note three to six fields that answer the user's question.
 2. list_visuals with the dataset: copy an `exampleItem` for each visual you want; change `id`, \
@@ -87,6 +94,7 @@ get_dashboard gives the spec and its `version`. Call patch_dashboard with that v
 - remove the item with index 2: `{"op": "remove", "path": "/items/2"}`
 On `version_conflict`, call get_dashboard again and retry with the new version.
 """
+)
 
 
 def build_dashboard_prompt(dataset: str, goal: str) -> str:

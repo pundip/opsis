@@ -104,7 +104,18 @@ Then ask, for example: "Build a dashboard of giving by fund and month from the g
 claude mcp add --transport http opsis https://your-domain/opsis/mcp --header "Authorization: Bearer <your token>"
 ```
 
-The tools: `list_datasets`, `describe_dataset`, `list_visuals`, `get_spec_schema`, `list_connections`, `get_semantic_model`, `preview_dataset`, `run_query`, `profile_column`, `validate_model`, `patch_semantic_model`, `list_dashboards`, `get_dashboard`, `validate_spec`, `create_dashboard`, `patch_dashboard`, `list_versions`, `restore_version`, `publish_dashboard`, `trigger_refresh`, `get_job_status`.
+The tools: `list_datasets`, `describe_dataset`, `list_visuals`, `get_spec_schema`, `list_connections`, `get_semantic_model`, `preview_dataset`, `run_query`, `profile_column`, `validate_model`, `patch_semantic_model`, `list_dashboards`, `get_dashboard`, `validate_spec`, `create_dashboard`, `patch_dashboard`, `list_versions`, `restore_version`, `publish_dashboard`, `trigger_refresh`, `get_job_status`, and with sign-in `share_dashboard` and (with share links on) `create_share_link`.
+
+### The assistant in the editor
+
+The dashboard editor has an **Assistant** tab: ask it to build a dashboard, change a visual, or answer a question about the data. It uses the same tools as MCP, with your own access, and works on the dashboard you have open (the visual you have selected is what "this" means). Its reply streams in, each tool call is a step you can open to see what it sent and got back, and every change is saved as a new version with an **Undo** button. It cannot create, publish or share dashboards: you do that. Save your own changes first; Send waits for that.
+
+It runs on one of two providers, set in `.env`:
+
+- **Ollama** (`ASSISTANT_PROVIDER=ollama`, the laptop default): a model on your own machine. Install Ollama, pull a model that can call tools (`ollama pull gemma4:12b`), and set `OLLAMA_MODEL`. Ollama must run with a larger context than its default, or the assistant's instructions get cut off: set `OLLAMA_CONTEXT_LENGTH=32768` where Ollama runs and restart it (on Windows, as a user environment variable, then quit and reopen the Ollama app). The assistant says so if it is too small. The `ollama` Compose profile sets it for you; use `OLLAMA_URL=http://ollama:11434` with that profile.
+- **Claude** (`ASSISTANT_PROVIDER=anthropic`, the server default): set `ANTHROPIC_API_KEY`, and optionally `ANTHROPIC_MODEL` (default `claude-opus-5-5`) and `ANTHROPIC_EFFORT` (`low` to `max`, default `medium`). A request Claude's safety checks decline is re-run on the model Anthropic recommends for it, and the panel says when that happened (`ANTHROPIC_FALLBACKS=false` turns it off).
+
+Each request has budgets: `ASSISTANT_MAX_STEPS` tool calls (25), `ASSISTANT_MAX_OUTPUT_TOKENS` (100,000), `ASSISTANT_TIMEOUT_SECONDS` (600) and `ASSISTANT_MAX_ROWS` rows of a result shown to the model (100). When one runs out the assistant stops and says so; ask it to continue. Token use is shown under each request and recorded in the audit log.
 
 ### Server
 
@@ -190,6 +201,10 @@ Everything is set in `.env`. The two templates document each value. After a chan
 | `FEATURE_EMAIL` | SMTP invites, resets and snapshots | `false` | `false` |
 | `FEATURE_ASSISTANT` | In-app AI panel | `true` | `true` |
 | `ASSISTANT_PROVIDER` | `anthropic` or `ollama` | `ollama` | `anthropic` |
+| `OLLAMA_URL`, `OLLAMA_MODEL` | Where Ollama is, and the model to use | `http://host.docker.internal:11434`, `gemma4:12b` | same, if used |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Claude for the assistant | empty, `claude-opus-5-5` | required for `anthropic` |
+| `ANTHROPIC_EFFORT`, `ANTHROPIC_FALLBACKS` | How much Claude thinks; re-run declined requests on another model | `medium`, `true` | same |
+| `ASSISTANT_MAX_STEPS`, `ASSISTANT_MAX_OUTPUT_TOKENS`, `ASSISTANT_TIMEOUT_SECONDS`, `ASSISTANT_MAX_ROWS` | Budgets for one request to the assistant | `25`, `100000`, `600`, `100` | same |
 | `FEATURE_SQL_LAB` | Admin-only read-only SQL | `true` | `false` |
 | `FEATURE_BACKUPS` | Nightly backup job | `false` | `true` |
 | `BIND_ADDRESS`, `HTTP_PORT` | Where the api container is published on the host | `127.0.0.1`, `8080` | the server's LAN IP, `8080` |

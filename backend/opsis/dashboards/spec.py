@@ -36,6 +36,55 @@ DEFAULT_LIMIT = 1000
 Field = tuple[str, Dimension | Measure]  # ("dimension" | "measure", definition)
 
 
+def spec_datasets(spec: Mapping[str, Any]) -> set[str]:
+    """Every dataset a spec reads: item datasets, bound fields and filter fields."""
+    names: set[str] = set()
+    for item in spec.get("items") or []:
+        if not isinstance(item, Mapping):
+            continue
+        if isinstance(item.get("dataset"), str):
+            names.add(item["dataset"])
+        for entries in (item.get("bindings") or {}).values():
+            for entry in entries if isinstance(entries, list) else []:
+                ref = (
+                    entry
+                    if isinstance(entry, str)
+                    else entry.get("field")
+                    if isinstance(entry, Mapping)
+                    else None
+                )
+                if isinstance(ref, str):
+                    names.add(ref.partition(".")[0])
+    for control in spec.get("filters") or []:
+        if isinstance(control, Mapping) and isinstance(control.get("field"), str):
+            names.add(control["field"].partition(".")[0])
+    return names
+
+
+def spec_fields(spec: Mapping[str, Any]) -> set[str]:
+    """Every field a spec names: bound fields and filter fields. A dashboard only
+    answers questions about these, so cross-filters are limited to them."""
+    fields: set[str] = set()
+    for item in spec.get("items") or []:
+        if not isinstance(item, Mapping):
+            continue
+        for entries in (item.get("bindings") or {}).values():
+            for entry in entries if isinstance(entries, list) else []:
+                ref = (
+                    entry
+                    if isinstance(entry, str)
+                    else entry.get("field")
+                    if isinstance(entry, Mapping)
+                    else None
+                )
+                if isinstance(ref, str):
+                    fields.add(ref)
+    for control in spec.get("filters") or []:
+        if isinstance(control, Mapping) and isinstance(control.get("field"), str):
+            fields.add(control["field"])
+    return fields
+
+
 def blank_spec(title: str) -> dict[str, Any]:
     return {
         "specVersion": 1,

@@ -445,10 +445,8 @@ def test_restricted_datasets(client_for: ClientFor, source: dict[str, Any], db: 
     ids = load(admin, source)
     ok(admin.put("/api/models/gifts", json={"yaml": MODEL_YAML}))
     editor, editor_id = person(client_for, admin, "editor@example.test", "editor")
-    assert ok(admin.get(f"/api/datasets/{ids['donors']}/access")) == {
-        "restricted": False,
-        "grants": [],
-    }
+    before = ok(admin.get(f"/api/datasets/{ids['donors']}/access"))
+    assert (before["restricted"], before["grants"], before["canManage"]) == (False, [], True)
     ok(admin.put(f"/api/datasets/{ids['donors']}/access", json={"restricted": True, "grants": []}))
     assert (
         editor.put(f"/api/datasets/{ids['donors']}/access", json={"restricted": False}).status_code
@@ -636,14 +634,24 @@ def test_share_links(client_for: ClientFor, source: dict[str, Any], db: Session)
             json={"shares": [{"grantee": f"user:{editor_id}", "role": "editor"}]},
         )
     )
+    # Since the M6 review, an editor who does not own a dashboard cannot make links for it...
+    not_owner = editor.post(f"/api/dashboards/{dashboard}/links", json={})
+    assert (
+        not_owner.status_code == 403 and "owner or an admin" in not_owner.json()["error"]["message"]
+    )
+    # ...so the attribute rules are checked on a dashboard of the editor's own.
+    hers = ok(
+        editor.post("/api/dashboards", json={"title": "Hers", "spec": simple_spec("Hers")}), 201
+    )["id"]
+    ok(editor.post(f"/api/dashboards/{hers}/publish"))
     widened = editor.post(
-        f"/api/dashboards/{dashboard}/links", json={"attributes": {"regions": ["VIC", "NSW"]}}
+        f"/api/dashboards/{hers}/links", json={"attributes": {"regions": ["VIC", "NSW"]}}
     )
     assert (
         widened.status_code == 403
         and "Only an admin can choose" in widened.json()["error"]["message"]
     )
-    mine = ok(editor.post(f"/api/dashboards/{dashboard}/links", json={"attributes": "mine"}), 201)
+    mine = ok(editor.post(f"/api/dashboards/{hers}/links", json={"attributes": "mine"}), 201)
     assert mine["attributes"] == {"regions": ["NSW"]}
 
     # A link never inherits an exemption: a rule for editors only still applies to it.

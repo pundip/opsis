@@ -96,6 +96,7 @@ def serialize(
         "primaryKey": dataset.primary_key,
         "columns": dataset.columns,
         "restricted": dataset.restricted,
+        "createdBy": str(dataset.created_by) if dataset.created_by else None,
         "snapshot": snapshot_dict(snapshot, True) if snapshot else None,
         "lastJob": job_dict(job) if job else None,
         "createdAt": dataset.created_at.isoformat(),

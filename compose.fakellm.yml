@@ -1,0 +1,18 @@
+# The smoke tests' stand-in for a model (scripts/smoke.mjs adds this file at the
+# root and the sub-path, then brings your stack back without it). Points the
+# assistant at e2e/fake-llm.mjs, a scripted model, instead of Ollama.
+services:
+  api:
+    environment:
+      FEATURE_ASSISTANT: "true"
+      ASSISTANT_PROVIDER: ollama
+      OLLAMA_URL: http://fake-llm:9500
+      OLLAMA_MODEL: fake-model
+    depends_on:
+      fake-llm:
+        condition: service_started
+  fake-llm:
+    image: node:24-bookworm-slim
+    command: ["node", "/fake/fake-llm.mjs"]
+    volumes:
+      - ./e2e/fake-llm.mjs:/fake/fake-llm.mjs:ro

@@ -1,7 +1,9 @@
 // Who can see or change a dashboard, and its public share links.
 import { useMemo, useState } from "react";
 import {
+  type Exposure,
   type Share,
+  exposuresOf,
   useCreateShareLink,
   useDashboardAccess,
   useDirectory,
@@ -21,6 +23,32 @@ const EXPIRY: [string, string][] = [
   ["30", "30 days"],
   ["90", "90 days"],
 ];
+
+function RestrictedNote({ exposures }: { exposures: Exposure[] }) {
+  if (exposures.length === 0) return null;
+  const blocked = exposures.some((e) => e.blocked);
+  return (
+    <div
+      role="note"
+      className={`mb-3 rounded-md border p-3 text-sm ${blocked ? "border-red-300 bg-red-50 dark:border-red-900 dark:bg-red-950/40" : "border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/40"}`}
+    >
+      <p className="mb-1 font-medium">This dashboard shows restricted data</p>
+      <ul className="list-disc space-y-1 pl-5">
+        {exposures.map(({ data, outside, blocked: no }) => (
+          <li key={data.dataset}>
+            <strong>{data.label}</strong> is restricted (owner: {data.owner?.name ?? "nobody"}). Sharing would show its data
+            to {outside.map((o) => o.name).join(", ")}, who may not use it.
+            {no
+              ? ` Only ${data.owner?.name ?? "its owner"} or an admin can share it with them.`
+              : data.canOpenUp
+                ? " You may do this as its owner or an admin."
+                : ""}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 function People({ dashboardId }: { dashboardId: string }) {
   const access = useDashboardAccess(dashboardId);
@@ -44,6 +72,8 @@ function People({ dashboardId }: { dashboardId: string }) {
     }
     return list;
   }, [directory.data, shares, access.data?.owner?.id]);
+  const exposures = exposuresOf(access.data?.restricted ?? [], shares, access.data?.shares ?? []);
+  const blocked = exposures.some((e) => e.blocked);
 
   return (
     <div>
@@ -100,10 +130,11 @@ function People({ dashboardId }: { dashboardId: string }) {
           Add
         </Button>
       </div>
+      <RestrictedNote exposures={exposures} />
       <ErrorNote error={access.error ?? directory.error ?? save.error} />
       <Button
         variant="primary"
-        disabled={draft === null}
+        disabled={draft === null || blocked}
         busy={save.isPending}
         onClick={() => save.mutate(shares.map(({ grantee, role: r }) => ({ grantee, role: r })), { onSuccess: () => setDraft(null) })}
       >
@@ -116,6 +147,9 @@ function People({ dashboardId }: { dashboardId: string }) {
 
 function Links({ dashboardId, me, published }: { dashboardId: string; me: Me; published: boolean }) {
   const links = useShareLinks(dashboardId, true);
+  const access = useDashboardAccess(dashboardId);
+  const restricted = (access.data?.restricted ?? []).filter((r) => r.inPublished);
+  const linkBlocked = restricted.filter((r) => !r.canOpenUp);
   const create = useCreateShareLink(dashboardId);
   const revoke = useRevokeShareLink(dashboardId);
   const admin = me.permissions.includes("settings:manage");
@@ -140,6 +174,13 @@ function Links({ dashboardId, me, published }: { dashboardId: string; me: Me; pu
         {!published && " Publish the dashboard before making a link."}
       </p>
       {made && <OneTimeLink label="Share link" link={made} onDone={() => setMade(null)} />}
+      {restricted.length > 0 && (
+        <p role="note" className={`mb-3 rounded-md border p-3 text-sm ${linkBlocked.length ? "border-red-300 bg-red-50 dark:border-red-900 dark:bg-red-950/40" : "border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/40"}`}>
+          {linkBlocked.length
+            ? `It uses restricted data (${linkBlocked.map((r) => `${r.label}, owner ${r.owner?.name ?? "nobody"}`).join("; ")}). Only its owner or an admin can make a share link for it.`
+            : `Anyone with a link will see data from restricted datasets: ${restricted.map((r) => r.label).join(", ")}.`}
+        </p>
+      )}
       <form
         className="mb-4 grid gap-3 sm:grid-cols-2"
         onSubmit={(event) => {
@@ -189,7 +230,7 @@ function Links({ dashboardId, me, published }: { dashboardId: string; me: Me; pu
           </Field>
         )}
         <div className="sm:col-span-2">
-          <Button type="submit" variant="primary" busy={create.isPending} disabled={!published || (rls === "custom" && customValue === null)}>
+          <Button type="submit" variant="primary" busy={create.isPending} disabled={!published || linkBlocked.length > 0 || (rls === "custom" && customValue === null)}>
             Create link
           </Button>
         </div>

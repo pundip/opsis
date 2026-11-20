@@ -1,8 +1,9 @@
 // The dashboard editor: a grid to arrange visuals, side panels to configure them,
-// undo and redo, version history, and a JSON tab onto the same spec.
+// undo and redo, version history, a JSON tab onto the same spec, and the assistant.
 import { useQueryClient } from "@tanstack/react-query";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { AssistantPanel } from "../components/dashboard/AssistantPanel";
 import { Canvas } from "../components/dashboard/Canvas";
 import { FiltersPanel, HistoryPanel, ItemPanel, SettingsPanel } from "../components/dashboard/EditorPanels";
 import { FiltersBar } from "../components/dashboard/FiltersBar";
@@ -34,7 +35,7 @@ import { visualList } from "../visuals/registry";
 
 const MonacoJson = lazy(() => import("../components/dashboard/MonacoJson"));
 
-type Tab = "visual" | "filters" | "dashboard" | "history" | "json";
+type Tab = "assistant" | "visual" | "filters" | "dashboard" | "history" | "json";
 interface Problem {
   path: string;
   message: string;
@@ -139,11 +140,11 @@ function Editor({ dashboard, config }: { dashboard: DashboardDetail; config: App
   const item = spec.items.find((i) => i.id === selected) ?? null;
 
   // Live updates: the assistant, another person or another tab saved a version.
-  const live = useRef({ dirty, version: dashboard.version });
+  const live = useRef({ dirty, version: dashboard.version, tab });
   useEffect(() => {
-    live.current = { dirty, version: dashboard.version };
+    live.current = { dirty, version: dashboard.version, tab };
   });
-  const loadLatest = async (change: Omit<RemoteChange, "loaded" | "previous">) => {
+  const loadLatest = async (change: Omit<RemoteChange, "loaded" | "previous">, quiet = false) => {
     const previous = live.current.version;
     const latest = await client.fetchQuery({
       queryKey: ["dashboards", id],
@@ -152,9 +153,10 @@ function Editor({ dashboard, config }: { dashboard: DashboardDetail; config: App
     });
     history.reset(latest.spec);
     setSaved(latest.spec);
-    setSelected(null);
+    // Keep the selection while the item still exists, so "this" keeps its meaning.
+    setSelected((current) => (latest.spec.items.some((i) => i.id === current) ? current : null));
     void client.invalidateQueries({ queryKey: ["dashboard-versions", id] });
-    setRemote({ ...change, version: latest.version, previous, loaded: true });
+    setRemote(quiet ? null : { ...change, version: latest.version, previous, loaded: true });
   };
   useDashboardEvents(id, (event) => {
     if (event.kind === "published") {
@@ -165,8 +167,18 @@ function Editor({ dashboard, config }: { dashboard: DashboardDetail; config: App
     const change = { version: event.version, byAssistant: event.authorType === "agent", author: event.authorName, message: event.message };
     // Unsaved work is never thrown away without asking.
     if (live.current.dirty) setRemote({ ...change, previous: live.current.version, loaded: false });
-    else void loadLatest(change);
+    // With the assistant open, its panel shows each change and how to undo it.
+    else void loadLatest(change, change.byAssistant && live.current.tab === "assistant");
   });
+  const restoreTo = (version: number) =>
+    restore.mutate(version, {
+      onSuccess: (restored) => {
+        history.reset(restored.spec);
+        setSaved(restored.spec);
+        setSelected(null);
+        setRemote(null);
+      },
+    });
   const undoRemote = () => {
     if (!remote) return;
     restore.mutate(remote.previous, {
@@ -235,7 +247,14 @@ function Editor({ dashboard, config }: { dashboard: DashboardDetail; config: App
 
   const saveProblems = save.error instanceof ApiError ? save.error.details.filter((d): d is Problem => Boolean(d.path)) : [];
   const conflict = save.error instanceof ApiError && save.error.code === "version_conflict";
-  const tabs: [Tab, string][] = [["visual", "Visual"], ["filters", "Filters"], ["dashboard", "Dashboard"], ["history", "History"], ["json", "JSON"]];
+  const tabs: [Tab, string][] = [
+    ...(config.features.assistant ? ([["assistant", "Assistant"]] as [Tab, string][]) : []),
+    ["visual", "Visual"],
+    ["filters", "Filters"],
+    ["dashboard", "Dashboard"],
+    ["history", "History"],
+    ["json", "JSON"],
+  ];
 
   return (
     <div>
@@ -338,7 +357,8 @@ function Editor({ dashboard, config }: { dashboard: DashboardDetail; config: App
               calendar={config.calendar}
               editing={{
                 selected,
-                onSelect: (next) => { setSelected(next); if (next) setTab("visual"); },
+                // In the assistant, selecting a visual says what "this" means; stay there.
+                onSelect: (next) => { setSelected(next); if (next && tab !== "assistant") setTab("visual"); },
                 onLayout: (positions) =>
                   history.set((current) => ({
                     ...current,
@@ -364,7 +384,10 @@ function Editor({ dashboard, config }: { dashboard: DashboardDetail; config: App
               </button>
             ))}
           </div>
-          <div role="tabpanel" className={tab === "json" ? "h-[34rem]" : "max-h-[75vh] overflow-auto pr-1"}>
+          <div role="tabpanel" className={tab === "json" ? "h-[34rem]" : tab === "assistant" ? "h-[70vh] min-h-[28rem]" : "max-h-[75vh] overflow-auto pr-1"}>
+            {tab === "assistant" && (
+              <AssistantPanel dashboardId={id} items={spec.items} selected={item} dirty={dirty} onUndo={restoreTo} undoing={restore.isPending} />
+            )}
             {tab === "visual" &&
               (item ? (
                 <ItemPanel

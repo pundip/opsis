@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-19 (end of Milestone 6)
+Last updated: 2026-11-20 (end of Milestone 7)
 
 ## Milestone status
 
@@ -13,54 +13,48 @@ Last updated: 2026-11-19 (end of Milestone 6)
 | M3.5 Timezones, conditional measures, model versions, benchmark | Done, reviewed |
 | M4 Dashboards and visuals | Done, reviewed |
 | M5 MCP | Done, reviewed |
-| M6 Auth and sharing | Done, awaiting review |
-| M7 In-app assistant | Not started |
+| M6 Auth and sharing | Done, reviewed; review changes done at the start of M7 |
+| M7 In-app assistant | Done, awaiting review |
 | M8 More connectors and hardening | Not started |
 
-## M6 Auth and sharing
+## M7 In-app assistant
 
-Built (decisions in ADR-023):
+**From the M6 review, done first** (ADR-024):
 
-- **From the M5 review, done first:** dataset previews (REST and MCP) and the sample values in `describe_dataset` now read through the same row-level security filter as queries, and leave out the total row count when a rule applies; a rule that cannot be applied refuses. Access tokens work on the REST API with the MCP scopes.
-- **Sign-in** (`AUTH_MODE=local` and `full`): argon2id passwords, server-side sessions (idle and absolute timeouts, sign out, sign out everywhere, all other sessions end on a password change), the first admin from `ADMIN_EMAIL` / `ADMIN_INITIAL_PASSWORD` with a forced password change, lockouts with backoff counted in Postgres, and `python -m opsis reset-link <email>` for recovery.
-- **Sign in with Google:** PKCE, state and nonce, ID token verified against Google's keys, verified email only, domain and address allowlists, invited-only by default, linking to an existing account by verified email, optional auto-provisioning as a viewer.
-- **People and groups:** invitations and password resets as one-time links (shown once to the admin), roles, attributes for row-level security, deactivation (ends sessions and tokens), groups; the last admin cannot be removed.
-- **Access lists:** dashboards are shared with users, groups or everyone as viewers (published version only, title included) or editors; only owners and admins delete; a dashboard you cannot see answers 404. Datasets can be restricted to admins and named users or groups. The MCP tools follow the same rules.
-- **Share links** (server mode, flag): published version only, optional expiry and password, revocable, view count; row-level security shows nothing through a link unless its maker chose otherwise (only admins may choose any attributes); a link never inherits an exemption.
-- **View as** (admins): see a dashboard's data as a given person, or as a viewer with given attributes.
-- **View state in the URL:** filters, cross-filters and drill levels (`?s=`), on dashboards and share links.
-- **Audit log screen** for admins, with filters and paging; sign-ins (and failures), people, groups, sharing, links and dataset access are now recorded too.
-- **MCP:** `share_dashboard` (sign-in modes) and `create_share_link` (flag), 23 tools in all.
-- **Deploy:** `deploy/proxmox/README.md` (LXC, Docker, `.env`, Nginx and Caddy configurations, firewalling, MCP clients, backups and restore, upgrades, recovery, troubleshooting) and `deploy/windows/README.md`. `cloudflared` pinned to 2026.11.1.
-- **Frontend:** sign-in page, set-password page, account page, Users (people and groups), Audit log, the Share panel with public links, the dataset access panel, View as, and the public share-link page.
+- **Dataset owners:** the editor who created a dataset can restrict it and change its list, admins can do so for any dataset, and a restriction an admin set can only be lifted by an admin. Restrictions made in M6 count as admin-set.
+- **Sharing** (people, groups, everyone, share links) is for the dashboard's owner and admins only, in the UI, the REST API and the MCP tools. Editors still edit content.
+- **Restricted data through dashboards:** only the dataset's owner or an admin can show a restricted dataset's data to people outside its list, whether by sharing, by a share link, by letting outside editors work on a draft that uses it, or by publishing it to an audience that includes outsiders. The share dialog says which datasets are restricted and who would gain access, and blocks what the person may not do; the dataset access panel lists the dashboards that already show its data outside its list. The MCP sharing tools follow the same rules. Cross-filters can only use fields the dashboard uses, so a viewer cannot probe other fields.
+- **Google sign-in:** a checklist in `deploy/proxmox/README.md`, part of the M8 install check.
 
-### How M6 was verified
+**Built in M7** (ADR-025):
 
-- **Backend, automated:** 231 pytest tests pass (12 new in `tests/test_auth.py`); `ruff check`, `ruff format --check` and `mypy --strict` pass. The new tests cover:
-  - settings: the new fail-fast rules, and no secret echoed in an error;
-  - sign-in: same message for an unknown email and a wrong password; cookie attributes; the forced password change; a password change ending other sessions; sign out and sign out everywhere; idle and absolute timeouts; lockout after five failures and the backoff after that;
-  - invitations, single-use and expiring links, the last-admin rules, groups, deactivation ending sessions and tokens, the recovery command; the built-in admin and its tokens stopping when sign-in is switched on;
-  - dashboard access lists through users, groups and everyone, including a viewer shared as an editor, published-only titles, and delete rights;
-  - restricted datasets across the dataset, model, query and validation routes, and still viewable through a shared dashboard;
-  - access token scopes on the REST API; tokens unable to make tokens; a wrong token never falling back to a cookie;
-  - share links: published only, RLS denying by default, the attribute rules, never exempt, password with lockout, revoke, expiry, unpublish, cookie attributes under https and `/opsis`;
-  - View as; Sign in with Google against a fake provider that issues real RS256 tokens and checks PKCE: allowed, not allowed, not invited, unverified, nonce and audience mismatches, a forged state, a callback in another browser, auto-provisioning; the audit log API; and that local mode registers none of these routes.
-- **Frontend, automated:** `tsc`, ESLint and 42 Vitest tests pass (two new, for view state in the URL).
-- **Browser, automated with `npm run smoke`, all passed:**
-  - **at http://localhost:8080 and at http://localhost:8088/opsis/** (AUTH_MODE=none): the M4 dashboard flow, the MCP flow with live editor updates, the token page, and a new test that local mode has no sign-in, people, sharing or share links;
-  - **in server mode behind the proxytest nginx at http://localhost:8088/opsis/**, on a throwaway stack (DEPLOY_MODE=server, AUTH_MODE=full, MCP_AUTH=token, the worker container, share links on, fresh random secrets, removed afterwards): the admin signs in and changes the initial password; the M4 dashboard flow; **the MCP flow with an access token through `/opsis/mcp`, and live updates through nginx** (as asked at the M5 review); an admin invites a viewer from the Users page, who sets a password from the link, sees nothing until the dashboard is shared, then sees it with no Edit or Share, cannot open the editor, and gets 403 from the API; a share link shows the published version (not a saved draft) and stops working when revoked; **Sign in with Google works for an invited, allowed address and is refused for another domain**, against `e2e/fake-oidc.mjs`; a script's read-only token can read and cannot write; a request without credentials gets 401.
-- **By hand:** the bundled `caddy` profile in plain-HTTP mode on spare ports (app, API and health check through Caddy, security headers intact); the `tunnel` profile's configuration validates.
+- **Providers:** Claude through the official `anthropic` SDK (2.11, API version 2026-10-21), and Ollama through its OpenAI-compatible endpoint. Claude runs with adaptive thinking, progress notes between tool calls (`display: "updates"`), effort from `ANTHROPIC_EFFORT`, prompt caching, and eager tool-input streaming with every input checked against its schema. **Refusal fallbacks are on by default** (`fallbacks: "default"`): a request Claude's safety checks decline is re-run on the model Anthropic recommends for it, and the panel says which model answered. `ANTHROPIC_FALLBACKS=false` turns that off.
+- **Tool loop** over 17 of the MCP tools, as the signed-in person with their access, with budgets: tool calls, output tokens, time, and rows shown to the model. It can change only the open dashboard, and cannot create, publish or share. Token use per request is logged, audited (`assistant.request`) and shown in the panel.
+- **Conversations** per person per dashboard, in Postgres (migration 0009): the provider's history byte for byte, and the panel's entries. A request runs on its own, so closing the panel does not stop it; **Stop** does.
+- **The Assistant tab** in the editor: streaming replies, progress notes, each tool call as a step you can open, **Undo** on each change and **Undo all of this** per request, Stop, New conversation, and the selected visual as context. Send waits until your own changes are saved. The editor reloads the assistant's versions as they land, without its banner while the tab is open. The disabled Assistant button in the header is gone.
+- **Settings:** `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` (default `claude-opus-5-5`), `ANTHROPIC_EFFORT`, `ANTHROPIC_FALLBACKS`, `OLLAMA_URL`, `OLLAMA_MODEL` (default `gemma4:12b`), `ASSISTANT_MAX_STEPS`, `ASSISTANT_MAX_OUTPUT_TOKENS`, `ASSISTANT_TIMEOUT_SECONDS`, `ASSISTANT_MAX_ROWS`. `ASSISTANT_PROVIDER=anthropic` without a key fails fast. The `ollama` Compose image is pinned (0.40.16) and given a 32k context.
+- **Ollama's context:** its OpenAI-compatible endpoint cannot set the context size, and its default (4,096 tokens on this laptop) cuts off the assistant's instructions and tools. The assistant detects that and says how to fix it (`OLLAMA_CONTEXT_LENGTH=32768`); the README and the Windows guide say so too.
+- **Small models:** gemma4 12B writes long nested tool calls that Ollama cannot convert to JSON, and Ollama then drops the call (its log says "tool call parsing failed"). So with Ollama the assistant asks for one dashboard item per call, and a reply that is empty or only announces a step is answered with a request to make the call again, at most twice a request, with a note in the panel.
+- **Tests:** a scripted fake model (`e2e/fake-llm.mjs`) streams like both APIs and refuses what the real Claude API refuses (forced tool use, thinking turned off, sampling parameters). The smoke run plugs it in at the root and the sub-path (`compose.fakellm.yml`, Ollama's API) and in server mode (Claude's API), then puts your stack back as `.env` has it.
 
-Bugs found by this testing and fixed: an access token could create more access tokens (now only a signed-in person can); the invitation and share-link pages read their token outside a route, so they asked the API for an empty token; viewers could see the draft's title in the dashboard list.
+### How M7 was verified
+
+- **Backend, automated:** 252 pytest tests pass (20 new in `tests/test_assistant.py`; `tests/test_review_m6.py` and updated M6 tests cover the review changes); `ruff check`, `ruff format --check` and `mypy --strict` pass. The assistant tests run both providers through their real clients against scripted fake servers (the Anthropic SDK parses the fake's event stream) and cover: building a dashboard step by step; what Claude is sent (adaptive thinking with updates, effort, fallbacks, cache breakpoints, sorted tools with eager streaming, no sampling parameters or forced tool choice, the beta headers); the history sent back append-only, with Claude's thinking blocks and signatures unchanged; follow-ups that see the whole conversation; token totals and the audit; refusals (nothing kept), a fallback in mid-reply (the declined part not sent back), API errors; tool calls cut off at max_tokens (answered, not run); the step budget; calls on another dashboard, unreadable arguments and unknown tools; Ollama's context check; Stop (keeps the partial text) and one request at a time; empty replies and replies whose tool call was dropped; template tokens a local model leaks; who may use it (viewers, other people's conversations, access tokens, the flag off); row and length caps; the context block; settings that fail fast.
+- **Frontend, automated:** `tsc`, ESLint and 48 Vitest tests pass (3 new, for the event stream and the live view).
+- **Browser, automated with `npm run smoke`, all passed** at http://localhost:8080, at http://localhost:8088/opsis/ behind the proxytest nginx, and in server mode behind it (sign-in, the worker, and the assistant on Claude's API). The new assistant test asks the fake model, from the panel, to build a dashboard from a fresh dataset: the reply streams, Stop shows while it works, three steps appear (one opened to show its input), the canvas follows along without a banner, Undo restores the empty dashboard as version 3, the history reads user, assistant, user, and after a reload the conversation and its token line are still there, with no script errors or CSP violations. At the root and /opsis this goes through the Ollama provider, in server mode through Claude's, whose progress note shows too. The earlier tests (dashboards, MCP with live updates, tokens, local mode; in server mode sign-in, sharing, share links, Google and tokens) pass with the M6 review changes in.
+- **With a real model, Ollama:** `gemma4:12b` on this laptop (through a 32k-context copy of it, see Q4), asked through the panel's API to "Build a dashboard of giving from the gifts dataset: the total amount, the amount by fund, and the amount by month". It described the dataset, listed the visuals, then added a KPI card, a bar chart by fund and a line chart by month, one per call. Its first line chart was refused by validation (the x binding was not a list) and it fixed that from the error message. 7 model calls, 6 tool calls, 5 min 37 s, 49,553 input tokens (40,814 of them cached) and 2,583 output tokens; each visual returns data, and the history shows three versions by the assistant with its notes. Before the one-item-per-call change, two runs stopped at that step: Ollama's log showed it had dropped the model's long `patch_dashboard` call ("gemma4 tool call parsing failed"). So with this model a build works, slowly, but not every time.
+- **With a real model, Claude:** not run. There is no `ANTHROPIC_API_KEY` here, so Claude was exercised only through the fake (in pytest and in the server-mode browser run). See Q2.
 
 Not verified:
 
-- **Real Google sign-in** at https://urlloom.com/opsis. It needs your Google OAuth client; the flow was tested against a fake provider, in pytest and in the browser.
-- **Your real proxy, the LXC, port forwarding and https.** The Nginx block is the one the proxytest profile runs; the Caddy block for an existing Caddy was not run. `TRUSTED_PROXIES` behind your port forwarding still needs checking on the server (the Proxmox guide says how).
-- The bundled Caddy's automatic HTTPS (needs a public domain) and the Cloudflare tunnel (needs an account and token).
-- The Claude Desktop `mcp-remote` configuration with a token header, as written in the Proxmox guide.
-- Long sessions in practice (the timeouts are tested by moving timestamps), and many people at once.
-- The Sonnet results for the MCP tools: the review message still had the placeholder, so I have nothing to act on there yet.
+- The real Claude API (no key), so also not the fallbacks, progress notes and prompt caching against the live service, or how well Claude builds dashboards with these tools.
+- The Sonnet run of the MCP tools (not run yet, as you said).
+- The `ollama` Compose profile itself (the pinned image and its context setting were not started).
+- Long conversations near a model's context limit with real models, and several people using the assistant at once.
+
+## M6 Auth and sharing (reviewed)
+
+Built in M6 (ADR-023): sign-in with local accounts and Google, sessions and lockouts, people and groups, access lists for dashboards and datasets, share links, View as, view state in the URL, the audit log screen, tokens on the REST API, the MCP sharing tools, and the Proxmox and Windows guides. Verified with 231 backend tests, 42 frontend tests and the smoke tests at the root, the sub-path and in server mode. Real Google sign-in and the real server are still to check: that is now a checklist in the Proxmox guide, part of the M8 install check.
 
 ## M5 MCP (reviewed)
 
@@ -76,6 +70,7 @@ M3.5 benchmark, in one line: 5 million rows on this laptop, typical queries 77 t
 - **M3:** approved with M3.5 (timezones, conditional measures, model versions, value checks, benchmark; all done). Admins stay exempt from RLS by default, with a visible badge (done in M4), share links never exempt and "View as" in M6. Bulk model export and two-hop joins go to M8. Every milestone is verified at the root and under /opsis.
 - **M4:** approved. Field selector is fine for v1 (drag-and-drop to the M8 backlog). Playwright smoke test at the start of M5, at both URLs, replacing manual browser checks from then on. Combo chart gets an optional right-hand axis per measure. Filter and drill state in the URL in M6 with share links. MCP tool descriptions and errors must work for a smaller model: anything Sonnet struggles with counts as a tool design issue.
 - **M5:** approved. REST previews apply the RLS filter, or refuse where a rule cannot be applied. Access tokens on the REST API in M6 with the MCP scopes. Keep MCP stateless. In M6, verify `MCP_AUTH=token` against the running container in server mode through the proxytest profile (done).
+- **M6:** approved. Dataset owners restrict their datasets; admins can override, and only an admin lifts an admin's restriction. Sharing is limited to a dashboard's owner and admins. Restricted data must not reach people outside its list through a dashboard, with warnings in the share dialog, and the same rules in the MCP sharing tools. Real Google sign-in becomes a checklist in the Proxmox guide and part of the M8 install check. The Sonnet test has not been run yet. (All done at the start of M7.)
 - **For the LXC work (noted at the M2 review):** the server will use port forwarding to the LXC. Check then what source address the api sees for proxied requests, because that is the address `TRUSTED_PROXIES` must list (it may be the forwarder or the Docker gateway, not the reverse proxy itself).
 
 ## What exists
@@ -126,6 +121,12 @@ Run: `copy .env.local.example .env`, `docker compose up -d`, open http://localho
 - `opsis/api/`: `auth.py`, `admin.py` (users, groups, audit), `sharing.py` (access lists, links, the public side); `deps.py` (sessions, tokens, scopes). Migration `0007`. CLI `reset-link`.
 - Frontend: `pages/Login`, `SetPassword`, `Account`, `Users`, `Audit`, `PublicDashboard`; `components/dashboard/SharePanel`, `components/DatasetAccessPanel`; `lib/access.ts`, `lib/urlState.ts`.
 - `e2e/auth.spec.ts`, `e2e/local.spec.ts`, `e2e/global-setup.ts`, `e2e/fake-oidc.mjs`, `compose.servertest.yml`; `deploy/proxmox/README.md`, `deploy/windows/README.md`.
+
+**In-app assistant (M7)**
+- `opsis/assistant/`: `providers.py` (Claude and Ollama, streamed), `loop.py` (the tool loop and its budgets), `prompt.py` (instructions and the context block), `runs.py` (requests in progress, Stop).
+- `opsis/services/assistant.py` (conversations, history, entries), `opsis/api/assistant.py` (the panel's routes). Migration `0009`. `opsis/mcp/guide.py` now shares its spec reference (`SPEC_GUIDE`) with the assistant.
+- Frontend: `components/dashboard/AssistantPanel.tsx`, `lib/assistant.ts` (state, the event stream, the live view), the Assistant tab in `DashboardEditor`.
+- `e2e/fake-llm.mjs`, `e2e/tests/assistant.spec.ts`, `compose.fakellm.yml`.
 
 ## M3.5 (from the M3 review)
 
@@ -208,7 +209,8 @@ Not verified:
 - ADR-021: field wells are selectors (accepted for v1); cross-filter and drill state live in the view (now also in the URL), not in the spec; the chart palette and mark rules are fixed in code.
 - ADR-022: the MCP endpoint is stateless with JSON responses (kept at the M5 review); JSON Patch is our own code.
 - ADR-023 (new, M6): `ADMIN_INITIAL_PASSWORD` is optional (Google or `reset-link` instead); Google's ID token is verified with `joserfc` (Authlib's JOSE library) and the HTTP calls use the standard library; `GOOGLE_DISCOVERY_URL` exists for testing; invitations and resets are links the admin passes on until email arrives (M8); the audit log page is available in local mode too.
-- ADR-015: the task runner is npm scripts, not `tasks.py`; `httpx2` for the test client (approved).
+- ADR-025 (new, M7): the assistant uses 17 of the 23 MCP tools (no creating, publishing or sharing from the panel); only people in the editor can use it, not access tokens; Ollama needs `OLLAMA_CONTEXT_LENGTH` because its OpenAI-compatible endpoint cannot set the context size; our own tool loop rather than the SDK's beta tool runner, so one loop serves both providers.
+- ADR-015: the task runner is npm scripts, not `tasks.py`; `httpx2` for the test client (approved), and now also for Ollama.
 
 ## Open issues and notes
 
@@ -225,7 +227,9 @@ Not verified:
 - Bundle size: main chunk 804 kB (248 kB gzipped), up from 755 kB with the M6 pages; ECharts (562 kB) and Monaco (3.4 MB) are lazy.
 - Joins are one hop (two-hop: M8). The query builder has one filter row.
 - Merge refresh does not remove rows deleted in the source. One job runs at a time. Datasets cannot be edited after creation.
-- The `ollama` image is on `latest` until M7.
+- Assistant conversations are kept until their dashboard or their person is deleted; there is no clean-up or export yet.
+- A request to the assistant runs in the api process (R5): a restart stops it (Stop is pressed for it, and after 10 seconds it is cancelled). The next request carries on with the conversation.
+- A local model is slow on this laptop (see the Ollama result above), so `ASSISTANT_TIMEOUT_SECONDS` may need raising for local models.
 - Risks still open: R2 (DuckDB memory in the api process), R3 (snapshot rewrite cost), R5 (single api process), R8 (hot reload on the Windows filesystem). R10 (share links on RLS datasets) is closed: links deny by default, never inherit an exemption, and cannot exceed their maker's access.
 
 ## Backlog agreed at reviews
@@ -235,16 +239,18 @@ Not verified:
 
 ## Questions for review
 
-- **Q1. Who may restrict datasets.** Only admins can restrict a dataset or change its grants. Should the editor who created a dataset be able to as well?
-- **Q2. Editors and sharing.** Anyone who can edit a dashboard can also change who it is shared with (as in Google Docs). Do you want that limited to the owner and admins?
-- **Q3. Sonnet results.** Your M5 review message still had the placeholder for the Sonnet test results, so I had nothing to act on. If anything struggled, send the tool call and the error text it got.
-- **Q4. Google on the server.** When the OAuth client exists, the first real Google sign-in on https://urlloom.com/opsis is the last unchecked item of M6's "done when". Do you want to do it at review, or shall I add a short checklist to the Proxmox guide and treat it as part of the M8 install check?
+- **Q1. Lists of admin-set restrictions.** As built, an admin's restriction can only be lifted by an admin, but the dataset's owner can still change who is on its list (your answer, read literally). Should an admin-set restriction be admin-only entirely, list included?
+- **Q2. Claude for real.** I could not run the assistant against the real Claude API. To check it, put a key in `.env` yourself (`ASSISTANT_PROVIDER=anthropic`, `ANTHROPIC_API_KEY=...`) and tell me, and I will run the same "build a dashboard" check with it. Please do not paste the key into the chat.
+- **Q3. Ollama's API.** The brief names Ollama's OpenAI-compatible endpoint, which cannot set the context size, so Ollama must run with `OLLAMA_CONTEXT_LENGTH=32768` or more. Ollama's own API (`/api/chat`) can set it per request and would work with a default install. Keep the OpenAI-compatible endpoint (as now), or switch?
+- **Q4. The model alias in your Ollama.** To test with a 32k context without changing how your Ollama runs, I created `gemma4-opsis-32k`, a copy of `gemma4:12b` with a larger context (no download; `ollama rm gemma4-opsis-32k` removes it). Your `.env` is unchanged, so the assistant there still uses `gemma4:12b` and will say the context is too small until you set `OLLAMA_CONTEXT_LENGTH` or `OLLAMA_MODEL=gemma4-opsis-32k`. Which do you prefer?
+- **Q5. Refusal fallbacks** are on by default for Claude (a declined request is re-run on the model Anthropic recommends, and the panel says so). Keep them on?
 
 ## Exact next step
 
-After review, start **M7 (In-app assistant)**. Read the M7 section of BUILD_BRIEF.md first. In outline:
+After review, start **M8 (More connectors and hardening)**. Read the M8 section of BUILD_BRIEF.md first. In outline:
 
-1. A provider abstraction with `anthropic` (Messages API with tool use) and `ollama` (its OpenAI-compatible endpoint), configured by `ASSISTANT_PROVIDER`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `OLLAMA_URL` and `OLLAMA_MODEL`, with fail-fast checks.
-2. A tool loop over the same tool functions as MCP (`opsis/mcp/tools.py`), running as the signed-in person with their access, with budgets (steps, tokens, time) and versions marked as the assistant's.
-3. A chat panel in the editor: streaming over server-sent events, each tool call shown as a collapsible step, one-click undo of every change, and context (the dashboard, the selected visual, the datasets).
-4. Done when the same "build a dashboard" request works from the panel with each provider; Playwright tests at the root and under /opsis, and in server mode.
+1. Google Sheets and Salesforce (incremental) connectors.
+2. The backup job with a restore document; the scheduled refresh UI with cron presets; email behind `FEATURE_EMAIL` (invitations, resets, snapshots).
+3. The performance check: a typical dashboard on a 10 million row dataset loads in under 1.5 s warm.
+4. Full Windows and Proxmox documentation, a demo seed dataset, and the install check on each target from the README alone, including the Google sign-in checklist.
+5. The M8 backlog agreed at reviews: model export and import, two-hop joins, drag-and-drop fields, a clean-up job for ended sessions and links.

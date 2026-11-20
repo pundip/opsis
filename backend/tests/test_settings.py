@@ -151,13 +151,14 @@ def test_server_env_template_refuses_to_start_until_placeholders_are_replaced() 
     with pytest.raises(ConfigError) as info:
         build_settings(**values)
     problems = "\n".join(info.value.problems)
-    assert len(info.value.problems) == 5
+    assert len(info.value.problems) == 6
     for name in (
         "TRUSTED_PROXIES",
         "POSTGRES_PASSWORD",
         "ENCRYPTION_KEY",
         "ADMIN_EMAIL",
         "GOOGLE_CLIENT_ID",
+        "ANTHROPIC_API_KEY",
     ):
         assert name in problems
 
@@ -168,5 +169,6 @@ def test_server_env_template_refuses_to_start_until_placeholders_are_replaced() 
         admin_email="admin@example.org",
         google_client_id="1234.apps.googleusercontent.com",
         google_client_secret="GOCSPX-test-value-5",
+        anthropic_api_key="sk-ant-test-value-7",
     )
     assert build_settings(**values).base_path == "/opsis"

@@ -149,6 +149,11 @@ class Dataset(Base):
     current_snapshot_id: Mapped[uuid.UUID | None] = mapped_column()
     # When true, only admins and the grantees in dataset_grants may use the dataset.
     restricted: Mapped[bool] = mapped_column(default=False, server_default=false())
+    # Who set the restriction. When an admin did, only an admin may lift it.
+    restricted_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    restricted_by_admin: Mapped[bool] = mapped_column(default=False, server_default=false())
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
@@ -435,4 +440,58 @@ class UserLink(Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AssistantConversation(Base):
+    """One person's chat with the in-app assistant about one dashboard."""
+
+    __tablename__ = "assistant_conversations"
+    __table_args__ = (Index("ix_assistant_conversations_lookup", "dashboard_id", "user_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    dashboard_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("dashboards.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    # The history can only be sent back to the provider and model that wrote it.
+    provider: Mapped[str] = mapped_column(String(20))
+    model: Mapped[str] = mapped_column(String(200))
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    output_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AssistantMessage(Base):
+    """A message in the provider's own format, stored exactly as it is sent back.
+
+    JSON rather than JSONB keeps the key order, so the history the provider sees
+    is the same bytes every time (prompt caching and Claude's thinking blocks
+    depend on that). Rows are only ever appended.
+    """
+
+    __tablename__ = "assistant_messages"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assistant_conversations.id", ondelete="CASCADE"), index=True
+    )
+    message: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AssistantEntry(Base):
+    """What the assistant panel shows: requests, replies, tool steps and notices."""
+
+    __tablename__ = "assistant_entries"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assistant_conversations.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(20))  # request | text | update | step | notice | done
+    data: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

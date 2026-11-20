@@ -105,6 +105,9 @@ export interface Dataset {
   cursorField: string | null;
   primaryKey: string[];
   columns: string[] | null;
+  restricted?: boolean;
+  /** The dataset's owner: the person who created it. */
+  createdBy?: string | null;
   snapshot: Snapshot | null;
   lastJob: Job | null;
   createdAt: string;

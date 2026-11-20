@@ -22,8 +22,20 @@ from sqlalchemy.orm import sessionmaker
 from starlette.routing import Route
 
 from opsis import __version__
-from opsis.api import admin, auth, dashboards, ingestion, semantic, sharing, system, tokens
+from opsis.api import (
+    admin,
+    assistant,
+    auth,
+    dashboards,
+    ingestion,
+    semantic,
+    sharing,
+    system,
+    tokens,
+)
 from opsis.api.errors import ApiError, install_error_handlers
+from opsis.assistant.providers import build_provider
+from opsis.assistant.runs import Runs
 from opsis.auth import cookies
 from opsis.jobs.worker import InlineRunner
 from opsis.mcp.server import OpsisMcp
@@ -59,6 +71,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_concurrent=settings.query_max_concurrent,
     )
     mcp = OpsisMcp(settings, session_factory, runtime)
+    # The in-app assistant: one provider client and the requests in progress.
+    runs = Runs()
+    provider = build_provider(settings) if settings.feature_assistant else None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -84,6 +99,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             async with mcp.manager.run():
                 yield
         finally:
+            await runs.shutdown()
+            if provider is not None:
+                await provider.aclose()
             if runner is not None:
                 runner.stop()
             engine.dispose()
@@ -99,6 +117,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.session_factory = session_factory
     app.state.query_runtime = runtime
+    app.state.assistant_runs = runs
+    app.state.assistant_provider = provider
     install_error_handlers(app)
 
     @app.middleware("http")
@@ -159,6 +179,8 @@ def register_feature_routers(api: APIRouter, settings: Settings) -> None:
         api.include_router(auth.router)
         api.include_router(admin.users_router)
         api.include_router(sharing.router)
+    if settings.feature_assistant:
+        api.include_router(assistant.router)
     if settings.feature_public_share_links:
         api.include_router(sharing.links_router)
         api.include_router(sharing.public_router)

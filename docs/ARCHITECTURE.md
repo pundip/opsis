@@ -200,7 +200,37 @@ Bootstrap: on first start, `ADMIN_EMAIL` and `ADMIN_INITIAL_PASSWORD` create the
 
 **Access (M6).** Dashboards belong to their owner and are shared with users, groups or everyone as viewers or editors; admins can do everything. Viewers see the published version only (title included); a viewer-role person shared as an editor is still a viewer. A dashboard someone cannot view answers 404. Datasets are open to everyone who builds unless restricted to admins and named users or groups; viewing a dashboard needs no dataset access, because the dashboard grants its own questions, with RLS applied as the viewer. All of this lives in `services/access.py` and is checked in the service layer, so REST, MCP and share links share it. Details in ADR-023.
 
-## 6. Contracts to review
+**After the M6 review.** A dataset's owner (its creator) can restrict it, and only admins lift an admin's restriction. Only a dashboard's owner and admins change its sharing. A restricted dataset's data cannot reach people outside its list through a dashboard (sharing, share links, drafts, publishing) unless its owner or an admin allows it. Details in ADR-024.
+
+## 6. The assistant (M7)
+
+The editor's Assistant tab sends the person's request to `POST /api/dashboards/{id}/assistant/messages`. The request runs as its own task in the api process and the response streams its progress as server-sent events.
+
+```mermaid
+sequenceDiagram
+  participant P as Panel
+  participant A as api (tool loop)
+  participant M as Claude or Ollama
+  participant T as MCP tools (as the person)
+
+  P->>A: request, selected item
+  A->>A: store it; add the context block (date, dashboard, selection, datasets)
+  loop until the model answers without tools, or a budget runs out
+    A->>M: instructions, tools, the whole history (streamed)
+    M-->>A: text, progress notes, tool calls
+    A-->>P: delta and step events as they arrive
+    A->>T: each call, checked against its schema, with the person's access
+    T-->>A: result (rows and length capped)
+    A-->>P: the stored step, with the version it saved
+  end
+  A-->>P: done: tokens, steps, time, versions before and after
+```
+
+- Providers keep the history in their own format and the loop sends it back unchanged (ADR-025). The tools are the MCP tools, so permissions, RLS, validation and the audit of agent writes are the same as for MCP.
+- Every dashboard change is a new version by the assistant; open editors reload it through the live-update channel of section 4. Undo in the panel restores the version before a step, or before the whole request.
+- Conversations, the history and the panel's entries are in Postgres (`assistant_*` tables); requests in progress are in the api process (`assistant/runs.py`).
+
+## 7. Contracts to review
 
 | File | What it defines |
 |---|---|

@@ -128,7 +128,9 @@ export function DatasetDetail({ config, me }: { config: AppConfig; me: Me }) {
         }
       />
       <ErrorNote error={refresh.error ?? remove.error} />
-      {config.authMode !== "none" && me.permissions.includes("settings:manage") && <DatasetAccessPanel datasetId={id} />}
+      {config.authMode !== "none" && (me.permissions.includes("settings:manage") || data.createdBy === me.id) && (
+        <DatasetAccessPanel datasetId={id} />
+      )}
 
       <Card className="mb-5 p-4">
         <dl className="grid grid-cols-2 gap-4 md:grid-cols-5">
