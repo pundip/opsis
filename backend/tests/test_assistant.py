@@ -115,45 +115,48 @@ def claude_sse(
     return "".join(out).encode()
 
 
-def openai_sse(parts: list[tuple[Any, ...]], stop: str = "stop") -> bytes:
-    """A streamed Chat Completions response, the way Ollama sends it."""
-    chunks: list[dict[str, Any]] = []
+def ollama_lines(
+    parts: list[tuple[Any, ...]], stop: str = "stop", *, prompt_tokens: int = 900
+) -> bytes:
+    """A streamed /api/chat response, as Ollama sends it: one JSON object per line."""
+    lines: list[dict[str, Any]] = []
     for index, part in enumerate(parts):
         if part[0] == "text":
-            chunks.append({"choices": [{"index": 0, "delta": {"content": part[1]}}]})
+            lines.append({"message": {"role": "assistant", "content": part[1]}, "done": False})
         elif part[0] == "call":
-            arguments = part[2] if isinstance(part[2], str) else json.dumps(part[2])
-            call = {"index": index, "id": f"call_{next(_ids)}", "type": "function",
-                    "function": {"name": part[1], "arguments": arguments}}  # fmt: skip
-            chunks.append({"choices": [{"index": 0, "delta": {"tool_calls": [call]}}]})
-    finish = "tool_calls" if any(p[0] == "call" for p in parts) else stop
-    chunks.append({"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
-    chunks.append({"choices": [], "usage": {"prompt_tokens": 900, "completion_tokens": 40}})
-    lines = [
-        f"data: {json.dumps({'id': 'c', 'object': 'chat.completion.chunk', **c})}\n\n"
-        for c in chunks
-    ]
-    return ("".join(lines) + "data: [DONE]\n\n").encode()
+            # Arguments are an object; a string here stands for something unreadable.
+            call = {"id": f"call_{next(_ids)}",
+                    "function": {"index": index, "name": part[1], "arguments": part[2]}}  # fmt: skip
+            message = {"role": "assistant", "content": "", "tool_calls": [call]}
+            lines.append({"message": message, "done": False})
+    lines.append(
+        {
+            "message": {"role": "assistant", "content": ""},
+            "done": True,
+            "done_reason": "length" if stop == "length" else "stop",
+            "prompt_eval_count": prompt_tokens,
+            "prompt_eval_cached_count": 600,
+            "eval_count": 40,
+        }
+    )
+    return "".join(json.dumps({"model": "gemma4:12b", **line}) + "\n" for line in lines).encode()
 
 
 class FakeModel:
     """Answers each model call with the next turn of a script, and keeps the requests."""
 
-    def __init__(self, kind: str, turns: list[Turn], *, context_length: int = 65_536) -> None:
+    def __init__(self, kind: str, turns: list[Turn], *, prompt_tokens: int = 900) -> None:
         self.kind = kind
         self.turns = list(turns)
         self.requests: list[dict[str, Any]] = []
+        self.paths: list[str] = []
         self.headers: list[dict[str, str]] = []
-        self.context_length = context_length
+        self.prompt_tokens = prompt_tokens
         self.fail: tuple[int, dict[str, Any]] | None = None
 
     def handler(self, request: httpx2.Request) -> httpx2.Response:
-        if request.url.path.endswith("/api/ps"):
-            return httpx2.Response(
-                200,
-                json={"models": [{"name": "gemma4:12b", "context_length": self.context_length}]},
-            )
         body = json.loads(request.content)
+        self.paths.append(request.url.path)
         self.requests.append(body)
         self.headers.append(dict(request.headers))
         if self.fail is not None:
@@ -163,9 +166,13 @@ class FakeModel:
         if self.kind == "anthropic":
             extra = parts.pop() if parts and isinstance(parts[-1], dict) else {}
             content = claude_sse(parts, stop, **extra)
-        else:
-            content = openai_sse(parts, stop)
-        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=content)
+            return httpx2.Response(
+                200, headers={"content-type": "text/event-stream"}, content=content
+            )
+        content = ollama_lines(parts, stop, prompt_tokens=self.prompt_tokens)
+        return httpx2.Response(
+            200, headers={"content-type": "application/x-ndjson"}, content=content
+        )
 
     def transport(self) -> httpx2.MockTransport:
         return httpx2.MockTransport(self.handler)
@@ -472,8 +479,11 @@ def test_ollama_builds_the_same_dashboard(
     # Ollama has no progress notes: the update in the script is not part of its format.
     assert [kind for kind, _ in shown] == ["text", "step", "step", "step", "text", "done"]
     assert ok(client.get(f"/api/dashboards/{dashboard}"))["spec"]["items"][0]["id"] == "kpi_total"
+    # Ollama's own chat API, with the context size set on every request.
+    assert set(fake.paths) == {"/api/chat"}
     first = fake.requests[0]
     assert first["model"] == "gemma4:12b" and first["stream"] is True
+    assert first["options"]["num_ctx"] == 32_768 and first["options"]["num_predict"] > 0
     assert (
         first["messages"][0]["role"] == "system"
         and "dashboard editor" in first["messages"][0]["content"]
@@ -482,32 +492,41 @@ def test_ollama_builds_the_same_dashboard(
     second = fake.requests[1]["messages"]
     call = second[-2]["tool_calls"][0]
     assert second[-2]["role"] == "assistant" and call["function"]["name"] == "describe_dataset"
+    assert call["function"]["arguments"] == {"dataset": "gifts"}  # an object, not a string
     assert second[-1] == {
         "role": "tool",
+        "tool_name": "describe_dataset",
         "tool_call_id": call["id"],
         "content": second[-1]["content"],
     }
     done = shown[-1][1]
-    assert (
-        done["provider"] == "ollama" and done["inputTokens"] == 3600 and done["outputTokens"] == 160
+    assert (done["provider"], done["inputTokens"], done["cachedTokens"], done["outputTokens"]) == (
+        "ollama",
+        3600,
+        2400,
+        160,
     )
 
 
-def test_ollama_with_too_small_a_context_says_how_to_fix_it(
+def test_ollama_context_size_is_set_and_a_full_context_is_reported(
     client_for: ClientFor,
     source: dict[str, Any],  # noqa: F811
 ) -> None:
     client = client_for()
     load(client, source)
     dashboard = new_dashboard(client)
-    fake = FakeModel(
-        "ollama", [lambda body: ([("call", "list_datasets", {})], "stop")], context_length=4096
-    )
+    # The context size goes with each request, so a default Ollama install works.
+    fake = FakeModel("ollama", [lambda body: ([("text", "Hello.")], "stop")])
+    use(client, fake, ollama_num_ctx=65_536)
+    ask(client, dashboard, "Hi")
+    assert fake.requests[0]["options"]["num_ctx"] == 65_536
+    # A reply that used nearly all of it may have missed the start of the conversation.
+    fake = FakeModel("ollama", [lambda body: ([("text", "Hm.")], "stop")], prompt_tokens=32_000)
     use(client, fake)
     shown = entries(ask(client, dashboard, "Hello"))
     notice = next(data for kind, data in shown if kind == "notice")
-    assert notice["level"] == "error" and "OLLAMA_CONTEXT_LENGTH=32768" in notice["text"]
-    assert not any(kind == "step" for kind, _ in shown)  # nothing ran on a cut-off prompt
+    assert notice["level"] == "error" and "no longer fits" in notice["text"]
+    assert "OLLAMA_NUM_CTX" in notice["text"]
 
 
 def test_budgets_and_guards(
@@ -566,16 +585,15 @@ def test_stop_ends_a_request_and_keeps_what_was_written(
     started = threading.Event()
 
     async def slow(request: httpx2.Request) -> httpx2.Response:
-        if request.url.path.endswith("/api/ps"):
-            return httpx2.Response(200, json={"models": []})
-
         async def body() -> Any:
-            yield b'data: {"choices":[{"index":0,"delta":{"content":"Working on it"}}]}\n\n'
+            yield b'{"message":{"role":"assistant","content":"Working on it"},"done":false}\n'
             started.set()
             await asyncio.sleep(30)
-            yield b"data: [DONE]\n\n"
+            yield b'{"message":{"role":"assistant","content":""},"done":true}\n'
 
-        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=body())
+        return httpx2.Response(
+            200, headers={"content-type": "application/x-ndjson"}, content=body()
+        )
 
     settings = make_settings()
     client.app.state.assistant_provider = OllamaProvider(settings, httpx2.MockTransport(slow))  # type: ignore[attr-defined]
@@ -698,6 +716,7 @@ def test_after_a_fallback_only_text_is_sent_back_from_before_it() -> None:
         ({"ollama_model": " "}, "OLLAMA_MODEL is empty"),
         ({"anthropic_effort": "extreme"}, "ANTHROPIC_EFFORT"),
         ({"assistant_max_steps": 0}, "ASSISTANT_MAX_STEPS"),
+        ({"ollama_num_ctx": 4096}, "OLLAMA_NUM_CTX"),
     ],
 )
 def test_assistant_settings_fail_fast(overrides: dict[str, Any], expected: str) -> None:

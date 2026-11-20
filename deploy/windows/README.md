@@ -38,14 +38,11 @@ Opsis reaches it at `http://host.docker.internal:11434` (`OLLAMA_URL`). Running
 Ollama natively uses the GPU; the `ollama` Compose profile runs it in a container
 instead, on the CPU.
 
-Ollama's default context (4,096 tokens) is too small for the assistant's instructions
-and tools. Give it more, once:
-
-1. Open **Settings > System > About > Advanced system settings > Environment Variables**.
-2. Under **User variables**, add `OLLAMA_CONTEXT_LENGTH` with the value `32768`.
-3. Quit Ollama from its tray icon and start it again.
-
-The assistant checks this and says what to do if the context is still too small.
+Nothing needs changing in Ollama itself: the assistant asks for a 32,768-token context
+with each request (`OLLAMA_NUM_CTX` in `.env`), which its instructions and tools need.
+The installer adds Ollama to Windows startup (`Ollama.lnk` in the Startup folder), so
+it usually runs in the tray already; `curl http://localhost:11434/api/version` shows
+whether it is.
 
 ## 4. Claude Code and Claude Desktop (MCP)
 

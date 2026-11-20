@@ -43,9 +43,6 @@ UPDATES_BETA = "thinking-display-updates-2026-08-18"
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # A tool input the SDK cannot parse at all is asked for again, this many times.
 JSON_RETRIES = 2
-# Ollama: the instructions and tools alone need about 10,000 tokens.
-OLLAMA_MIN_CONTEXT = 16_384
-OLLAMA_GOOD_CONTEXT = 32_768
 # Chat-template tokens a local model sometimes leaks into its text, such as
 # "<channel|>" or "<|tool_response>" (seen with gemma4).
 CONTROL_TOKEN = re.compile(r"<\|[a-z_]{2,30}\|?>|<[a-z_]{2,30}\|>")
@@ -368,7 +365,13 @@ def _forward(event: Any, emit: Emit) -> None:
 
 
 class OllamaProvider(Provider):
-    """Ollama through its OpenAI-compatible Chat Completions endpoint."""
+    """Ollama through its own chat API (/api/chat, streamed as JSON lines).
+
+    Its own API rather than the OpenAI-compatible one, because only this one can set
+    the context size per request: Ollama's default (4,096 tokens on most machines)
+    cuts off the assistant's instructions and tools, so a default install would not
+    work (decided at the M7 review).
+    """
 
     name = "ollama"
     one_item_per_call = True
@@ -377,6 +380,7 @@ class OllamaProvider(Provider):
     def __init__(self, settings: Settings, transport: httpx2.AsyncBaseTransport | None = None):
         self.url = settings.ollama_url.rstrip("/")
         self.model = settings.ollama_model.strip()
+        self.num_ctx = settings.ollama_num_ctx
         self.http = httpx2.AsyncClient(
             base_url=self.url,
             timeout=httpx2.Timeout(600.0, connect=10.0),
@@ -387,7 +391,10 @@ class OllamaProvider(Provider):
         return {"role": "user", "content": text}
 
     def tool_results(self, results: Sequence[ToolResult]) -> list[dict[str, Any]]:
-        return [{"role": "tool", "tool_call_id": r.call_id, "content": r.text} for r in results]
+        return [
+            {"role": "tool", "tool_name": r.name, "tool_call_id": r.call_id, "content": r.text}
+            for r in results
+        ]
 
     async def complete(self, call: Call, emit: Emit) -> Reply:
         body = {
@@ -405,57 +412,39 @@ class OllamaProvider(Provider):
                 for tool in sorted(call.tools, key=lambda t: t.name)
             ],
             "stream": True,
-            "stream_options": {"include_usage": True},
-            "max_tokens": call.max_tokens,
+            "options": {"num_ctx": self.num_ctx, "num_predict": call.max_tokens},
         }
         text: list[str] = []
-        calls: dict[int, dict[str, str]] = {}
-        finish = ""
-        usage: dict[str, Any] = {}
+        calls: list[tuple[str, str, Any]] = []
+        last: dict[str, Any] = {}
         thinking = False
         try:
-            async with self.http.stream("POST", "/v1/chat/completions", json=body) as response:
+            async with self.http.stream("POST", "/api/chat", json=body) as response:
                 if response.status_code != 200:
                     raw = (await response.aread()).decode("utf-8", errors="replace")
                     raise ProviderError(self._explain(response.status_code, raw))
                 async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
+                    if not line.strip():
                         continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    chunk = json.loads(data)
+                    chunk = json.loads(line)
                     if chunk.get("error"):
-                        raise ProviderError(self._explain(500, json.dumps(chunk)))
-                    usage = chunk.get("usage") or usage
-                    for choice in chunk.get("choices") or []:
-                        delta = choice.get("delta") or {}
-                        if (delta.get("reasoning") or delta.get("reasoning_content")) and not (
-                            thinking or text
-                        ):
-                            thinking = True
-                            emit("thinking", {"block": 0})
-                        if delta.get("content"):
-                            text.append(delta["content"])
-                            emit("delta", {"block": 0, "kind": "text", "text": delta["content"]})
-                        for position, part in enumerate(delta.get("tool_calls") or []):
-                            index = int(part.get("index", position))
-                            entry = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
-                            function = part.get("function") or {}
-                            if part.get("id"):
-                                entry["id"] = part["id"]
-                            if function.get("name") and not entry["name"]:
-                                entry["name"] = function["name"]
-                                emit(
-                                    "call",
-                                    {"block": index + 1, "id": entry["id"], "tool": entry["name"]},
-                                )
-                            arguments = function.get("arguments")
-                            if isinstance(arguments, dict):  # some servers send an object
-                                arguments = json.dumps(arguments)
-                            if arguments:
-                                entry["arguments"] += arguments
-                        finish = choice.get("finish_reason") or finish
+                        raise ProviderError(self._explain(500, line))
+                    message = chunk.get("message") or {}
+                    if message.get("thinking") and not (thinking or text):
+                        thinking = True
+                        emit("thinking", {"block": 0})
+                    if message.get("content"):
+                        text.append(message["content"])
+                        emit("delta", {"block": 0, "kind": "text", "text": message["content"]})
+                    for part in message.get("tool_calls") or []:
+                        function = part.get("function") or {}
+                        call_id = str(part.get("id") or f"call_{uuid.uuid4().hex[:16]}")
+                        name = str(function.get("name") or "")
+                        calls.append((call_id, name, function.get("arguments")))
+                        emit("call", {"block": len(calls), "id": call_id, "tool": name})
+                    if chunk.get("done"):
+                        last = chunk
+                        break
         except httpx2.HTTPError as error:
             raise ProviderError(
                 f"Could not reach Ollama at {self.url} ({type(error).__name__}). Check that it is "
@@ -463,45 +452,34 @@ class OllamaProvider(Provider):
             ) from None
         except ValueError:
             raise ProviderError("Ollama sent a reply that could not be read.") from None
-        return self._reply(CONTROL_TOKEN.sub("", "".join(text)), calls, finish, usage)
+        return self._reply(CONTROL_TOKEN.sub("", "".join(text)), calls, last)
 
-    def _reply(
-        self, text: str, pieces: dict[int, dict[str, str]], finish: str, usage: dict[str, Any]
-    ) -> Reply:
+    def _reply(self, text: str, found: list[tuple[str, str, Any]], last: dict[str, Any]) -> Reply:
         calls: list[ToolCall] = []
-        for index in sorted(pieces):
-            part = pieces[index]
-            try:
-                arguments = json.loads(part["arguments"] or "{}")
-            except ValueError:
-                arguments = None
+        for call_id, name, arguments in found:
+            raw = arguments if isinstance(arguments, str) else json.dumps(arguments)
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments or "{}")
+                except ValueError:
+                    arguments = None
             calls.append(
                 ToolCall(
-                    part["id"] or f"call_{uuid.uuid4().hex[:16]}",
-                    part["name"],
+                    call_id,
+                    name,
                     arguments if isinstance(arguments, dict) else None,
-                    raw=part["arguments"][:2000],
+                    raw=(raw or "")[:2000],
                 )
             )
         message: dict[str, Any] = {"role": "assistant", "content": text}
         if calls:
+            # Unreadable arguments go back as {}: the tool result says what went wrong.
             message["tool_calls"] = [
-                {
-                    "id": c.id,
-                    "type": "function",
-                    # Unreadable arguments go back as {}: Ollama would refuse the whole
-                    # history otherwise. The tool result says what went wrong.
-                    "function": {
-                        "name": c.name,
-                        "arguments": (pieces[i]["arguments"] or "{}")
-                        if c.arguments is not None
-                        else "{}",
-                    },
-                }
-                for i, c in zip(sorted(pieces), calls, strict=True)
+                {"id": c.id, "function": {"name": c.name, "arguments": c.arguments or {}}}
+                for c in calls
             ]
         stop = "tools" if calls else "end"
-        if finish == "length":
+        if last.get("done_reason") == "length":
             stop = "max_tokens"
         parts = [Part("text", text.strip())] if text.strip() else []
         parts += [Part("call", call=call) for call in calls]
@@ -509,15 +487,16 @@ class OllamaProvider(Provider):
             message=message if parts else None,  # an empty reply adds nothing to the history
             parts=parts,
             stop=stop,
-            input_tokens=int(usage.get("prompt_tokens") or 0),
-            output_tokens=int(usage.get("completion_tokens") or 0),
-            cached_tokens=int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0),
+            input_tokens=int(last.get("prompt_eval_count") or 0),
+            output_tokens=int(last.get("eval_count") or 0),
+            cached_tokens=int(last.get("prompt_eval_cached_count") or 0),
             model=self.model,
         )
 
     def _explain(self, status: int, raw: str) -> str:
         try:
-            message = str((json.loads(raw).get("error") or {}).get("message") or raw)
+            error = json.loads(raw).get("error")
+            message = str(error.get("message") if isinstance(error, dict) else error or raw)
         except (ValueError, AttributeError):
             message = raw
         message = message.strip()[:500]
@@ -532,32 +511,13 @@ class OllamaProvider(Provider):
         return f"Ollama returned an error ({status}): {message}"
 
     async def check(self, first_reply: Reply | None) -> None:
-        """Ollama's OpenAI-compatible endpoint cannot set the context size per request,
-        and its default (4,096 tokens on most machines) cuts off the instructions. Ask
-        Ollama what the loaded model runs with, and say how to fix it."""
-        try:
-            response = await self.http.get("/api/ps", timeout=5.0)
-            loaded = response.json().get("models") or [] if response.status_code == 200 else []
-        except (httpx2.HTTPError, ValueError):
-            return  # not Ollama, or an old one: nothing to check
-        wanted = {self.model, f"{self.model}:latest"}
-        for entry in loaded:
-            if entry.get("name") not in wanted and entry.get("model") not in wanted:
-                continue
-            context = int(entry.get("context_length") or 0)
-            if 0 < context < OLLAMA_MIN_CONTEXT:
-                raise ProviderError(
-                    f"Ollama runs {self.model} with room for {context:,} tokens, but the "
-                    f"assistant's instructions and tools need about 10,000. Set "
-                    f"OLLAMA_CONTEXT_LENGTH={OLLAMA_GOOD_CONTEXT} where Ollama runs and restart "
-                    "it (on Windows: set it as a user environment variable, then quit and "
-                    "reopen the Ollama app)."
-                )
-            if first_reply is not None and first_reply.input_tokens >= context * 0.95:
-                raise ProviderError(
-                    "This conversation no longer fits in the model's context. Start a new "
-                    "conversation."
-                )
+        """Ollama drops the oldest messages of a conversation that no longer fits its
+        context, so a reply that used nearly all of it may have missed the request."""
+        if first_reply is not None and first_reply.input_tokens >= self.num_ctx * 0.95:
+            raise ProviderError(
+                f"This conversation no longer fits in the model's context ({self.num_ctx:,} "
+                "tokens). Start a new conversation, or raise OLLAMA_NUM_CTX."
+            )
 
     async def aclose(self) -> None:
         await self.http.aclose()

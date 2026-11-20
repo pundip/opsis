@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-20 (end of Milestone 7)
+Last updated: 2026-11-20 (M7 review changes)
 
 ## Milestone status
 
@@ -14,8 +14,33 @@ Last updated: 2026-11-20 (end of Milestone 7)
 | M4 Dashboards and visuals | Done, reviewed |
 | M5 MCP | Done, reviewed |
 | M6 Auth and sharing | Done, reviewed; review changes done at the start of M7 |
-| M7 In-app assistant | Done, awaiting review |
+| M7 In-app assistant | Done, reviewed; review changes done, awaiting review |
 | M8 More connectors and hardening | Not started |
+
+## M7 review changes
+
+Done after the M7 review, before M8:
+
+- **Admin-set restrictions are admin-only, list included.** Once an admin restricts a dataset, its owner can neither change who is on its list nor lift it, and sees it read-only (ADR-024).
+- **Ollama through its own chat API** (`/api/chat`) instead of the OpenAI-compatible endpoint, with the context size sent on every request: `OLLAMA_NUM_CTX`, default 32,768, at least 16,384 (ADR-025). A default Ollama install now works, with nothing to set where Ollama runs. The one-visual-per-call instruction for Ollama stays. The context check against `/api/ps` is gone; instead a reply that used 95% or more of the context is reported, because Ollama then drops the oldest messages. The smoke tests' fake model speaks the native API and refuses a request without `num_ctx`.
+- **The test alias is gone** (`ollama rm gemma4-opsis-32k`), and your `.env` now says `OLLAMA_MODEL=gemma4:12b` (it was already the default).
+- **Refusal fallbacks** stay on by default. The real Claude check is skipped for now.
+
+**Which Ollama the M7 run used.** The Ollama for Windows app on this laptop: `C:\Users\prakashm\AppData\Local\Programs\Ollama\ollama.exe`, version 0.40.16. Its server process (PID 15024) and its tray app (PID 11568) started at 7:42 PM on 19 November, most likely when you signed in: the installer put `Ollama.lnk` in your Windows Startup folder on 21 October. Its log (`%LOCALAPPDATA%\Ollama\server.log`) opens that session with "Listening on [::]:11434 (version 0.40.16)" at 19:42:05, and records all 23 of my chat requests on 20 November between 13:50 and 15:00: the first ones from my shell (`::1`, http://localhost:11434), the rest from the api container through `http://host.docker.internal:11434` (logged as `127.0.0.1`), and the four "tool call parsing failed" warnings. The same process is the one running now, so the re-run below used it too.
+
+**The real check again,** against that Ollama at http://host.docker.internal:11434 with the default settings (`gemma4:12b`, `OLLAMA_NUM_CTX=32768`, `ASSISTANT_TIMEOUT_SECONDS=600`), three times, through the panel's API, each time on a new dashboard: "Build a dashboard of giving from the gifts dataset: the total amount, the amount by fund, and the amount by month." Success means the three requested visuals exist and each returns data. Dropped tool calls are counted twice: the panel's notes that a call did not arrive, and Ollama's own "tool call parsing failed" warnings in its log.
+
+| Attempt | Time | Dashboard built | Model calls | Tool calls | Refused by validation | Dropped tool calls (panel / Ollama log) | Tokens in (cached) / out |
+|---|---|---|---|---|---|---|---|
+| 1 | 2 min 31 s | yes: KPI card, bar chart by fund, line chart by month, each with data | 7 | 6 | 1 | 0 / 0 | 49,158 (40,543) / 1,115 |
+| 2 | 2 min 21 s | yes, the same three | 7 | 6 | 1 | 0 / 0 | 49,269 (44,574) / 1,228 |
+| 3 | 3 min 4 s | yes, the same three | 7 | 6 | 1 | 0 / 0 | 49,297 (44,581) / 1,572 |
+
+- **3 of 3 succeeded**, in 2 min 21 s to 3 min 4 s (the M7 run took 5 min 37 s through the OpenAI-compatible endpoint). **No dropped tool calls:** no retries in the panel and no "tool call parsing failed" in Ollama's log.
+- Each build lost one call the same way: the model first wrote the line chart's time field as a bare object instead of a list of one, validation refused it at `/items/2/bindings/x`, and its next call was right.
+- **An experiment, reverted:** to save that call I showed the list form in `list_visuals` and the guide, and ran three more builds. It made things worse: 2 of 3 built, Ollama dropped 3 calls (gemma4 writes `x:[{...}]` in its own tool-call format with one bracket too many), and one build ran out of the 10-minute budget after a call that thought for 8 minutes. The code is back to what the first three attempts ran.
+
+**Verified:** 253 backend tests pass (new or changed: the context size sent to Ollama and its setting, the report of a full context, the native request and history shapes, and an admin's restriction refusing the owner both ways); `ruff check`, `ruff format --check` and `mypy --strict` pass. `tsc`, ESLint and 48 frontend tests pass. `npm run smoke` passed at http://localhost:8080, at http://localhost:8088/opsis/ and in server mode, the assistant test included: through Ollama's native API at the root and /opsis (the fake model now refuses a request without `num_ctx`), through Claude's in server mode. The real Claude check was skipped, as agreed.
 
 ## M7 In-app assistant
 
@@ -33,7 +58,7 @@ Last updated: 2026-11-20 (end of Milestone 7)
 - **Conversations** per person per dashboard, in Postgres (migration 0009): the provider's history byte for byte, and the panel's entries. A request runs on its own, so closing the panel does not stop it; **Stop** does.
 - **The Assistant tab** in the editor: streaming replies, progress notes, each tool call as a step you can open, **Undo** on each change and **Undo all of this** per request, Stop, New conversation, and the selected visual as context. Send waits until your own changes are saved. The editor reloads the assistant's versions as they land, without its banner while the tab is open. The disabled Assistant button in the header is gone.
 - **Settings:** `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` (default `claude-opus-5-5`), `ANTHROPIC_EFFORT`, `ANTHROPIC_FALLBACKS`, `OLLAMA_URL`, `OLLAMA_MODEL` (default `gemma4:12b`), `ASSISTANT_MAX_STEPS`, `ASSISTANT_MAX_OUTPUT_TOKENS`, `ASSISTANT_TIMEOUT_SECONDS`, `ASSISTANT_MAX_ROWS`. `ASSISTANT_PROVIDER=anthropic` without a key fails fast. The `ollama` Compose image is pinned (0.40.16) and given a 32k context.
-- **Ollama's context:** its OpenAI-compatible endpoint cannot set the context size, and its default (4,096 tokens on this laptop) cuts off the assistant's instructions and tools. The assistant detects that and says how to fix it (`OLLAMA_CONTEXT_LENGTH=32768`); the README and the Windows guide say so too.
+- **Ollama's context** (replaced at the M7 review, see above): its OpenAI-compatible endpoint cannot set the context size, and its default (4,096 tokens on this laptop) cuts off the assistant's instructions and tools, so M7 detected that and said to set `OLLAMA_CONTEXT_LENGTH=32768`.
 - **Small models:** gemma4 12B writes long nested tool calls that Ollama cannot convert to JSON, and Ollama then drops the call (its log says "tool call parsing failed"). So with Ollama the assistant asks for one dashboard item per call, and a reply that is empty or only announces a step is answered with a request to make the call again, at most twice a request, with a note in the panel.
 - **Tests:** a scripted fake model (`e2e/fake-llm.mjs`) streams like both APIs and refuses what the real Claude API refuses (forced tool use, thinking turned off, sampling parameters). The smoke run plugs it in at the root and the sub-path (`compose.fakellm.yml`, Ollama's API) and in server mode (Claude's API), then puts your stack back as `.env` has it.
 
@@ -42,7 +67,7 @@ Last updated: 2026-11-20 (end of Milestone 7)
 - **Backend, automated:** 252 pytest tests pass (20 new in `tests/test_assistant.py`; `tests/test_review_m6.py` and updated M6 tests cover the review changes); `ruff check`, `ruff format --check` and `mypy --strict` pass. The assistant tests run both providers through their real clients against scripted fake servers (the Anthropic SDK parses the fake's event stream) and cover: building a dashboard step by step; what Claude is sent (adaptive thinking with updates, effort, fallbacks, cache breakpoints, sorted tools with eager streaming, no sampling parameters or forced tool choice, the beta headers); the history sent back append-only, with Claude's thinking blocks and signatures unchanged; follow-ups that see the whole conversation; token totals and the audit; refusals (nothing kept), a fallback in mid-reply (the declined part not sent back), API errors; tool calls cut off at max_tokens (answered, not run); the step budget; calls on another dashboard, unreadable arguments and unknown tools; Ollama's context check; Stop (keeps the partial text) and one request at a time; empty replies and replies whose tool call was dropped; template tokens a local model leaks; who may use it (viewers, other people's conversations, access tokens, the flag off); row and length caps; the context block; settings that fail fast.
 - **Frontend, automated:** `tsc`, ESLint and 48 Vitest tests pass (3 new, for the event stream and the live view).
 - **Browser, automated with `npm run smoke`, all passed** at http://localhost:8080, at http://localhost:8088/opsis/ behind the proxytest nginx, and in server mode behind it (sign-in, the worker, and the assistant on Claude's API). The new assistant test asks the fake model, from the panel, to build a dashboard from a fresh dataset: the reply streams, Stop shows while it works, three steps appear (one opened to show its input), the canvas follows along without a banner, Undo restores the empty dashboard as version 3, the history reads user, assistant, user, and after a reload the conversation and its token line are still there, with no script errors or CSP violations. At the root and /opsis this goes through the Ollama provider, in server mode through Claude's, whose progress note shows too. The earlier tests (dashboards, MCP with live updates, tokens, local mode; in server mode sign-in, sharing, share links, Google and tokens) pass with the M6 review changes in.
-- **With a real model, Ollama:** `gemma4:12b` on this laptop (through a 32k-context copy of it, see Q4), asked through the panel's API to "Build a dashboard of giving from the gifts dataset: the total amount, the amount by fund, and the amount by month". It described the dataset, listed the visuals, then added a KPI card, a bar chart by fund and a line chart by month, one per call. Its first line chart was refused by validation (the x binding was not a list) and it fixed that from the error message. 7 model calls, 6 tool calls, 5 min 37 s, 49,553 input tokens (40,814 of them cached) and 2,583 output tokens; each visual returns data, and the history shows three versions by the assistant with its notes. Before the one-item-per-call change, two runs stopped at that step: Ollama's log showed it had dropped the model's long `patch_dashboard` call ("gemma4 tool call parsing failed"). So with this model a build works, slowly, but not every time.
+- **With a real model, Ollama:** `gemma4:12b` on this laptop (through a 32k-context copy of it, since removed), asked through the panel's API to "Build a dashboard of giving from the gifts dataset: the total amount, the amount by fund, and the amount by month". It described the dataset, listed the visuals, then added a KPI card, a bar chart by fund and a line chart by month, one per call. Its first line chart was refused by validation (the x binding was not a list) and it fixed that from the error message. 7 model calls, 6 tool calls, 5 min 37 s, 49,553 input tokens (40,814 of them cached) and 2,583 output tokens; each visual returns data, and the history shows three versions by the assistant with its notes. Before the one-item-per-call change, two runs stopped at that step: Ollama's log showed it had dropped the model's long `patch_dashboard` call ("gemma4 tool call parsing failed"). So with this model a build works, slowly, but not every time.
 - **With a real model, Claude:** not run. There is no `ANTHROPIC_API_KEY` here, so Claude was exercised only through the fake (in pytest and in the server-mode browser run). See Q2.
 
 Not verified:
@@ -71,6 +96,7 @@ M3.5 benchmark, in one line: 5 million rows on this laptop, typical queries 77 t
 - **M4:** approved. Field selector is fine for v1 (drag-and-drop to the M8 backlog). Playwright smoke test at the start of M5, at both URLs, replacing manual browser checks from then on. Combo chart gets an optional right-hand axis per measure. Filter and drill state in the URL in M6 with share links. MCP tool descriptions and errors must work for a smaller model: anything Sonnet struggles with counts as a tool design issue.
 - **M5:** approved. REST previews apply the RLS filter, or refuse where a rule cannot be applied. Access tokens on the REST API in M6 with the MCP scopes. Keep MCP stateless. In M6, verify `MCP_AUTH=token` against the running container in server mode through the proxytest profile (done).
 - **M6:** approved. Dataset owners restrict their datasets; admins can override, and only an admin lifts an admin's restriction. Sharing is limited to a dashboard's owner and admins. Restricted data must not reach people outside its list through a dashboard, with warnings in the share dialog, and the same rules in the MCP sharing tools. Real Google sign-in becomes a checklist in the Proxmox guide and part of the M8 install check. The Sonnet test has not been run yet. (All done at the start of M7.)
+- **M7:** approved. Admin-set restrictions are admin-only, list included. The real Claude check is skipped for now. Ollama moves to its own chat API with the context size set per request (`OLLAMA_NUM_CTX`, default 32768), keeping one visual per call; then the test alias goes and `OLLAMA_MODEL=gemma4:12b`. Refusal fallbacks stay on by default. (All done; see "M7 review changes".)
 - **For the LXC work (noted at the M2 review):** the server will use port forwarding to the LXC. Check then what source address the api sees for proxied requests, because that is the address `TRUSTED_PROXIES` must list (it may be the forwarder or the Docker gateway, not the reverse proxy itself).
 
 ## What exists
@@ -209,7 +235,7 @@ Not verified:
 - ADR-021: field wells are selectors (accepted for v1); cross-filter and drill state live in the view (now also in the URL), not in the spec; the chart palette and mark rules are fixed in code.
 - ADR-022: the MCP endpoint is stateless with JSON responses (kept at the M5 review); JSON Patch is our own code.
 - ADR-023 (new, M6): `ADMIN_INITIAL_PASSWORD` is optional (Google or `reset-link` instead); Google's ID token is verified with `joserfc` (Authlib's JOSE library) and the HTTP calls use the standard library; `GOOGLE_DISCOVERY_URL` exists for testing; invitations and resets are links the admin passes on until email arrives (M8); the audit log page is available in local mode too.
-- ADR-025 (new, M7): the assistant uses 17 of the 23 MCP tools (no creating, publishing or sharing from the panel); only people in the editor can use it, not access tokens; Ollama needs `OLLAMA_CONTEXT_LENGTH` because its OpenAI-compatible endpoint cannot set the context size; our own tool loop rather than the SDK's beta tool runner, so one loop serves both providers.
+- ADR-025 (new, M7): the assistant uses 17 of the 23 MCP tools (no creating, publishing or sharing from the panel); only people in the editor can use it, not access tokens; Ollama through its own chat API (`/api/chat`, with `num_ctx` on every request) rather than the OpenAI-compatible endpoint the brief names (decided at the M7 review); our own tool loop rather than the SDK's beta tool runner, so one loop serves both providers.
 - ADR-015: the task runner is npm scripts, not `tasks.py`; `httpx2` for the test client (approved), and now also for Ollama.
 
 ## Open issues and notes
@@ -229,7 +255,7 @@ Not verified:
 - Merge refresh does not remove rows deleted in the source. One job runs at a time. Datasets cannot be edited after creation.
 - Assistant conversations are kept until their dashboard or their person is deleted; there is no clean-up or export yet.
 - A request to the assistant runs in the api process (R5): a restart stops it (Stop is pressed for it, and after 10 seconds it is cancelled). The next request carries on with the conversation.
-- A local model is slow on this laptop (see the Ollama result above), so `ASSISTANT_TIMEOUT_SECONDS` may need raising for local models.
+- A local model is slower than Claude: `gemma4:12b` builds a three-visual dashboard in 2.5 to 3 minutes on this laptop. After a dropped tool call it can think for several minutes, and one such build ran out of the 10-minute budget (`ASSISTANT_TIMEOUT_SECONDS`).
 - Risks still open: R2 (DuckDB memory in the api process), R3 (snapshot rewrite cost), R5 (single api process), R8 (hot reload on the Windows filesystem). R10 (share links on RLS datasets) is closed: links deny by default, never inherit an exemption, and cannot exceed their maker's access.
 
 ## Backlog agreed at reviews
@@ -239,11 +265,8 @@ Not verified:
 
 ## Questions for review
 
-- **Q1. Lists of admin-set restrictions.** As built, an admin's restriction can only be lifted by an admin, but the dataset's owner can still change who is on its list (your answer, read literally). Should an admin-set restriction be admin-only entirely, list included?
-- **Q2. Claude for real.** I could not run the assistant against the real Claude API. To check it, put a key in `.env` yourself (`ASSISTANT_PROVIDER=anthropic`, `ANTHROPIC_API_KEY=...`) and tell me, and I will run the same "build a dashboard" check with it. Please do not paste the key into the chat.
-- **Q3. Ollama's API.** The brief names Ollama's OpenAI-compatible endpoint, which cannot set the context size, so Ollama must run with `OLLAMA_CONTEXT_LENGTH=32768` or more. Ollama's own API (`/api/chat`) can set it per request and would work with a default install. Keep the OpenAI-compatible endpoint (as now), or switch?
-- **Q4. The model alias in your Ollama.** To test with a 32k context without changing how your Ollama runs, I created `gemma4-opsis-32k`, a copy of `gemma4:12b` with a larger context (no download; `ollama rm gemma4-opsis-32k` removes it). Your `.env` is unchanged, so the assistant there still uses `gemma4:12b` and will say the context is too small until you set `OLLAMA_CONTEXT_LENGTH` or `OLLAMA_MODEL=gemma4-opsis-32k`. Which do you prefer?
-- **Q5. Refusal fallbacks** are on by default for Claude (a declined request is re-run on the model Anthropic recommends, and the panel says so). Keep them on?
+- **Q1. The extra call per build.** The time field written without its list could be accepted as a list of one in the tools agents use (`"x": {...}` read as `"x": [{...}]`), as they already forgive a few slips such as numbers sent as text. That would save about 20 seconds per build with gemma4. Do it in M8, or keep the spec strict?
+- **Q2. Test leftovers in your stack.** Ten dashboards from the real-model checks (four "Real model check ...", six "Ollama check 1" to "3"), and a "Smoke mwh0pics" dashboard with its `smoke_mwh0pics` dataset and connection, left by an interrupted smoke run on 15 November (the assistant lists that dataset among yours). "Gifts overview" and "Giving overview (built over MCP)" are not mine to judge, so they stay. Shall I delete the others?
 
 ## Exact next step
 

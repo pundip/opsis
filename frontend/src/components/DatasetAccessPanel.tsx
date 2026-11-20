@@ -1,6 +1,7 @@
 // Who may use a dataset (sign-in modes). Unrestricted: everyone who builds.
 // Restricted: admins, the dataset's owner, and the people and groups on its list.
-// Its owner and admins manage this; only an admin lifts a restriction an admin set.
+// Its owner and admins manage this. A restriction an admin set is the admins' alone:
+// its owner then sees it read-only (decided at the M7 review).
 // Dashboards built on it stay viewable by those they are shared with, so the panel
 // also lists dashboards that show its data outside the list.
 import { useState } from "react";
@@ -16,8 +17,10 @@ export function DatasetAccessPanel({ datasetId }: { datasetId: string }) {
   const data = access.data;
   const current = draft ?? (data ? { restricted: data.restricted, grants: data.grants.map((g) => g.grantee) } : null);
   if (!data || !current) return <ErrorNote error={access.error} />;
-  if (!data.canManage) return null;
-  const locked = data.restricted && data.restrictedByAdmin && !data.canLift;
+  // Only admins and the owner get here (DatasetDetail decides); the owner of an
+  // admin-set restriction may look but not change.
+  const locked = !data.canManage;
+  if (locked && !(data.restricted && data.restrictedByAdmin)) return null;
   const toggle = (grantee: string) =>
     setDraft({
       ...current,
@@ -35,14 +38,14 @@ export function DatasetAccessPanel({ datasetId }: { datasetId: string }) {
           type="checkbox"
           className="mt-1"
           checked={current.restricted}
-          disabled={locked && current.restricted}
+          disabled={locked}
           onChange={(e) => setDraft({ ...current, restricted: e.target.checked })}
         />
         <span>
           Restricted: only admins, the owner, and the people and groups below may query it or build on it.
           {locked && (
             <span className="block text-xs text-amber-700 dark:text-amber-400">
-              An admin restricted it, so only an admin can lift the restriction. You can still change the list.
+              An admin restricted it, so only an admin can change who is on its list or lift the restriction.
             </span>
           )}
         </span>
@@ -51,7 +54,7 @@ export function DatasetAccessPanel({ datasetId }: { datasetId: string }) {
         <div className="mb-3 grid gap-1 sm:grid-cols-2">
           {(directory.data?.groups ?? []).map((group) => (
             <label key={group.id} className="flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={current.grants.includes(`group:${group.id}`)} onChange={() => toggle(`group:${group.id}`)} />
+              <input type="checkbox" disabled={locked} checked={current.grants.includes(`group:${group.id}`)} onChange={() => toggle(`group:${group.id}`)} />
               {group.name} <span className="text-xs text-zinc-500">(group)</span>
             </label>
           ))}
@@ -59,7 +62,7 @@ export function DatasetAccessPanel({ datasetId }: { datasetId: string }) {
             .filter((user) => user.role !== "admin" && user.id !== data.owner?.id)
             .map((user) => (
               <label key={user.id} className="flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={current.grants.includes(`user:${user.id}`)} onChange={() => toggle(`user:${user.id}`)} />
+                <input type="checkbox" disabled={locked} checked={current.grants.includes(`user:${user.id}`)} onChange={() => toggle(`user:${user.id}`)} />
                 {user.name} <span className="text-xs text-zinc-500">{user.email}</span>
               </label>
             ))}
@@ -83,9 +86,11 @@ export function DatasetAccessPanel({ datasetId }: { datasetId: string }) {
         </div>
       )}
       <ErrorNote error={save.error ?? directory.error} />
-      <Button variant="primary" disabled={draft === null} busy={save.isPending} onClick={() => draft && save.mutate(draft, { onSuccess: () => setDraft(null) })}>
-        Save access
-      </Button>
+      {!locked && (
+        <Button variant="primary" disabled={draft === null} busy={save.isPending} onClick={() => draft && save.mutate(draft, { onSuccess: () => setDraft(null) })}>
+          Save access
+        </Button>
+      )}
     </Card>
   );
 }

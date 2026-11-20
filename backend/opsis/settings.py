@@ -140,6 +140,9 @@ class Settings(BaseSettings):
     anthropic_base_url: str = ""
     ollama_url: str = "http://host.docker.internal:11434"
     ollama_model: str = "gemma4:12b"
+    # Context size asked of Ollama with each request. The instructions and tools
+    # alone take about 10,000 tokens; a dashboard build about 25,000.
+    ollama_num_ctx: int = Field(default=32_768, ge=16_384, le=1_048_576)
     # Budgets for one request to the assistant: tool calls, tokens the model may
     # write, wall-clock time, and rows of a tool result shown to the model.
     assistant_max_steps: int = Field(default=25, ge=1, le=200)

@@ -58,32 +58,34 @@ def test_restricted_data_and_sharing_rights(
     assert ok(ann.get(f"/api/datasets/{donors}"))["createdBy"] == ann_id
     assert gifts
 
-    # ---- 1. The owner restricts her dataset; an admin's restriction only an admin lifts.
+    # ---- 1. The owner restricts her dataset; an admin's restriction is the admins' alone.
     finance = ok(admin.post("/api/groups", json={"name": "Finance", "memberIds": [ben_id]}), 201)
     in_finance = [f"group:{finance['id']}"]
     assert ben.put(f"/api/datasets/{donors}/access", json={"restricted": True}).status_code == 403
     mine = ok(
         ann.put(f"/api/datasets/{donors}/access", json={"restricted": True, "grants": in_finance})
     )
-    assert (mine["restricted"], mine["restrictedByAdmin"], mine["canLift"]) == (True, False, True)
+    assert (mine["restricted"], mine["restrictedByAdmin"], mine["canManage"]) == (True, False, True)
     assert mine["owner"]["id"] == ann_id and mine["restrictedBy"] == "ann"  # her display name
     assert (
         ok(ann.put(f"/api/datasets/{donors}/access", json={"restricted": False}))["restricted"]
         is False
     )
     ok(admin.put(f"/api/datasets/{donors}/access", json={"restricted": True, "grants": in_finance}))
-    lifted = ann.put(
-        f"/api/datasets/{donors}/access", json={"restricted": False, "grants": in_finance}
-    )
-    assert (
-        lifted.status_code == 403 and "only an admin can lift" in lifted.json()["error"]["message"]
-    )
-    kept = ok(
-        ann.put(f"/api/datasets/{donors}/access", json={"restricted": True, "grants": in_finance})
-    )
-    assert (
-        kept["restrictedByAdmin"] is True and kept["canLift"] is False
-    )  # the list stays hers to edit
+    # Decided at the M7 review: once an admin restricts it, the owner can neither lift
+    # the restriction nor change its list, and sees it read-only.
+    with_cat = [*in_finance, f"user:{cat_id}"]
+    for attempt in (
+        {"restricted": False, "grants": in_finance},
+        {"restricted": True, "grants": with_cat},
+    ):
+        refused = ann.put(f"/api/datasets/{donors}/access", json=attempt)
+        assert refused.status_code == 403
+        assert "only an admin can change who is on its list" in refused.json()["error"]["message"]
+    seen = ok(ann.get(f"/api/datasets/{donors}/access"))
+    assert (seen["restrictedByAdmin"], seen["canManage"]) == (True, False)
+    assert [g["grantee"] for g in seen["grants"]] == in_finance  # unchanged
+    assert ok(admin.get(f"/api/datasets/{donors}/access"))["canManage"] is True
     # The owner can use her dataset even though she is not on its list; others cannot.
     query = {"query": {"dataset": "donors", "measures": ["donors.row_count"]}}
     assert ok(ann.post("/api/query", json=query))["rows"] == [[40]]

@@ -112,7 +112,7 @@ The dashboard editor has an **Assistant** tab: ask it to build a dashboard, chan
 
 It runs on one of two providers, set in `.env`:
 
-- **Ollama** (`ASSISTANT_PROVIDER=ollama`, the laptop default): a model on your own machine. Install Ollama, pull a model that can call tools (`ollama pull gemma4:12b`), and set `OLLAMA_MODEL`. Ollama must run with a larger context than its default, or the assistant's instructions get cut off: set `OLLAMA_CONTEXT_LENGTH=32768` where Ollama runs and restart it (on Windows, as a user environment variable, then quit and reopen the Ollama app). The assistant says so if it is too small. The `ollama` Compose profile sets it for you; use `OLLAMA_URL=http://ollama:11434` with that profile.
+- **Ollama** (`ASSISTANT_PROVIDER=ollama`, the laptop default): a model on your own machine. Install Ollama, pull a model that can call tools (`ollama pull gemma4:12b`), and set `OLLAMA_MODEL`. Nothing else needs setting up in Ollama: the assistant uses Ollama's own chat API and asks for a 32,768-token context with each request (`OLLAMA_NUM_CTX`), which its instructions and tools need. With the `ollama` Compose profile, use `OLLAMA_URL=http://ollama:11434`. Local models are slower and less reliable than Claude: on this laptop `gemma4:12b` takes a few minutes to build a small dashboard.
 - **Claude** (`ASSISTANT_PROVIDER=anthropic`, the server default): set `ANTHROPIC_API_KEY`, and optionally `ANTHROPIC_MODEL` (default `claude-opus-5-5`) and `ANTHROPIC_EFFORT` (`low` to `max`, default `medium`). A request Claude's safety checks decline is re-run on the model Anthropic recommends for it, and the panel says when that happened (`ANTHROPIC_FALLBACKS=false` turns it off).
 
 Each request has budgets: `ASSISTANT_MAX_STEPS` tool calls (25), `ASSISTANT_MAX_OUTPUT_TOKENS` (100,000), `ASSISTANT_TIMEOUT_SECONDS` (600) and `ASSISTANT_MAX_ROWS` rows of a result shown to the model (100). When one runs out the assistant stops and says so; ask it to continue. Token use is shown under each request and recorded in the audit log.
@@ -201,7 +201,7 @@ Everything is set in `.env`. The two templates document each value. After a chan
 | `FEATURE_EMAIL` | SMTP invites, resets and snapshots | `false` | `false` |
 | `FEATURE_ASSISTANT` | In-app AI panel | `true` | `true` |
 | `ASSISTANT_PROVIDER` | `anthropic` or `ollama` | `ollama` | `anthropic` |
-| `OLLAMA_URL`, `OLLAMA_MODEL` | Where Ollama is, and the model to use | `http://host.docker.internal:11434`, `gemma4:12b` | same, if used |
+| `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX` | Where Ollama is, the model to use, and the context size asked for with each request | `http://host.docker.internal:11434`, `gemma4:12b`, `32768` | same, if used |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Claude for the assistant | empty, `claude-opus-5-5` | required for `anthropic` |
 | `ANTHROPIC_EFFORT`, `ANTHROPIC_FALLBACKS` | How much Claude thinks; re-run declined requests on another model | `medium`, `true` | same |
 | `ASSISTANT_MAX_STEPS`, `ASSISTANT_MAX_OUTPUT_TOKENS`, `ASSISTANT_TIMEOUT_SECONDS`, `ASSISTANT_MAX_ROWS` | Budgets for one request to the assistant | `25`, `100000`, `600`, `100` | same |

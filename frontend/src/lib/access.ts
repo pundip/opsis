@@ -204,8 +204,8 @@ export interface DatasetAccess {
   restrictedByAdmin: boolean;
   /** Dashboards that show this dataset's data outside its list, or through links. */
   exposures: { id: string; title: string; outside: string[]; shareLinks: number }[];
+  /** False for the owner of a dataset an admin restricted: only admins change it. */
   canManage?: boolean;
-  canLift?: boolean;
 }
 
 export function useDatasetAccess(id: string, enabled: boolean) {

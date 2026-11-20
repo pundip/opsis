@@ -108,9 +108,6 @@ services:
   ollama:
     image: ollama/ollama:0.40.16
     profiles: ["ollama"]
-    environment:
-      # The assistant's instructions and tools need more than Ollama's default context.
-      OLLAMA_CONTEXT_LENGTH: "32768"
     volumes:
       - ollama:/root/.ollama
     restart: unless-stopped

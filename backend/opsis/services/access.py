@@ -609,10 +609,18 @@ def require_datasets(db: Session, principal: Principal, names: set[str]) -> None
         )
 
 
+def admin_locked(dataset: Dataset) -> bool:
+    """An admin restricted this dataset: only admins change its list or lift it."""
+    return dataset.restricted and dataset.restricted_by_admin
+
+
 def may_manage_dataset(principal: Principal, dataset: Dataset) -> bool:
-    """The dataset's owner (with an editing role) and admins manage its restriction."""
+    """Admins manage any dataset's restriction. Its owner (with an editing role)
+    manages it too, unless an admin restricted it (decided at the M7 review)."""
     return principal.is_admin or (
-        dataset_owner_of(dataset) == principal.user_id and principal.can(Permission.DATASETS_EDIT)
+        dataset_owner_of(dataset) == principal.user_id
+        and principal.can(Permission.DATASETS_EDIT)
+        and not admin_locked(dataset)
     )
 
 
@@ -659,7 +667,6 @@ def dataset_grants(db: Session, dataset: Dataset, actor: Principal | None = None
     }
     if actor is not None:
         result["canManage"] = may_manage_dataset(actor, dataset)
-        result["canLift"] = actor.is_admin or not dataset.restricted_by_admin
     return result
 
 
@@ -668,22 +675,22 @@ def set_dataset_grants(
 ) -> dict[str, Any]:
     """Restrict a dataset, change its list, or lift the restriction.
 
-    Its owner and admins may; an admin's restriction can only be lifted by an admin,
-    and an admin saving a restriction makes it theirs."""
+    Its owner and admins may. A restriction an admin set is the admins' alone: only
+    an admin changes its list or lifts it. An admin saving a restriction makes it
+    admin-set."""
+    if admin_locked(dataset) and not actor.is_admin:
+        raise ApiError(
+            403,
+            "forbidden",
+            "An admin restricted this dataset, so only an admin can change who is on its "
+            "list or lift the restriction.",
+        )
     if not may_manage_dataset(actor, dataset):
         raise ApiError(
             403,
             "forbidden",
             "Only the dataset's owner (the person who created it) or an admin can change "
             "who may use it.",
-        )
-    lifting = dataset.restricted and not restricted
-    if lifting and dataset.restricted_by_admin and not actor.is_admin:
-        raise ApiError(
-            403,
-            "forbidden",
-            "An admin restricted this dataset, so only an admin can lift the "
-            "restriction. You can still change who is on its list.",
         )
     checked = [check_grantee(db, g, f"/grants/{i}") for i, g in enumerate(grantees)]
     before = {"restricted": dataset.restricted, "byAdmin": dataset.restricted_by_admin}
