@@ -33,6 +33,23 @@ export function schemaDefaults(schema: ConfigSchema): Values {
   return values;
 }
 
+/** Whether a field applies to the current choices ("x-show-when"). */
+function shown(schema: ConfigSchema, property: JsonSchemaProperty, values: Values): boolean {
+  const when = property["x-show-when"];
+  if (!when) return true;
+  return Object.entries(when).every(([name, wanted]) => (values[name] ?? schema.properties[name]?.default) === wanted);
+}
+
+/** The values of the fields that apply: a field hidden by a choice is not sent. */
+export function visibleValues(schema: ConfigSchema, values: Values): Values {
+  return Object.fromEntries(
+    Object.entries(values).filter(([name]) => {
+      const property = schema.properties[name];
+      return !property || shown(schema, property, values);
+    }),
+  );
+}
+
 /** Reads a small local file (a key file) into a field, in the browser. */
 function FileTextButton(props: { id: string; accept: string; onText: (text: string, name: string) => void }) {
   const [problem, setProblem] = useState<string | null>(null);
@@ -154,7 +171,7 @@ export function SchemaForm(props: Props) {
         <Select id={id} value={String(value ?? "")} onChange={(e) => set(name, e.target.value)}>
           {property.enum.map((option) => (
             <option key={option} value={option}>
-              {option}
+              {property["x-enum-labels"]?.[option] ?? option}
             </option>
           ))}
         </Select>
@@ -195,6 +212,7 @@ export function SchemaForm(props: Props) {
   return (
     <div className="space-y-4">
       {Object.entries(schema.properties).map(([name, property]) => {
+        if (!shown(schema, property, values)) return null;
         const id = `${idPrefix}-${name}`;
         return (
           <Field

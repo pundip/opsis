@@ -16,7 +16,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from opsis.connectors.base import ConnectorError, ReadOptions, RefreshMode
+from opsis.connectors.base import ConnectorError, ReadOptions, ReconnectNeeded, RefreshMode
 from opsis.db.models import Connection, Dataset, Job, Snapshot
 from opsis.errors import JobError
 from opsis.services import connections, models
@@ -74,6 +74,12 @@ def run_refresh(db: Session, job: Job, settings: Settings) -> dict[str, Any]:
             primary_key=primary_key,
         )
         new_state = result.final_state()
+    except ReconnectNeeded as exc:
+        from opsis.services import google_oauth
+
+        # Committed now, so it survives the job's rollback: this pauses the schedules.
+        google_oauth.mark_reconnect(db, settings, connection, str(exc))
+        raise RefreshError(str(exc)) from exc
     except (ConnectorError, snapshots.SnapshotError) as exc:
         raise RefreshError(str(exc)) from exc
     finally:

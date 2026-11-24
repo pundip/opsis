@@ -45,6 +45,7 @@ export function Schedules() {
                       row.label
                     )}
                     {row.kind === "refresh" && <span className="ml-1 text-xs text-zinc-500">refresh</span>}
+                    {row.paused && <span className="mt-1 block text-xs text-amber-800 dark:text-amber-300">{row.paused}</span>}
                   </td>
                   <td className={`${TD} font-mono text-xs`}>{row.cron}</td>
                   <td className={TD}>{formatRun(row.nextRunAt, timezone)}</td>

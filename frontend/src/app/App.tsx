@@ -22,6 +22,7 @@ import { PublicDashboard } from "../pages/PublicDashboard";
 import { SetPassword } from "../pages/SetPassword";
 import { Tokens } from "../pages/Tokens";
 import { Users } from "../pages/Users";
+import { GoogleReturn } from "../components/GoogleAccount";
 import { Layout } from "./Layout";
 
 function FullPage({ title, children }: { title: string; children?: React.ReactNode }) {
@@ -101,6 +102,14 @@ export function App() {
         return null;
     }
   };
+  // Google sent the browser back here after "Connect Google account" (local mode).
+  if (new URLSearchParams(location.search).get("state")?.startsWith("opsis-gs.") && allowed("/connections")) {
+    return (
+      <Layout config={config.data} me={me.data} items={items}>
+        <GoogleReturn />
+      </Layout>
+    );
+  }
   return (
     <Layout config={config.data} me={me.data} items={items}>
       <Routes>

@@ -33,6 +33,9 @@ x-server: &server
   SMTP_PORT: "2525"
   SMTP_SECURITY: none
   SMTP_FROM: Opsis smoke <opsis@smoke.test>
+  # Google Sheets against e2e/fake-google.mjs (its token endpoint is plain http).
+  GOOGLE_API_BASE_URL: http://fake-google:9700
+  OAUTHLIB_INSECURE_TRANSPORT: "1"
   FEATURE_ASSISTANT: "true"
   ASSISTANT_PROVIDER: anthropic
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -50,6 +53,13 @@ services:
     command: ["node", "/fake/fake-llm.mjs"]
     volumes:
       - ./e2e/fake-llm.mjs:/fake/fake-llm.mjs:ro
+  fake-google:
+    image: node:24-bookworm-slim
+    command: ["node", "/fake/fake-google.mjs"]
+    volumes:
+      - ./e2e/fake-google.mjs:/fake/fake-google.mjs:ro
+    ports:
+      - "127.0.0.1:9700:9700"
   fake-smtp:
     image: node:24-bookworm-slim
     command: ["node", "/fake/fake-smtp.mjs"]

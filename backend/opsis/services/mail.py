@@ -133,6 +133,23 @@ def password_reset(settings: Settings, name: str, link: str) -> Message:
     )
 
 
+def reconnect_needed(settings: Settings, name: str, connection: str, link: str) -> Message:
+    app = settings.app_name
+    lines = [
+        f"Hello {name},",
+        f"Google no longer accepts the sign-in saved with the connection {connection}, so its "
+        "datasets cannot refresh. Their scheduled refreshes are paused until it is reconnected.",
+        f"Open Connections in {app}, find {connection} and choose Reconnect.",
+        "If the OAuth app's publishing status in Google Cloud is Testing, Google ends its "
+        "sign-ins after 7 days; setting the app to In production stops that.",
+    ]
+    return Message(
+        subject=f"Reconnect {connection} in {app}",
+        text="\n\n".join([*lines[:3], link, lines[3], f"{app}, {settings.public_base_url}"]) + "\n",
+        html=_page(settings, [escape(line) for line in lines], ("Open Connections", link)),
+    )
+
+
 def test_message(settings: Settings) -> Message:
     line = f"This is a test email from {settings.app_name}. Email works."
     return Message(

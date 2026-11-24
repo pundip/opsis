@@ -9,10 +9,10 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from opsis.auth.principal import Principal
-from opsis.connectors.base import ConnectorError, StreamSpec
+from opsis.connectors.base import ConnectorError, ReconnectNeeded, StreamSpec
 from opsis.connectors.registry import get_registry
 from opsis.db.models import Connection, Dataset
 from opsis.errors import ApiError
@@ -76,7 +76,8 @@ def _split(
     secrets = dict(existing_secrets or {})
     secrets.update({k: v for k, v in cleaned.items() if k in secret_names})
     public = {k: v for k, v in cleaned.items() if k not in secret_names}
-    _validate(schema, {**public, **secrets})
+    # Keys starting with __ are kept by the app itself (a saved OAuth sign-in), not the form.
+    _validate(schema, {**public, **{k: v for k, v in secrets.items() if not k.startswith("__")}})
     return public, secrets
 
 
@@ -92,7 +93,10 @@ def _build(
     settings: Settings, connector_id: str, public: dict[str, Any], secrets: dict[str, Any]
 ) -> Any:
     cls = connector_class(settings, connector_id)
-    return cls({**public, **secrets, "_uploads_dir": str(uploads_dir(settings))})
+    internal = {"_uploads_dir": str(uploads_dir(settings))}
+    if settings.google_api_base_url:
+        internal["_google_api_base"] = settings.google_api_base_url  # tests only
+    return cls({**public, **secrets, **internal})
 
 
 def serialize(settings: Settings, connection: Connection, dataset_count: int = 0) -> dict[str, Any]:
@@ -120,6 +124,8 @@ def serialize(settings: Settings, connection: Connection, dataset_count: int = 0
         },
         "datasetCount": dataset_count,
         "createdAt": connection.created_at.isoformat(),
+        # A saved sign-in (Google Sheets OAuth): account, scopes, status. Never the token.
+        "auth": connection.auth_state,
     }
 
 
@@ -199,6 +205,9 @@ def update(
             existing = {}  # unreadable: the user must enter them again
         public, secrets = _split(settings, connection.connector_id, config, existing)
         connection.config = public
+        from opsis.services import google_oauth
+
+        google_oauth.forget_if_client_changed(connection, existing, secrets)
         connection.secrets = crypto.encrypt(settings, secrets)
         connection.last_test_ok = connection.last_test_message = connection.last_tested_at = None
     audit.record(
@@ -255,6 +264,12 @@ def test_unsaved(
     connector = _build(settings, connector_id, public, secrets)
     try:
         result = connector.test_connection()
+    except ReconnectNeeded as exc:
+        if connection_id is not None:
+            from opsis.services import google_oauth
+
+            google_oauth.mark_reconnect(db, settings, get(db, connection_id), str(exc))
+        return {"ok": False, "message": str(exc)}
     finally:
         connector.close()
     return {"ok": result.ok, "message": result.message}
@@ -268,6 +283,11 @@ def test_saved(db: Session, settings: Settings, connection: Connection) -> dict[
             ok, message = result.ok, result.message
         finally:
             connector.close()
+    except ReconnectNeeded as exc:
+        from opsis.services import google_oauth
+
+        google_oauth.mark_reconnect(db, settings, connection, str(exc))
+        ok, message = False, str(exc)
     except ConnectorError as exc:
         ok, message = False, str(exc)
     connection.last_test_ok = ok
@@ -299,6 +319,13 @@ def discover(settings: Settings, connection: Connection) -> list[StreamSpec]:
             streams: list[StreamSpec] = connector.discover()
         finally:
             connector.close()
+    except ReconnectNeeded as exc:
+        db = object_session(connection)
+        if db is not None:
+            from opsis.services import google_oauth
+
+            google_oauth.mark_reconnect(db, settings, connection, str(exc))
+        raise ApiError(409, "needs_reconnect", str(exc)) from exc
     except ConnectorError as exc:
         raise ApiError(400, "connector_error", str(exc)) from exc
     return streams

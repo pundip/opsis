@@ -26,6 +26,7 @@ from opsis.api import (
     admin,
     assistant,
     auth,
+    connection_auth,
     dashboards,
     ingestion,
     operations,
@@ -173,6 +174,7 @@ def register_feature_routers(api: APIRouter, settings: Settings) -> None:
     """Every feature router is included here, under the base path. Routes of a
     mode or feature that is off are not registered at all, so they answer 404."""
     api.include_router(ingestion.router)
+    api.include_router(connection_auth.router)
     api.include_router(semantic.router)
     api.include_router(dashboards.router)
     api.include_router(tokens.router)

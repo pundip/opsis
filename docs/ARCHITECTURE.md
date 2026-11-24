@@ -202,6 +202,8 @@ Bootstrap: on first start, `ADMIN_EMAIL` and `ADMIN_INITIAL_PASSWORD` create the
 
 **After the M6 review.** A dataset's owner (its creator) can restrict it, and only admins lift an admin's restriction. Only a dashboard's owner and admins change its sharing. A restricted dataset's data cannot reach people outside its list through a dashboard (sharing, share links, drafts, publishing) unless its owner or an admin allows it. Details in ADR-024.
 
+**Google Sheets sign-in (after M8).** Not a sign-in to Opsis: a Google Sheets connection's own Google account, through the person's own OAuth client. Opsis builds the consent address (offline access, prompt=consent, PKCE, read-only scopes) and keeps the pending flow with the connection's encrypted secrets. Google sends the browser back either to Opsis's root (local mode, or a Web client that lists Opsis's address), whose page finishes the flow, or to a loopback address that does not load, whose address the person pastes into Opsis. Either way Opsis exchanges the code itself and keeps only the refresh token, encrypted. Details in ADR-026.
+
 ## 6. The assistant (M7)
 
 The editor's Assistant tab sends the person's request to `POST /api/dashboards/{id}/assistant/messages`. The request runs as its own task in the api process and the response streams its progress as server-sent events.

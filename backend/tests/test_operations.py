@@ -37,6 +37,11 @@ CSV = b"id,fund,amount\n1,Library,100\n2,Sport,250\n"
 NOW = datetime(2026, 11, 24, 0, 0, tzinfo=UTC)  # 11:00 in Melbourne
 
 
+def newest_migration() -> str:
+    versions = Path(__file__).parents[1] / "opsis" / "db" / "migrations" / "versions"
+    return max(p.name.split("_")[0] for p in versions.glob("[0-9]*_*.py"))
+
+
 def csv_dataset(client: TestClient, name: str = "gifts_csv") -> dict[str, Any]:
     uploaded = upload(client, "gifts.csv", CSV)
     connection = connect(client, "file", {"file": uploaded["file"]}, name=f"{name} file")
@@ -226,7 +231,7 @@ def test_a_backup_holds_everything_needed_and_restores(
     assert (
         manifest["app"] == "opsis"
         and manifest["format"] == 1
-        and manifest["databaseRevision"] == "0010"
+        and manifest["databaseRevision"] == newest_migration()
     )
     assert "metadata.dump" in names
     assert any(n.startswith("uploads/") and n.endswith("gifts.csv") for n in names)
@@ -236,11 +241,14 @@ def test_a_backup_holds_everything_needed_and_restores(
     assert f"datasets/{dataset['id']}/{snapshot}/part-00000.parquet" in names
     assert not list(settings.backup_dir.glob(".*partial"))  # written under a temporary name
 
-    # Only the newest BACKUP_RETENTION files are kept.
+    # Only the newest BACKUP_RETENTION files are kept. Names carry the time to the second,
+    # so the first backup is given an older one: the next must not take its name.
+    path = path.rename(settings.backup_dir / "opsis-20260103-020000.tar")
     for day in ("20260101-020000", "20260102-020000"):
         (settings.backup_dir / f"opsis-{day}.tar").write_bytes(b"old")
     kept = backups.create(db, settings.model_copy(update={"backup_retention": 2}))
-    assert len(backups.backups(settings)) == 2 and kept["removed"] == ["opsis-20260101-020000.tar"]
+    assert {b["name"] for b in backups.backups(settings)} == {kept["file"], path.name}
+    assert sorted(kept["removed"]) == ["opsis-20260101-020000.tar", "opsis-20260102-020000.tar"]
 
     # Restore into an empty database and data folder: the same rows, the same files.
     target = "opsis_restore_test"
@@ -260,7 +268,8 @@ def test_a_backup_holds_everything_needed_and_restores(
         for table in ("datasets", "connections", "snapshots", "users"):
             count = conn.execute(text(f"SELECT count(*) FROM {table}")).scalar()
             assert count == db.execute(text(f"SELECT count(*) FROM {table}")).scalar(), table
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0010"
+        version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+        assert version == newest_migration()
     restored.dispose()
     assert (
         elsewhere.data_dir / "datasets" / dataset["id"] / str(snapshot) / "part-00000.parquet"

@@ -29,6 +29,11 @@ export function ScheduleCard({ datasetId, schedule }: { datasetId: string; sched
           ? `Next refresh ${formatRun(schedule.nextRunAt, timezone)} (${timezone}).`
           : `Not refreshed on a schedule. Times are in ${timezone}.`}
       </p>
+      {schedule?.paused && (
+        <p role="alert" className="mb-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+          {schedule.paused}
+        </p>
+      )}
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="When" htmlFor={`schedule-${datasetId}`}>
           <Select

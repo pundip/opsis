@@ -82,7 +82,12 @@ def list_schedules(
             dataset = names.get(row.target_id) if row.target_id else None
             if dataset is None or dataset.name in blocked:
                 continue
-            entry |= {"datasetId": str(dataset.id), "dataset": dataset.name, "label": dataset.label}
+            entry |= {
+                "datasetId": str(dataset.id),
+                "dataset": dataset.name,
+                "label": dataset.label,
+                "paused": schedules.paused(db, dataset.id),
+            }
         elif row.kind in ("backup", "cleanup"):
             if not principal.is_admin:
                 continue

@@ -10,6 +10,8 @@ export interface Schedule {
   nextRunAt: string;
   lastRunAt: string | null;
   timezone: string;
+  /** Why scheduled runs are paused, if they are (a connection needs reconnecting). */
+  paused?: string | null;
 }
 
 export interface Preset {

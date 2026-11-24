@@ -109,6 +109,11 @@ class ConnectorError(Exception):
     """Raised for source failures. The message is shown to users: no secrets."""
 
 
+class ReconnectNeeded(ConnectorError):
+    """The source no longer accepts the sign-in saved with the connection (for
+    example Google answers invalid_grant): a person has to sign in again."""
+
+
 @runtime_checkable
 class Connector(Protocol):
     id: ClassVar[str]  # "mysql"

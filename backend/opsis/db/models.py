@@ -116,6 +116,9 @@ class Connection(Base):
     last_test_ok: Mapped[bool | None] = mapped_column()
     last_test_message: Mapped[str | None] = mapped_column(Text)
     last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A saved sign-in (Google Sheets OAuth): account, scopes, status. Never secret:
+    # the refresh token is in `secrets`. See opsis/services/google_oauth.py.
+    auth_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )

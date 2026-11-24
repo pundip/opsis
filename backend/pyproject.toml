@@ -30,6 +30,7 @@ dependencies = [
     "httpx2>=1.0",
     # M8: Google Sheets (service account tokens), Salesforce, and refresh schedules.
     "google-auth>=2.30",
+    "google-auth-oauthlib>=1.2",
     "simple-salesforce>=1.12",
     "croniter>=2.0",
 ]
@@ -68,7 +69,7 @@ plugins = ["pydantic.mypy"]
 files = ["opsis"]
 
 [[tool.mypy.overrides]]
-module = ["authlib.*", "pyarrow.*", "pymysql.*", "openpyxl.*", "jsonschema.*", "duckdb.*", "yaml.*", "croniter.*"]
+module = ["authlib.*", "pyarrow.*", "pymysql.*", "openpyxl.*", "jsonschema.*", "duckdb.*", "yaml.*", "croniter.*", "google_auth_oauthlib.*", "oauthlib.*", "requests_oauthlib.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

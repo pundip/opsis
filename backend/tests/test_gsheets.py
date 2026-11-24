@@ -202,7 +202,11 @@ def test_a_sheet_becomes_a_dataset_through_the_app(
     monkeypatch.setattr(gsheets, "DEFAULT_TRANSPORT", httpx2.MockTransport(fake.handler))
     monkeypatch.setattr(gsheets, "DEFAULT_TOKEN", lambda: "test-token")
     client = client_for()
-    connection = connect(client, "gsheets", {"spreadsheet": SHEET, "service_account_key": KEY})
+    connection = connect(
+        client,
+        "gsheets",
+        {"auth": "service_account", "spreadsheet": SHEET, "service_account_key": KEY},
+    )
     described = ok(client.get(f"/api/connections/{connection}"))
     assert "service_account_key" not in json.dumps(described.get("config", {}))  # never sent back
     streams = ok(client.get(f"/api/connections/{connection}/streams"))

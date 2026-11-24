@@ -14,6 +14,10 @@ export interface JsonSchemaProperty {
   "x-upload"?: boolean;
   /** The value can also be read from a local file of this type (".json"), in the browser. */
   "x-file-text"?: string;
+  /** Show the field only while other fields have these values, for example {"auth": "oauth"}. */
+  "x-show-when"?: Record<string, unknown>;
+  /** Labels for the values of an enum. */
+  "x-enum-labels"?: Record<string, string>;
 }
 
 export interface ConfigSchema {
@@ -45,6 +49,27 @@ export interface Connection {
   lastTest: (TestResult & { at: string }) | null;
   datasetCount: number;
   createdAt: string;
+  /** A saved sign-in (Google Sheets through OAuth). Never contains the token. */
+  auth?: AuthState | null;
+}
+
+export interface AuthState {
+  method: "oauth" | "service_account";
+  status: "connected" | "needs_reconnect" | "not_connected";
+  account?: string | null;
+  scopes?: string[];
+  /** Whether the sign-in may list the account's spreadsheets (the Drive metadata scope). */
+  canList?: boolean;
+  connectedAt?: string;
+  source?: "consent" | "token.json";
+  error?: string;
+  failedAt?: string;
+  notifiedAt?: string;
+}
+
+/** A Google Sheets connection that signs in with the person's own Google account. */
+export function usesGoogleAccount(connection: Connection): boolean {
+  return connection.connectorId === "gsheets" && (connection.config.auth ?? "oauth") === "oauth";
 }
 
 export type ColumnType =
@@ -240,6 +265,57 @@ export function useTestConnection() {
   return useMutation({
     mutationFn: (id: string) => apiPost<TestResult>(`/api/connections/${id}/test`),
     onSettled: () => void client.invalidateQueries({ queryKey: ["connections"] }),
+  });
+}
+
+// ---- Google Sheets: the person's own Google account ------------------------------------
+
+export interface GoogleStart {
+  authUrl: string;
+  /** direct: Google comes back to Opsis; paste: copy the address from the address bar. */
+  mode: "direct" | "paste";
+  redirectUri: string;
+}
+
+export interface Spreadsheet {
+  id: string;
+  name: string;
+  modifiedTime: string | null;
+  owner: string | null;
+}
+
+export const useGoogleStart = () =>
+  useMutation({
+    mutationFn: (id: string) => apiPost<GoogleStart>(`/api/connections/${id}/google/start`),
+  });
+
+export function useGoogleFinish() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (url: string) =>
+      apiPost<{ connectionId: string; auth: AuthState }>("/api/connections/google/finish", { url }),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["connections"] }),
+  });
+}
+
+export function useGoogleToken(id: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (token: string) =>
+      apiPost<{ connectionId: string; auth: AuthState }>(`/api/connections/${id}/google/token`, { token }),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["connections"] }),
+  });
+}
+
+export function useSpreadsheets(id: string, search: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["spreadsheets", id, search],
+    queryFn: () =>
+      apiGet<{ spreadsheets: Spreadsheet[] }>(
+        `/api/connections/${id}/google/spreadsheets${search ? `?q=${encodeURIComponent(search)}` : ""}`,
+      ),
+    enabled,
+    retry: false,
   });
 }
 

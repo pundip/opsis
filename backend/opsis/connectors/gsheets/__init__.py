@@ -1,9 +1,19 @@
 """Google Sheets connector: each tab of one spreadsheet is a stream.
 
-It signs in as a Google Cloud service account, with the read-only Sheets scope,
-so the spreadsheet must be shared with the account's email address (Viewer is
-enough). The Sheets REST API is called directly: the account's token comes from
-Google's auth library, and only two read calls are needed.
+Two ways to sign in, both read-only:
+
+- `oauth` (the default): the person's own Google account, through their own
+  OAuth client (the credentials.json of a Desktop or Web client from Google
+  Cloud). The consent flow is run by `opsis.services.google_oauth`, which keeps
+  the refresh token, encrypted, in the connection's secrets under `__oauth__`.
+  Scopes: spreadsheets.readonly, and drive.metadata.readonly to list the
+  spreadsheets the account can open and to show which account it is.
+- `service_account`: a service account's JSON key, with the spreadsheet shared
+  with the account's address as a Viewer.
+
+The Sheets and Drive REST APIs are called directly; the token comes from
+Google's auth library. If Google refuses a saved refresh token (invalid_grant),
+`ReconnectNeeded` is raised so the app can ask the person to reconnect.
 
 Values are read unformatted. A column's type comes from the cells: numbers stay
 numbers (whole numbers as integers when every value is whole), true and false
@@ -31,6 +41,7 @@ from opsis.connectors.base import (
     ConnectorError,
     ReadOptions,
     ReadResult,
+    ReconnectNeeded,
     RefreshMode,
     StreamSpec,
     TestResult,
@@ -38,7 +49,34 @@ from opsis.connectors.base import (
 from opsis.connectors.tabular import rows_to_batch, unique_names
 
 SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
-API = "https://sheets.googleapis.com/v4/spreadsheets"
+LIST_SCOPE = "https://www.googleapis.com/auth/drive.metadata.readonly"
+OAUTH_SCOPES = (SCOPE, LIST_SCOPE)
+# Granted scopes that are enough to read spreadsheets, and to list them.
+READ_SCOPES = frozenset(
+    {
+        SCOPE,
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive",
+    }
+)
+LIST_SCOPES = frozenset(
+    {
+        LIST_SCOPE,
+        "https://www.googleapis.com/auth/drive.metadata",
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive",
+    }
+)
+SHEETS_BASE = "https://sheets.googleapis.com"
+DRIVE_BASE = "https://www.googleapis.com"
+TOKEN_URI = "https://oauth2.googleapis.com/token"
+RECONNECT = (
+    "Google no longer accepts this connection's sign-in (invalid_grant). Its access may "
+    "have been removed, the account's password changed, or, for an OAuth app whose "
+    "publishing status is Testing, its refresh token expired after 7 days. Reconnect the "
+    "Google account."
+)
 # Rows read to see each column's cell formats, and rows fetched per request.
 SAMPLE_ROWS = 200
 PAGE_ROWS = 10_000
@@ -60,6 +98,52 @@ def spreadsheet_id(text: str) -> str | None:
     if found:
         return found.group(1)
     return text if BARE_ID.match(text) else None
+
+
+def client_config(text: Any) -> tuple[str, dict[str, Any]]:
+    """The OAuth client in a credentials.json: ("installed" or "web", its settings)."""
+    try:
+        document = json.loads(str(text or ""))
+    except ValueError:
+        document = None
+    if isinstance(document, dict) and document.get("type") == "service_account":
+        raise ConnectorError(
+            "This is a service account key, not an OAuth client. Choose service_account "
+            "as the sign-in method, or download your OAuth client's JSON (credentials.json)."
+        )
+    if isinstance(document, dict) and "refresh_token" in document:
+        raise ConnectorError(
+            "This is a token.json, not the OAuth client. Upload credentials.json here; a "
+            "token.json can be used after saving, under Connect Google account."
+        )
+    kind = next(
+        (k for k in ("installed", "web") if isinstance(document, dict) and k in document), None
+    )
+    client = document.get(kind) if kind and isinstance(document, dict) else None
+    if (
+        not isinstance(client, dict)
+        or not client.get("client_id")
+        or not client.get("client_secret")
+    ):
+        raise ConnectorError(
+            "This is not an OAuth client file. In Google Cloud, open APIs and services, "
+            "Credentials, your OAuth 2.0 client ID (type Desktop app or Web application), "
+            "and download its JSON."
+        )
+    assert kind is not None
+    client = {
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": TOKEN_URI,
+        **client,
+    }
+    return kind, client
+
+
+def granted(scopes: Any) -> set[str]:
+    """Scopes as a set, from a list or a space-separated string."""
+    if isinstance(scopes, str):
+        return set(scopes.split())
+    return {str(s) for s in scopes or []}
 
 
 def _a1(title: str) -> str:
@@ -106,13 +190,30 @@ class GoogleSheetsConnector:
         return {
             "type": "object",
             "additionalProperties": False,
-            "required": ["spreadsheet", "service_account_key"],
+            "required": ["auth"],
             "properties": {
-                "spreadsheet": {
+                "auth": {
                     "type": "string",
-                    "title": "Spreadsheet",
-                    "description": "Its URL, or its ID. Each tab becomes a table.",
-                    "minLength": 20,
+                    "title": "Sign in with",
+                    "enum": ["oauth", "service_account"],
+                    "x-enum-labels": {
+                        "oauth": "My Google account (OAuth)",
+                        "service_account": "A service account",
+                    },
+                    "default": "oauth",
+                },
+                "client_secrets": {
+                    "type": "string",
+                    "title": "OAuth client (credentials.json)",
+                    "description": (
+                        "The JSON file of your OAuth client ID from Google Cloud, of type "
+                        "Desktop app (or Web application). After saving, choose Connect "
+                        "Google account."
+                    ),
+                    "x-secret": True,
+                    "x-file-text": ".json",
+                    "x-show-when": {"auth": "oauth"},
+                    "minLength": 2,
                 },
                 "service_account_key": {
                     "type": "string",
@@ -123,7 +224,17 @@ class GoogleSheetsConnector:
                     ),
                     "x-secret": True,
                     "x-file-text": ".json",
+                    "x-show-when": {"auth": "service_account"},
                     "minLength": 2,
+                },
+                "spreadsheet": {
+                    "type": "string",
+                    "title": "Spreadsheet",
+                    "description": (
+                        "Its URL, or its ID. Each tab becomes a table. With a connected "
+                        "Google account you can also pick it from a list after saving."
+                    ),
+                    "minLength": 20,
                 },
                 "has_header": {
                     "type": "boolean",
@@ -131,6 +242,19 @@ class GoogleSheetsConnector:
                     "default": True,
                 },
             },
+            "allOf": [
+                {
+                    "if": {"properties": {"auth": {"const": "oauth"}}, "required": ["auth"]},
+                    "then": {"required": ["client_secrets"]},
+                },
+                {
+                    "if": {
+                        "properties": {"auth": {"const": "service_account"}},
+                        "required": ["auth"],
+                    },
+                    "then": {"required": ["service_account_key", "spreadsheet"]},
+                },
+            ],
         }
 
     def __init__(
@@ -143,12 +267,22 @@ class GoogleSheetsConnector:
         self.config = config
         self._id = spreadsheet_id(str(config.get("spreadsheet", "")))
         self._header = bool(config.get("has_header", True))
+        # Connections from before the choice had a service account key and no method.
+        self.auth = str(
+            config.get("auth")
+            or ("service_account" if config.get("service_account_key") else "oauth")
+        )
+        oauth = config.get("__oauth__")
+        self._oauth: dict[str, Any] = oauth if isinstance(oauth, dict) else {}
+        base = str(config.get("_google_api_base") or "").rstrip("/")
+        self._sheets = f"{base or SHEETS_BASE}/v4/spreadsheets"
+        self._drive = f"{base or DRIVE_BASE}/drive/v3"
         self._http = httpx2.Client(
             timeout=httpx2.Timeout(60.0, connect=10.0), transport=transport or DEFAULT_TRANSPORT
         )
         self._token_source = token or DEFAULT_TOKEN
         self._token: tuple[str, float] | None = None
-        self._account = ""
+        self._account = str(self._oauth.get("account") or "") if self.auth == "oauth" else ""
 
     # ---- signing in --------------------------------------------------------------------
 
@@ -174,12 +308,51 @@ class GoogleSheetsConnector:
         if self._token is not None and self._token[1] > time.monotonic():
             return self._token[0]
         if self._token_source is not None:
-            self._key()
+            if self.auth == "service_account":
+                self._key()
             token = self._token_source()
+        elif self.auth == "oauth":
+            token = self._oauth_token()
         else:
             token = self._google_token(self._key())
         self._token = (token, time.monotonic() + 30 * 60)
         return token
+
+    def _oauth_token(self) -> str:
+        """A fresh access token from the saved refresh token."""
+        from google.auth.exceptions import RefreshError, TransportError
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+
+        if not self._oauth.get("refresh_token"):
+            raise ConnectorError(
+                "This connection is not connected to a Google account yet. On the "
+                "Connections page, choose Connect Google account."
+            )
+        _, client = client_config(self.config.get("client_secrets"))
+        credentials = Credentials(  # type: ignore[no-untyped-call]
+            None,
+            refresh_token=str(self._oauth["refresh_token"]),
+            token_uri=str(client["token_uri"]),
+            client_id=str(client["client_id"]),
+            client_secret=str(client["client_secret"]),
+            scopes=sorted(granted(self._oauth.get("scopes"))) or None,
+        )
+        try:
+            credentials.refresh(Request())  # type: ignore[no-untyped-call]
+        except RefreshError as exc:
+            text = str(exc)
+            if "invalid_grant" in text:
+                raise ReconnectNeeded(RECONNECT) from None
+            if "invalid_client" in text or "unauthorized_client" in text:
+                raise ConnectorError(
+                    "Google did not accept the OAuth client in credentials.json: it may have "
+                    "been deleted, or its secret reset. Upload its JSON again, then reconnect."
+                ) from None
+            raise ConnectorError(f"Google refused to renew the sign-in: {text[:200]}") from None
+        except (TransportError, OSError) as exc:
+            raise ConnectorError(f"Could not reach Google to sign in: {exc}") from None
+        return str(credentials.token)
 
     def _google_token(self, key: dict[str, Any]) -> str:
         from google.auth.exceptions import GoogleAuthError
@@ -204,35 +377,101 @@ class GoogleSheetsConnector:
     def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         if self._id is None:
             raise ConnectorError(
-                "This is not a spreadsheet URL or ID. Copy the address of the spreadsheet "
-                "from your browser."
+                "Choose a spreadsheet first: paste its URL"
+                + (", or pick it from your list" if self.auth == "oauth" else "")
+                + "."
+                if not str(self.config.get("spreadsheet") or "").strip()
+                else "This is not a spreadsheet URL or ID. Copy the address of the "
+                "spreadsheet from your browser."
             )
+        return self._call(f"{self._sheets}/{self._id}{path}", params, "Google Sheets")
+
+    def _call(self, url: str, params: dict[str, Any], service: str) -> dict[str, Any]:
         try:
             response = self._http.get(
-                f"{API}/{self._id}{path}",
-                params=params,
-                headers={"Authorization": f"Bearer {self._bearer()}"},
+                url, params=params, headers={"Authorization": f"Bearer {self._bearer()}"}
             )
         except httpx2.HTTPError as exc:
-            raise ConnectorError(f"Could not reach Google Sheets: {type(exc).__name__}.") from None
+            raise ConnectorError(f"Could not reach {service}: {type(exc).__name__}.") from None
         if response.status_code == 200:
             body: dict[str, Any] = response.json()
             return body
-        raise ConnectorError(self._explain(response))
+        raise ConnectorError(self._explain(response, service))
 
-    def _explain(self, response: httpx2.Response) -> str:
+    # ---- the account and its spreadsheets (OAuth) ------------------------------------------
+
+    def about(self) -> dict[str, str]:
+        """The signed-in account: {"email", "name"} (needs a Drive scope)."""
+        body = self._call(
+            f"{self._drive}/about", {"fields": "user(emailAddress,displayName)"}, "Google Drive"
+        )
+        user = body.get("user") or {}
+        return {
+            "email": str(user.get("emailAddress") or ""),
+            "name": str(user.get("displayName") or ""),
+        }
+
+    def spreadsheets(self, search: str | None = None) -> list[dict[str, Any]]:
+        """Spreadsheets the account can open, newest first (needs a Drive scope)."""
+        query = "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
+        if search and search.strip():
+            text = search.strip()[:100].replace("\\", "\\\\").replace("'", "\\'")
+            query += f" and name contains '{text}'"
+        body = self._call(
+            f"{self._drive}/files",
+            {
+                "q": query,
+                "fields": "files(id,name,modifiedTime,owners(displayName,emailAddress))",
+                "orderBy": "modifiedTime desc",
+                "pageSize": 100,
+                "supportsAllDrives": "true",
+                "includeItemsFromAllDrives": "true",
+            },
+            "Google Drive",
+        )
+        return [
+            {
+                "id": str(f.get("id")),
+                "name": str(f.get("name") or ""),
+                "modifiedTime": f.get("modifiedTime"),
+                "owner": next(
+                    (
+                        str(o.get("emailAddress") or o.get("displayName"))
+                        for o in f.get("owners") or []
+                    ),
+                    None,
+                ),
+            }
+            for f in body.get("files") or []
+        ]
+
+    def _explain(self, response: httpx2.Response, service: str = "Google Sheets") -> str:
         try:
             error = response.json().get("error") or {}
         except ValueError:
             error = {}
         message = str(error.get("message") or response.text)[:300]
         status = response.status_code
+        oauth = self.auth == "oauth"
         if status == 403 and ("has not been used" in message or "disabled" in message):
+            api = "Google Drive API" if service == "Google Drive" else "Google Sheets API"
+            whose = "your OAuth client's" if oauth else "the service account's"
             return (
-                "The Google Sheets API is not enabled in the service account's Google Cloud "
-                "project. Enable it under APIs and services, then try again."
+                f"The {api} is not enabled in {whose} Google Cloud project. Enable it under "
+                "APIs and services, Library, then try again."
+            )
+        if status == 403 and "insufficient" in message.lower():
+            return (
+                f"This sign-in may not use {service} for that: the scope was not granted. "
+                "Reconnect the Google account and allow every permission asked for."
             )
         if status == 403:
+            if oauth:
+                who = self._account or "the connected Google account"
+                return (
+                    f"{who} cannot open this spreadsheet. Check that it is shared with that "
+                    "account."
+                )
             who = self._account or "the service account"
             return (
                 f"The spreadsheet is not shared with {who}. Share it with that address as a Viewer."
@@ -240,10 +479,10 @@ class GoogleSheetsConnector:
         if status == 404:
             return "There is no spreadsheet with this ID. Check the URL."
         if status == 401:
-            return "Google did not accept the service account's sign-in. Try again."
+            return "Google did not accept the sign-in. Try again, or reconnect the Google account."
         if status == 429:
-            return "Google Sheets is limiting requests right now. Try again in a minute."
-        return f"Google Sheets returned an error ({status}): {message}"
+            return f"{service} is limiting requests right now. Try again in a minute."
+        return f"{service} returned an error ({status}): {message}"
 
     def _tabs(self) -> tuple[str, list[dict[str, Any]]]:
         body = self._get(
@@ -384,11 +623,14 @@ class GoogleSheetsConnector:
     def test_connection(self) -> TestResult:
         try:
             title, tabs = self._tabs()
+        except ReconnectNeeded:
+            raise  # the app marks the connection; the message says what to do
         except ConnectorError as exc:
             return TestResult(ok=False, message=str(exc))
+        who = self._account or ("the connected Google account" if self.auth == "oauth" else "?")
         return TestResult(
             ok=True,
-            message=f"Found {title!r} with {len(tabs)} tab(s), reading as {self._account}.",
+            message=f"Found {title!r} with {len(tabs)} tab(s), reading as {who}.",
         )
 
     def discover(self) -> list[StreamSpec]:

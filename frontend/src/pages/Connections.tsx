@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { GooglePanel, GoogleStatus } from "../components/GoogleAccount";
 import { ApiError } from "../lib/api";
 import type { AppConfig, Me } from "../lib/config";
 import {
@@ -11,9 +13,10 @@ import {
   useSaveConnection,
   useTestConnection,
   useTestSettings,
+  usesGoogleAccount,
 } from "../lib/data";
 import { timeAgo } from "../lib/format";
-import { SchemaForm, schemaDefaults } from "../components/SchemaForm";
+import { SchemaForm, schemaDefaults, visibleValues } from "../components/SchemaForm";
 import {
   Badge, Button, Card, Empty, ErrorNote, Field, Input, PageHeader, ROW, Select, TD, TH,
 } from "../components/ui";
@@ -50,7 +53,7 @@ function ConnectionForm({ connectors, editing, maxUploadMb, onDone }: FormProps)
   const details = save.error instanceof ApiError ? save.error.details : [];
 
   if (!connector) return <ErrorNote error={new Error("This connector is not installed.")} />;
-  const input = { name, connectorId, config: values };
+  const input = { name, connectorId, config: visibleValues(connector.configSchema, values) };
 
   return (
     <Card className="mb-5 p-4">
@@ -117,6 +120,12 @@ function ConnectionForm({ connectors, editing, maxUploadMb, onDone }: FormProps)
   );
 }
 
+/** What the row button for a connection's Google account does: "" when connected. */
+function googleAction(connection: Connection): string {
+  const status = connection.auth?.status;
+  return status === "connected" ? "" : status === "needs_reconnect" ? "Reconnect" : "Connect";
+}
+
 export function Connections({ config, me }: { config: AppConfig; me: Me }) {
   const connections = useConnections();
   const connectors = useConnectors();
@@ -124,6 +133,9 @@ export function Connections({ config, me }: { config: AppConfig; me: Me }) {
   const remove = useDeleteConnection();
   const [form, setForm] = useState<{ editing: Connection | null } | null>(null);
   const canManage = me.permissions.includes("connections:manage");
+  // ?google=<id>: back from Google, or opened from a connection's Google account button.
+  const [params, setParams] = useSearchParams();
+  const google = connections.data?.find((c) => c.id === params.get("google"));
 
   return (
     <div className="mx-auto max-w-5xl">
@@ -148,6 +160,7 @@ export function Connections({ config, me }: { config: AppConfig; me: Me }) {
           onDone={() => setForm(null)}
         />
       )}
+      {google && canManage && <GooglePanel key={google.id} connection={google} onClose={() => setParams({})} />}
       <ErrorNote error={connections.error ?? connectors.error ?? remove.error} />
       <Card>
         {connections.data?.length === 0 ? (
@@ -190,6 +203,11 @@ export function Connections({ config, me }: { config: AppConfig; me: Me }) {
                     ) : (
                       <span className="text-xs text-zinc-500">Not tested</span>
                     )}
+                    {usesGoogleAccount(connection) && (
+                      <span className="mt-1 block">
+                        <GoogleStatus auth={connection.auth} />
+                      </span>
+                    )}
                   </td>
                   <td className={TD}>{connection.datasetCount}</td>
                   <td className={`${TD} text-right whitespace-nowrap`}>
@@ -202,6 +220,15 @@ export function Connections({ config, me }: { config: AppConfig; me: Me }) {
                         >
                           Test
                         </Button>
+                        {usesGoogleAccount(connection) && (
+                          <Button
+                            variant="ghost"
+                            aria-label={`${googleAction(connection)} Google account for ${connection.name}`.trim()}
+                            onClick={() => setParams({ google: connection.id })}
+                          >
+                            {googleAction(connection) || "Google account"}
+                          </Button>
+                        )}
                         <Button variant="ghost" onClick={() => setForm({ editing: connection })}>
                           Edit
                         </Button>

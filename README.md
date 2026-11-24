@@ -40,12 +40,22 @@ Press **Test**, then **Save**. Then **Datasets**, **New dataset**: choose the co
 
 A sample MySQL database is there to try connections with: set `COMPOSE_PROFILES=sample` in `.env`, run `docker compose up -d` again, and connect to host `sample-mysql`, database `sample`, user `reader`, password `reader-sample-pw`.
 
-**Google Sheets.** Opsis reads a spreadsheet as a Google Cloud service account, with read-only access:
+**Google Sheets.** Opsis reads spreadsheets with read-only access. It signs in with your own Google account, through your own OAuth client (the same `credentials.json` a Python script would use), or with a service account.
 
-1. In the Google Cloud console, pick or create a project and enable the **Google Sheets API** (APIs and services, Library).
-2. Under IAM and admin, **Service accounts**, create a service account. It needs no roles. Open it, then **Keys**, **Add key**, **JSON**: a key file downloads. (If your organisation's policy blocks key creation, an admin of the Google Cloud organisation has to allow it for this project.)
-3. Share the spreadsheet with the service account's email address (it ends in `iam.gserviceaccount.com`) as a **Viewer**.
-4. In Opsis, a new **Google Sheets** connection: the spreadsheet's URL, and the key file (choose the file, or paste its contents). Each tab becomes a table. Column types come from the cells: numbers, true or false, and cells formatted as dates or date-times. Sheets refresh in full.
+With your Google account:
+
+1. In the Google Cloud console, pick or create a project, and enable the **Google Sheets API** and the **Google Drive API** (APIs and services, Library). Drive is used only to list your spreadsheets and to show which account is connected.
+2. Set up the OAuth consent screen (Google Auth Platform). While its publishing status is **Testing**, add your account as a test user. Google then ends the sign-in's refresh token after 7 days, so you would reconnect every week; setting the app to **In production** stops that.
+3. Create an OAuth client ID of type **Desktop app** and download its JSON (`credentials.json`). A **Web application** client works too.
+4. In Opsis, a new **Google Sheets** connection: sign in with **My Google account (OAuth)**, load `credentials.json`, and save. Then choose **Connect** on the connection: Google asks you to allow read-only access to your spreadsheets and to the names of your Drive files.
+   - On a laptop, with Opsis at `http://localhost:8080`, Google comes straight back to Opsis.
+   - On a server, or under a sub-path, Google sends the browser to an address that does not load (it starts with `http://localhost`). Copy the whole address from the address bar and paste it into Opsis. With a Web application client whose authorised redirect URIs include Opsis's own address (for example `https://example.com/opsis/`), Google comes straight back instead.
+   - Or use an existing `token.json` instead of consenting again, if it was made with the same OAuth client and may read spreadsheets.
+5. Pick a spreadsheet from your list, or paste its URL in the connection's settings. Each tab becomes a table. Column types come from the cells: numbers, true or false, and cells formatted as dates or date-times. Sheets refresh in full.
+
+Opsis keeps only a refresh token, encrypted, which nobody can see. If Google stops accepting it (you removed the app's access, your password changed, or 7 days passed in Testing), the connection shows **Needs reconnecting**, its scheduled refreshes pause, and, with email on, its owner is emailed. **Reconnect** puts it right.
+
+With a service account instead: in the Google Cloud console, under IAM and admin, **Service accounts**, create one with no roles, then **Keys**, **Add key**, **JSON**. Share the spreadsheet with its email address (ending in `iam.gserviceaccount.com`) as a **Viewer**. In Opsis, sign in with **A service account**, and give the key file and the spreadsheet's URL.
 
 **Salesforce.** Opsis reads objects (Account, Opportunity, your custom objects) through the Salesforce API:
 

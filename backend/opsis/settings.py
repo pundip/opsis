@@ -126,6 +126,9 @@ class Settings(BaseSettings):
     google_auto_provision: bool = False
     # Change only to test against another OpenID Connect provider.
     google_discovery_url: str = "https://accounts.google.com/.well-known/openid-configuration"
+    # Change only to test against a fake Google: where the Google Sheets connector's
+    # Sheets and Drive calls go (empty: sheets.googleapis.com and www.googleapis.com).
+    google_api_base_url: str = ""
 
     # In-app assistant (FEATURE_ASSISTANT, ASSISTANT_PROVIDER)
     anthropic_api_key: SecretStr | None = None

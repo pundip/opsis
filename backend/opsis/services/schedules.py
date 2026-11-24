@@ -21,7 +21,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from opsis.auth.principal import Principal
-from opsis.db.models import Dashboard, Dataset, Schedule
+from opsis.db.models import Connection, Dashboard, Dataset, Schedule
 from opsis.errors import ApiError
 from opsis.jobs import queue
 from opsis.services import audit
@@ -140,7 +140,10 @@ def refresh_key(dataset_id: uuid.UUID) -> str:
 
 def refresh_schedule(db: Session, settings: Settings, dataset: Dataset) -> dict[str, Any] | None:
     row = db.scalar(select(Schedule).where(Schedule.key == refresh_key(dataset.id)))
-    return describe(settings, row)
+    found = describe(settings, row)
+    if found is not None:
+        found["paused"] = paused(db, dataset.id)
+    return found
 
 
 def set_refresh(
@@ -214,7 +217,10 @@ def tick(db: Session, settings: Settings, now: datetime | None = None) -> int:
             "snapshot": settings.feature_email,
             "cleanup": True,
         }.get(row.kind, False)
-        if enabled:
+        reason = paused(db, row.target_id) if row.kind == "refresh" else None
+        if reason:
+            log.info("Scheduled refresh of dataset %s skipped. %s", row.target_id, reason)
+        if enabled and not reason:
             if row.kind == "refresh":
                 queue.enqueue(
                     db,
@@ -237,6 +243,21 @@ def tick(db: Session, settings: Settings, now: datetime | None = None) -> int:
     if queued:
         log.info("Scheduler queued %d job(s)", queued)
     return queued
+
+
+def paused(db: Session, dataset_id: uuid.UUID | None) -> str | None:
+    """Why a dataset's scheduled refreshes are paused, if they are: its connection's
+    saved sign-in needs reconnecting (Google Sheets through OAuth)."""
+    if dataset_id is None:
+        return None
+    found = db.execute(
+        select(Connection.name, Connection.auth_state)
+        .join(Dataset, Dataset.connection_id == Connection.id)
+        .where(Dataset.id == dataset_id)
+    ).first()
+    if found is None or (found.auth_state or {}).get("status") != "needs_reconnect":
+        return None
+    return f"Paused until the connection {found.name} is reconnected."
 
 
 def forget(db: Session, target_id: uuid.UUID) -> None:
