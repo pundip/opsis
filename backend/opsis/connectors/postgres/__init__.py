@@ -5,9 +5,46 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 import psycopg
+from psycopg.adapt import Buffer, Loader
+from psycopg.pq import Format
 
 from opsis.connectors.base import ColumnSpec, ColumnType, StreamSpec
 from opsis.connectors.sql_base import SqlConnector, modes_for
+
+# Postgres holds dates Python cannot ('infinity', years before 1 or after 9999).
+# Their loaders return the server's text instead of failing the whole read, and
+# the conversion layer then stores them as NULL (or as text) and reports them.
+GUARDED_TYPES = ("date", "timestamp", "timestamptz")
+
+
+def _guarded(base: type[Loader]) -> type[Loader]:
+    class Guarded(Loader):
+        def __init__(self, oid: int, context: Any = None) -> None:
+            super().__init__(oid, context)
+            self._inner = base(oid, context)
+
+        def load(self, data: Buffer) -> Any:
+            try:
+                return self._inner.load(data)
+            except psycopg.DataError:
+                return bytes(data).decode("utf-8", errors="replace")
+
+    return Guarded
+
+
+def guard_loaders(conn: Any) -> None:
+    """Make a connection return out-of-range dates as text, and intervals in the
+    server's own words ('1 year 2 mons') rather than as a number of days."""
+    adapters = conn.adapters
+    for name in GUARDED_TYPES:
+        oid = adapters.types[name].oid
+        base = adapters.get_loader(oid, Format.TEXT)
+        if base is not None:
+            adapters.register_loader(oid, _guarded(base))
+    text = adapters.get_loader(adapters.types["text"].oid, Format.TEXT)
+    if text is not None:
+        adapters.register_loader(adapters.types["interval"].oid, text)
+
 
 TYPE_MAP = {
     "smallint": ColumnType.INTEGER,
@@ -25,7 +62,8 @@ TYPE_MAP = {
 }
 
 COLUMNS_SQL = """
-SELECT c.table_schema, c.table_name, c.column_name, c.data_type, c.is_nullable, c.numeric_scale
+SELECT c.table_schema, c.table_name, c.column_name, c.data_type, c.is_nullable, c.numeric_scale,
+       c.numeric_precision
 FROM information_schema.columns c
 JOIN information_schema.tables t
   ON t.table_schema = c.table_schema AND t.table_name = c.table_name
@@ -94,6 +132,7 @@ class PostgresConnector(SqlConnector):
             application_name="opsis",
         )
         conn.read_only = True
+        guard_loaders(conn)
         return conn
 
     def _quote(self, identifier: str) -> str:
@@ -109,7 +148,8 @@ class PostgresConnector(SqlConnector):
     def _discover(self, conn: Any) -> list[StreamSpec]:
         with conn.cursor() as cur:
             columns: dict[tuple[str, str], list[ColumnSpec]] = {}
-            for schema, table, name, data_type, nullable, scale in cur.execute(COLUMNS_SQL):
+            for row in cur.execute(COLUMNS_SQL):
+                schema, table, name, data_type, nullable, scale, precision = row
                 ctype = TYPE_MAP.get(data_type, ColumnType.STRING)
                 columns.setdefault((schema, table), []).append(
                     ColumnSpec(
@@ -117,7 +157,10 @@ class PostgresConnector(SqlConnector):
                         type=ctype,
                         nullable=nullable == "YES",
                         source_type=data_type,
-                        scale=scale if ctype == ColumnType.DECIMAL else None,
+                        # More than 38 digits cannot be held exactly: stored as a double.
+                        scale=scale
+                        if ctype == ColumnType.DECIMAL and (precision or 0) <= 38
+                        else None,
                         tz_aware=data_type == "timestamp with time zone",
                     )
                 )

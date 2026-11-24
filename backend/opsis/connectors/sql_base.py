@@ -29,6 +29,7 @@ from opsis.connectors.base import (
 from opsis.connectors.tabular import rows_to_batch
 
 CURSOR_TYPES = {ColumnType.INTEGER, ColumnType.TIMESTAMP, ColumnType.DATE, ColumnType.DECIMAL}
+CURSOR_VALUES = (datetime, date, int, float, Decimal)
 
 
 def encode_cursor(value: Any) -> dict[str, Any] | None:
@@ -188,6 +189,22 @@ class SqlConnector(ABC):
             sql += f" ORDER BY {self._quote(cursor_field)}"
         cursor_index = wanted.index(cursor_field) if cursor_field else -1
         seen: dict[str, Any] = {"max": last}
+        conversion = options.conversion
+
+        def track(rows: list[Any]) -> None:
+            # Invalid values (a zero date comes back as text) cannot be a cursor.
+            raw = [r[cursor_index] for r in rows]
+            values = [v for v in raw if isinstance(v, CURSOR_VALUES) and not isinstance(v, bool)]
+            if not values:
+                return
+            try:
+                top = max(values)
+                seen["max"] = top if seen["max"] is None else max(seen["max"], top)
+            except TypeError as exc:
+                raise ConnectorError(
+                    f"The cursor column {cursor_field!r} of {stream!r} holds values that cannot "
+                    f"be compared, such as {values[0]!r}. Choose another cursor column."
+                ) from exc
 
         def batches() -> Iterator[pa.RecordBatch]:
             produced = False
@@ -199,18 +216,15 @@ class SqlConnector(ABC):
                         if not rows:
                             break
                         if cursor_index >= 0:
-                            values = [r[cursor_index] for r in rows if r[cursor_index] is not None]
-                            if values:
-                                top = max(values)
-                                seen["max"] = top if seen["max"] is None else max(seen["max"], top)
+                            track(rows)
                         produced = True
-                        yield rows_to_batch(columns, rows)
+                        yield rows_to_batch(columns, rows, conversion)
             except ConnectorError:
                 raise
             except Exception as exc:
                 raise ConnectorError(f"Reading {stream!r} failed: {self._friendly(exc)}") from exc
             if not produced:
-                yield rows_to_batch(columns, [])
+                yield rows_to_batch(columns, [], conversion)
 
         def final_state() -> dict[str, Any]:
             return encode_cursor(seen["max"]) or {} if cursor_field else {}

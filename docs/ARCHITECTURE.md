@@ -94,6 +94,7 @@ sequenceDiagram
   - **append**: the previous files are hard-linked into the new directory and the new rows are added as extra files. Only rows with a cursor value above the saved one are read.
   - **merge**: rows changed since the saved cursor are read, then DuckDB combines them with the previous snapshot, keeping the newest row per primary key. Rows deleted in the source are not removed; a full rebuild does that.
 - The first refresh of any dataset, and a "full rebuild", read everything.
+- Values that do not fit their column's type (a MySQL zero date, text in a number column) are stored as NULL and counted by the conversion layer every connector builds its batches with (`opsis/connectors/convert.py`, ADR-027). Invalid dates follow the connection's `invalid_dates` setting. A dataset's column types set by hand are applied to the batches after the connector, before the snapshot is written. The report (per column: how many, why, samples; type suggestions) is kept with the snapshot and is the job's `dataQuality` result.
 - Secrets: connection settings are split by the connector's schema. Fields marked `x-secret` are encrypted with Fernet (`ENCRYPTION_KEY`) into one column; the rest is plain JSON. The API returns only the names of secret fields that have a value.
 
 ## 3. Data flow: query

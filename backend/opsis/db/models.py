@@ -147,6 +147,11 @@ class Dataset(Base):
         JSONB, default=list, server_default=text("'[]'::jsonb")
     )
     columns: Mapped[list[str] | None] = mapped_column(JSONB)  # None means all columns
+    # Types chosen on the dataset page: {column: {"type": "date", "format": "%d/%m/%Y"}}.
+    # Applied after the connector on every refresh, so they survive rediscovery.
+    column_overrides: Mapped[dict[str, dict[str, Any]]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
     state: Mapped[dict[str, Any] | None] = mapped_column(JSONB)  # connector cursor state
     # Points at the snapshot readers use. Updated in one transaction with `state`.
     current_snapshot_id: Mapped[uuid.UUID | None] = mapped_column()
@@ -178,6 +183,9 @@ class Snapshot(Base):
     row_count: Mapped[int] = mapped_column(BigInteger)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     columns: Mapped[list[dict[str, str]]] = mapped_column(JSONB)  # [{name, type}]
+    # What the refresh changed: values stored as NULL per column, with reasons and
+    # samples, and type suggestions (opsis.connectors.convert.Conversion.report).
+    report: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     mode: Mapped[str] = mapped_column(String(20))  # how this snapshot was built
     job_id: Mapped[uuid.UUID | None] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

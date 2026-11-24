@@ -47,13 +47,13 @@ export async function api(page: Page, method: "GET" | "POST" | "PUT" | "DELETE",
   return body(response, `${method} ${path}`);
 }
 
-/** Upload the CSV, create a connection and a dataset, and wait for the first refresh. */
-export async function createDataset(page: Page): Promise<Fixture> {
+/** Upload a CSV (the one above unless given), create a connection and a dataset, and wait for the first refresh. */
+export async function createDataset(page: Page, csv: string = CSV): Promise<Fixture> {
   const stamp = Date.now().toString(36);
   const uploaded = await body(
     await page.request.post("api/uploads", {
       headers: await csrf(page),
-      multipart: { file: { name: `smoke_${stamp}.csv`, mimeType: "text/csv", buffer: Buffer.from(CSV) } },
+      multipart: { file: { name: `smoke_${stamp}.csv`, mimeType: "text/csv", buffer: Buffer.from(csv) } },
     }),
     "upload",
   );

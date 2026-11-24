@@ -109,18 +109,23 @@ def _column(field: dict[str, Any]) -> ColumnSpec | None:
 
 
 def _value(raw: Any, column: ColumnSpec) -> Any:
+    """Salesforce's JSON values as Python values. A value that does not parse is
+    passed on as it is: the conversion layer stores it as NULL and reports it."""
     if raw is None:
         return None
-    match column.type:
-        case ColumnType.DATE:
-            return date.fromisoformat(str(raw)[:10])
-        case ColumnType.TIMESTAMP:
-            text = str(raw).replace("Z", "+00:00")
-            if len(text) > 5 and text[-5] in "+-" and text[-3] != ":":  # +0000 to +00:00
-                text = f"{text[:-2]}:{text[-2:]}"
-            return datetime.fromisoformat(text).astimezone(UTC)
-        case ColumnType.DECIMAL:
-            return Decimal(str(raw))
+    try:
+        match column.type:
+            case ColumnType.DATE:
+                return date.fromisoformat(str(raw)[:10])
+            case ColumnType.TIMESTAMP:
+                text = str(raw).replace("Z", "+00:00")
+                if len(text) > 5 and text[-5] in "+-" and text[-3] != ":":  # +0000 to +00:00
+                    text = f"{text[:-2]}:{text[-2:]}"
+                return datetime.fromisoformat(text).astimezone(UTC)
+            case ColumnType.DECIMAL:
+                return Decimal(str(raw))
+    except (ValueError, ArithmeticError):
+        return raw
     return raw
 
 
@@ -414,7 +419,7 @@ class SalesforceConnector:
                             newest[:] = [seen]
                     if len(rows) >= options.batch_size:
                         produced = True
-                        yield rows_to_batch(wanted, rows)
+                        yield rows_to_batch(wanted, rows, options.conversion)
                         rows = []
             except ConnectorError:
                 raise
@@ -425,7 +430,7 @@ class SalesforceConnector:
                     raise ConnectorError(f"Salesforce stopped the read: {exc}") from None
                 raise
             if rows or not produced:
-                yield rows_to_batch(wanted, rows)
+                yield rows_to_batch(wanted, rows, options.conversion)
 
         def final_state() -> dict[str, Any]:
             if cursor is None or not newest:

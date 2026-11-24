@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { ColumnTypes, DataQualityCard, JobQuality } from "../components/DataQuality";
 import { DatasetAccessPanel } from "../components/DatasetAccessPanel";
 import { ScheduleCard } from "../components/ScheduleCard";
 import type { AppConfig, Me } from "../lib/config";
@@ -46,6 +47,7 @@ export function JobRow({ job, timezone, name }: { job: Job; timezone: string; na
       </td>
       <td className={`${TD} text-right tabular-nums`}>
         {job.result?.rowCount !== undefined ? formatNumber(job.result.rowCount) : ""}
+        <JobQuality report={job.result?.dataQuality} />
       </td>
       <td className={`${TD} max-w-sm text-xs text-red-700 dark:text-red-400`}>{job.error}</td>
     </tr>
@@ -170,6 +172,8 @@ export function DatasetDetail({ config, me }: { config: AppConfig; me: Me }) {
         )}
       </Card>
 
+      <DataQualityCard report={data.snapshot?.report} />
+
       <h2 className="mb-2 text-base font-semibold">Preview</h2>
       <Card className="mb-5">
         {!data.snapshot ? (
@@ -233,6 +237,8 @@ export function DatasetDetail({ config, me }: { config: AppConfig; me: Me }) {
           <Empty>Loading preview...</Empty>
         )}
       </Card>
+
+      <ColumnTypes dataset={data} />
 
       <div className="grid gap-5 lg:grid-cols-5">
         <div className="lg:col-span-3">

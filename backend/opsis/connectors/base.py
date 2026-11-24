@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 if TYPE_CHECKING:
     import pyarrow as pa
 
+    from opsis.connectors.convert import Conversion
+
 
 class ColumnType(StrEnum):
     """Logical column types shared by connectors, storage and the semantic model."""
@@ -82,6 +84,10 @@ class ReadOptions:
     cursor_field: str | None = None  # required for APPEND and MERGE
     primary_key: tuple[str, ...] = ()  # required for MERGE
     batch_size: int = 50_000
+    # How values become their column's type, and the record of what could not
+    # (stored as NULL and reported after the refresh). Connectors pass it to
+    # rows_to_batch; the refresh job sets it from the connection's settings.
+    conversion: Conversion | None = None
 
 
 class ReadResult:

@@ -400,12 +400,43 @@ def describe_dataset(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any
     }
     if sample_note:
         result["sampleValuesNote"] = sample_note
+    quality = _data_quality(snapshot.get("report"), detail.get("columnOverrides") or {}, restricted)
+    if quality is not None:
+        result["dataQuality"] = quality
     if not result["hasData"]:
         result["note"] = (
             "This dataset has no data yet. Call trigger_refresh, then get_job_status, before "
             "using it in a dashboard."
         )
     return result
+
+
+def _data_quality(
+    report: dict[str, Any] | None, overrides: dict[str, Any], restricted: bool
+) -> dict[str, Any] | None:
+    """What the last refresh changed: values stored as NULL per column (with the
+    reason and raw samples), and suggested types for text columns."""
+    if not report:
+        return None
+    if restricted:  # a sample could come from a row hidden from the caller
+        report = datasets.hide_samples(report)
+    found: dict[str, Any] = {
+        "emptiedValues": report.get("emptiedValues", 0),
+        "emptiedByColumn": report.get("emptied", []),
+        "invalidDates": report.get("invalidDates", "null"),
+        "suggestedTypes": report.get("suggestions", []),
+        "typeOverrides": overrides,
+    }
+    if report.get("textDates"):
+        found["datesReadAsText"] = report["textDates"]
+    if found["emptiedValues"] or found["suggestedTypes"]:
+        found["note"] = (
+            "emptiedByColumn lists values the source holds that could not be stored in the "
+            "column's type (an invalid date, text in a number column): they are NULL here, so "
+            "counts and sums leave them out. suggestedTypes are text columns whose values all "
+            "look like another type; a person can apply one on the dataset page."
+        )
+    return found
 
 
 def _first_time(dimensions: list[dict[str, Any]], dataset: str) -> str:
@@ -1012,7 +1043,7 @@ def get_job_status(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
             "invalid_request",
             "`job_id` must be the jobId returned by trigger_refresh.",
         ) from None
-    job = datasets.get_job(db, job_id)
+    job = datasets.get_job(db, job_id, settings=ctx.settings, principal=ctx.principal)
     result = {
         "jobId": job["id"],
         "status": job["status"],
@@ -1088,7 +1119,9 @@ TOOLS: tuple[Tool, ...] = (
         "describe_dataset",
         "Describe a dataset",
         "Get everything needed to use one dataset: its dimensions and measures with the exact "
-        "`ref` to use for each (written dataset.field), sample values, row count and freshness. "
+        "`ref` to use for each (written dataset.field), sample values, row count and freshness, "
+        "and `dataQuality`: values the last refresh stored as NULL because they did not fit "
+        "their column (per column, with the reason and samples) and suggested types. "
         "Always call this before create_dashboard, patch_dashboard or run_query, and copy field "
         'refs from its result. Example input: {"dataset": "gifts"}',
         _schema({"dataset": _DATASET}, ["dataset"]),

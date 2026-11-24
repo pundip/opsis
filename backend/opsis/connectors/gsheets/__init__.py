@@ -576,22 +576,24 @@ class GoogleSheetsConnector:
 
     @staticmethod
     def _convert(value: Any, column: ColumnSpec) -> Any:
+        """Sheets' own encodings (dates and times are serial numbers). Anything else
+        is left to the conversion layer, which stores a value that does not fit the
+        column (text in a date column, say) as NULL and reports it."""
         if value is None or value == "":
             return None
+        number = isinstance(value, int | float) and not isinstance(value, bool)
         match column.type:
-            case ColumnType.DATE:
-                return _serial(value).date() if isinstance(value, int | float) else None
-            case ColumnType.TIMESTAMP:
-                return _serial(value) if isinstance(value, int | float) else None
-            case ColumnType.INTEGER:
-                return int(value) if isinstance(value, int | float) else None
-            case ColumnType.FLOAT:
-                return float(value) if isinstance(value, int | float) else None
-            case ColumnType.BOOLEAN:
-                return value if isinstance(value, bool) else None
-        if column.source_type == "time" and isinstance(value, int | float):
-            return _serial(value).strftime("%H:%M:%S")  # a time of day: a fraction of a day
-        return _text(value)
+            case ColumnType.DATE | ColumnType.TIMESTAMP if number:
+                try:
+                    moment = _serial(value)
+                except (OverflowError, ValueError):
+                    return value  # far outside the calendar: reported as not a date
+                return moment.date() if column.type == ColumnType.DATE else moment
+            case ColumnType.STRING:
+                if column.source_type == "time" and number:
+                    return _serial(value).strftime("%H:%M:%S")  # a fraction of a day
+                return _text(value)
+        return value
 
     def _columns(self, title: str, values: list[list[Any]] | None) -> list[ColumnSpec]:
         header, kinds = self._sample(title)
@@ -678,9 +680,10 @@ class GoogleSheetsConnector:
 
         def batches() -> Iterator[pa.RecordBatch]:
             if not converted:
-                yield rows_to_batch(columns, [])
+                yield rows_to_batch(columns, [], options.conversion)
             for start in range(0, len(converted), options.batch_size):
-                yield rows_to_batch(columns, converted[start : start + options.batch_size])
+                chunk = converted[start : start + options.batch_size]
+                yield rows_to_batch(columns, chunk, options.conversion)
 
         return ReadResult(batches())
 

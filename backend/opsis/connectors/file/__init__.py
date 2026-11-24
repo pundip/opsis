@@ -26,6 +26,7 @@ from opsis.connectors.base import (
     StreamSpec,
     TestResult,
 )
+from opsis.connectors.convert import Conversion
 from opsis.connectors.tabular import arrow_schema, rows_to_batch, unique_names
 
 CSV_SUFFIXES = {".csv", ".tsv", ".txt"}
@@ -167,6 +168,13 @@ class FileConnector:
             columns = self._csv_types(relation)
             if options.columns:
                 columns = [c for c in columns if c.name in options.columns]
+            # DuckDB types each column over the whole file, so a column with one
+            # value that is not a number or date is text, and every cast below fits.
+            # The conversion layer still records the columns and may keep dates as
+            # text (the connection's setting), and suggests types for text columns.
+            conversion = options.conversion or Conversion()
+            conversion.note(columns)
+            columns = [conversion.effective(c) for c in columns]
             conn.execute("SET TimeZone = 'UTC'")
             projection = ", ".join(
                 'CAST("{0}" AS {1}) AS "{0}"'.format(
@@ -184,7 +192,7 @@ class FileConnector:
             except duckdb.Error as exc:
                 raise ConnectorError(f"Could not read the CSV file: {exc}") from exc
             if not produced:
-                yield rows_to_batch(columns, [])
+                yield rows_to_batch(columns, [], conversion)
         finally:
             conn.close()
 
@@ -266,9 +274,10 @@ class FileConnector:
 
         def batches() -> Iterator[pa.RecordBatch]:
             if not rows:
-                yield rows_to_batch(columns, [])
+                yield rows_to_batch(columns, [], options.conversion)
             for start in range(0, len(rows), options.batch_size):
-                yield rows_to_batch(columns, rows[start : start + options.batch_size])
+                chunk = rows[start : start + options.batch_size]
+                yield rows_to_batch(columns, chunk, options.conversion)
 
         return ReadResult(batches())
 

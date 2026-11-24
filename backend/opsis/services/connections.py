@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import shutil
 import uuid
 from datetime import UTC, datetime
@@ -13,6 +14,7 @@ from sqlalchemy.orm import Session, object_session
 
 from opsis.auth.principal import Principal
 from opsis.connectors.base import ConnectorError, ReconnectNeeded, StreamSpec
+from opsis.connectors.convert import INVALID_DATES
 from opsis.connectors.registry import get_registry
 from opsis.db.models import Connection, Dataset
 from opsis.errors import ApiError
@@ -31,9 +33,39 @@ def connector_class(settings: Settings, connector_id: str) -> Any:
     return cls
 
 
+# A setting every connection has: what to do with dates that cannot exist, which
+# legacy databases hold (MySQL's 0000-00-00 in a non-strict sql_mode). See
+# opsis.connectors.convert.
+INVALID_DATES_FIELD: dict[str, Any] = {
+    "type": "string",
+    "title": "Invalid dates",
+    "description": "Dates that cannot exist, such as 0000-00-00 or 2020-05-00, which old "
+    "databases can hold. Each refresh reports how many it found, column by column.",
+    "enum": list(INVALID_DATES),
+    "x-enum-labels": {
+        "null": "Store them as empty (NULL)",
+        "text": "Read date columns as text, exactly as stored",
+        "fail": "Stop the refresh",
+    },
+    "default": "null",
+}
+
+
+def form_schema(cls: Any) -> dict[str, Any]:
+    """A connector's settings plus the ones every connection has."""
+    schema: dict[str, Any] = copy.deepcopy(cls.config_schema())
+    schema.setdefault("properties", {})["invalid_dates"] = INVALID_DATES_FIELD
+    return schema
+
+
+def invalid_dates(connection: Connection) -> str:
+    chosen = str((connection.config or {}).get("invalid_dates") or "null")
+    return chosen if chosen in INVALID_DATES else "null"
+
+
 def list_connectors(settings: Settings) -> list[dict[str, Any]]:
     return [
-        {"id": c.id, "name": c.name, "version": c.version, "configSchema": c.config_schema()}
+        {"id": c.id, "name": c.name, "version": c.version, "configSchema": form_schema(c)}
         for c in get_registry(settings.plugins_dir).all()
     ]
 
@@ -70,7 +102,7 @@ def _split(
     A secret field left empty keeps its saved value, so editing a connection
     never requires typing the password again.
     """
-    schema = connector_class(settings, connector_id).config_schema()
+    schema = form_schema(connector_class(settings, connector_id))
     secret_names = _fields(schema, "x-secret")
     cleaned = {k: v for k, v in submitted.items() if v is not None and v != ""}
     secrets = dict(existing_secrets or {})

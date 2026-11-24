@@ -213,11 +213,28 @@ class RefreshIn(BaseModel):
     full: bool = False  # rebuild from scratch, ignoring the incremental cursor
 
 
+class ColumnTypesIn(BaseModel):
+    # {column: {"type": "date", "format": "%d/%m/%Y"}}; a column left out (or None)
+    # goes back to the type the source gives it.
+    overrides: dict[str, dict[str, Any] | None]
+
+
 def _allowed(db: Session, dataset_id: uuid.UUID, principal: Principal) -> Dataset:
     """A dataset, if the caller may use it (restricted datasets)."""
     dataset = datasets.get(db, dataset_id)
     access.require_datasets(db, principal, {dataset.name})
     return dataset
+
+
+def _detail(
+    db: Session, settings: Settings, principal: Principal, dataset: Dataset
+) -> dict[str, Any]:
+    """The dataset with its refresh report. Sample values are left out when
+    row-level security hides some of its rows from the caller."""
+    found = datasets.detail(db, dataset)
+    if str(dataset.id) in datasets.samples_hidden_from(db, settings, principal, {str(dataset.id)}):
+        found = datasets.without_samples(found)
+    return found
 
 
 @router.get("/datasets")
@@ -261,7 +278,7 @@ def get_dataset(
     principal: Principal = Depends(edit),
 ) -> dict[str, Any]:
     dataset = _allowed(db, dataset_id, principal)
-    found = datasets.detail(db, dataset)
+    found = _detail(db, settings, principal, dataset)
     if settings.feature_scheduled_refresh:
         found["schedule"] = schedules.refresh_schedule(db, settings, dataset)
     return found
@@ -288,6 +305,24 @@ def refresh_dataset(
         db, actor, _allowed(db, dataset_id, actor), full=bool(body and body.full)
     )
     return datasets.job_dict(job)
+
+
+@router.put("/datasets/{dataset_id}/columns")
+def set_column_types(
+    dataset_id: uuid.UUID,
+    body: ColumnTypesIn,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    actor: Principal = Depends(edit),
+) -> dict[str, Any]:
+    """Choose column types by hand. The dataset is rebuilt with them straight away."""
+    dataset = _allowed(db, dataset_id, actor)
+    job = datasets.set_overrides(db, actor, dataset, body.overrides)
+    found = _detail(db, settings, actor, dataset)
+    found["job"] = datasets.job_dict(job) if job else None
+    if settings.feature_scheduled_refresh:
+        found["schedule"] = schedules.refresh_schedule(db, settings, dataset)
+    return found
 
 
 @router.get("/datasets/{dataset_id}/preview")
@@ -324,13 +359,17 @@ def list_jobs(
     datasetId: uuid.UUID | None = None,
     limit: int = 50,
     db: Session = Depends(get_db),
-    _: Principal = Depends(edit),
+    settings: Settings = Depends(get_settings),
+    principal: Principal = Depends(edit),
 ) -> list[dict[str, Any]]:
-    return datasets.list_jobs(db, datasetId, limit)
+    return datasets.list_jobs(db, datasetId, limit, settings=settings, principal=principal)
 
 
 @router.get("/jobs/{job_id}")
 def get_job(
-    job_id: uuid.UUID, db: Session = Depends(get_db), _: Principal = Depends(edit)
+    job_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    principal: Principal = Depends(edit),
 ) -> dict[str, Any]:
-    return datasets.get_job(db, job_id)
+    return datasets.get_job(db, job_id, settings=settings, principal=principal)

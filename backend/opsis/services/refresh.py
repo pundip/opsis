@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from opsis.connectors.base import ConnectorError, ReadOptions, ReconnectNeeded, RefreshMode
+from opsis.connectors.convert import Conversion
 from opsis.db.models import Connection, Dataset, Job, Snapshot
 from opsis.errors import JobError
 from opsis.services import connections, models
@@ -45,10 +46,17 @@ def run_refresh(db: Session, job: Job, settings: Settings) -> dict[str, Any]:
     if job.payload.get("full") or previous_id is None:
         mode = RefreshMode.FULL  # first run, or the user asked to rebuild
     state = dataset.state if mode != RefreshMode.FULL else None
+    # Values that cannot become their column's type are stored as NULL and
+    # counted; invalid dates follow the connection's setting. See connectors.convert.
+    conversion = Conversion(
+        table=dataset.stream, invalid_dates=connections.invalid_dates(connection)
+    )
+    overrides = dict(dataset.column_overrides or {})
     options = ReadOptions(
         columns=tuple(dataset.columns) if dataset.columns else None,
         cursor_field=dataset.cursor_field,
         primary_key=tuple(dataset.primary_key),
+        conversion=conversion,
     )
     # The configured mode decides whether a cursor is tracked, even on a full run,
     # so the next incremental refresh knows where to continue.
@@ -65,10 +73,13 @@ def run_refresh(db: Session, job: Job, settings: Settings) -> dict[str, Any]:
         raise RefreshError(str(exc)) from exc
     try:
         result = connector.read(stream, read_mode, state, options)
+        # Overrides are keyed by the stored column names, so the names are made
+        # distinct first (as the snapshot would).
+        shaped = conversion.shape(snapshots.with_distinct_names(result.batches), overrides)
         built = snapshots.build_snapshot(
             settings,
             dataset_id,
-            result.batches,
+            shaped,
             mode=mode,
             previous=previous,
             primary_key=primary_key,
@@ -90,6 +101,7 @@ def run_refresh(db: Session, job: Job, settings: Settings) -> dict[str, Any]:
     if locked is None:
         snapshots.remove_snapshot(settings, dataset_id, built.snapshot_id)
         raise RefreshError("The dataset was deleted while it was refreshing.")
+    report = conversion.report()
     db.add(
         Snapshot(
             id=built.snapshot_id,
@@ -97,6 +109,7 @@ def run_refresh(db: Session, job: Job, settings: Settings) -> dict[str, Any]:
             row_count=built.row_count,
             size_bytes=built.size_bytes,
             columns=built.columns,
+            report=report,
             mode=mode.value,
             job_id=job.id,
         )
@@ -107,12 +120,21 @@ def run_refresh(db: Session, job: Job, settings: Settings) -> dict[str, Any]:
     # A new dataset gets a starter semantic model; an unedited starter follows the columns.
     models.ensure_starter(db, locked, {c["name"]: c["type"] for c in built.columns})
     db.flush()
+    if report["emptiedValues"]:
+        log.info(
+            "Refresh of %s stored %d value(s) as NULL: %s",
+            dataset.name,
+            report["emptiedValues"],
+            ", ".join(f"{e['column']} {e['count']}" for e in report["emptied"]),
+        )
     return {
         "snapshotId": str(built.snapshot_id),
         "rowCount": built.row_count,
         "sizeBytes": built.size_bytes,
         "mode": mode.value,
         "seconds": round(time.monotonic() - started, 2),
+        # Per column: values stored as NULL, why, and samples; type suggestions.
+        "dataQuality": report,
     }
 
 

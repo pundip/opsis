@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from opsis.auth.principal import Principal
 from opsis.connectors.base import RefreshMode
+from opsis.connectors.convert import OVERRIDE_TYPES, check_format
 from opsis.db.models import Connection, Dataset, Job, Snapshot
 from opsis.errors import ApiError
 from opsis.jobs import queue
@@ -39,32 +40,104 @@ def get(db: Session, dataset_id: uuid.UUID) -> Dataset:
     return dataset
 
 
-def job_dict(job: Job) -> dict[str, Any]:
+def hide_samples(report: dict[str, Any]) -> dict[str, Any]:
+    """A refresh report without the raw sample values, which are the source's data."""
+    emptied = [{**e, "samples": [], "samplesHidden": True} for e in report.get("emptied", [])]
+    return {**report, "emptied": emptied}
+
+
+def samples_hidden_from(
+    db: Session, settings: Settings, principal: Principal, dataset_ids: set[str]
+) -> set[str]:
+    """Which of these datasets (ids as text) show `principal` their refresh reports
+    without sample values: restricted datasets they may not use, and datasets where
+    row-level security hides rows from them (a sample could come from such a row)."""
+    from opsis.services import access
+    from opsis.services import query as queries  # avoids an import cycle
+
+    wanted = []
+    for value in dataset_ids:
+        try:
+            wanted.append(uuid.UUID(str(value)))
+        except ValueError:
+            continue
+    if not wanted:
+        return set()
+    names = {
+        str(i): n
+        for i, n in db.execute(select(Dataset.id, Dataset.name).where(Dataset.id.in_(wanted)))
+    }
+    blocked = access.blocked_datasets(db, principal)
+    user = queries.user_context(principal, None)
+    sources = queries.load_sources(db, settings, set(names.values()) - blocked)
+    limited = {name for name, source in sources.items() if queries.rls_applies(source, user)}
+    return {i for i, name in names.items() if name in blocked or name in limited}
+
+
+def _quality(result: Any, *, brief: bool, hidden: bool) -> Any:
+    report = result.get("dataQuality") if isinstance(result, dict) else None
+    if not isinstance(report, dict):
+        return result
+    if brief:  # lists: the count alone
+        return {**result, "dataQuality": {"emptiedValues": report.get("emptiedValues", 0)}}
+    return {**result, "dataQuality": hide_samples(report)} if hidden else result
+
+
+def job_dict(job: Job, *, hidden: set[str] | None = None, brief: bool = False) -> dict[str, Any]:
+    """A job for the API. A refresh's result holds its data quality report: only
+    its count when `brief`, and without sample values for the datasets in `hidden`
+    (see samples_hidden_from)."""
+    dataset_id = job.payload.get("dataset_id")
     return {
         "id": str(job.id),
         "type": job.type,
         "status": job.status,
-        "datasetId": job.payload.get("dataset_id"),
+        "datasetId": dataset_id,
         "full": bool(job.payload.get("full")),
         "attempts": job.attempts,
         "error": job.error,
-        "result": job.result,
+        "result": _quality(job.result, brief=brief, hidden=dataset_id in (hidden or set())),
         "createdAt": job.created_at.isoformat(),
         "startedAt": job.started_at.isoformat() if job.started_at else None,
         "finishedAt": job.finished_at.isoformat() if job.finished_at else None,
     }
 
 
-def snapshot_dict(snapshot: Snapshot, current: bool) -> dict[str, Any]:
-    return {
+def snapshot_dict(snapshot: Snapshot, current: bool, *, report: bool = False) -> dict[str, Any]:
+    found = snapshot.report or {}
+    described = {
         "id": str(snapshot.id),
         "rowCount": snapshot.row_count,
         "sizeBytes": snapshot.size_bytes,
         "mode": snapshot.mode,
         "columns": snapshot.columns,
+        # Values the refresh stored as NULL because they did not fit their column.
+        "emptiedValues": found.get("emptiedValues", 0),
         "createdAt": snapshot.created_at.isoformat(),
         "current": current,
     }
+    if report:
+        # Per column: how many, why and samples; type suggestions. None for
+        # snapshots made before reports existed.
+        described["report"] = snapshot.report
+    return described
+
+
+def without_samples(found: dict[str, Any]) -> dict[str, Any]:
+    """A serialized dataset (or snapshot) with its reports' sample values removed."""
+    if found.get("report"):
+        found = {**found, "report": hide_samples(found["report"])}
+    snapshot = found.get("snapshot")
+    if snapshot and snapshot.get("report"):
+        found = {**found, "snapshot": {**snapshot, "report": hide_samples(snapshot["report"])}}
+    for key in ("lastJob", "job"):
+        job = found.get(key)
+        if job:
+            found = {
+                **found,
+                key: {**job, "result": _quality(job["result"], brief=False, hidden=True)},
+            }
+    return found
 
 
 def _latest_jobs(db: Session, dataset_ids: list[uuid.UUID]) -> dict[str, Job]:
@@ -81,8 +154,15 @@ def _latest_jobs(db: Session, dataset_ids: list[uuid.UUID]) -> dict[str, Job]:
 
 
 def serialize(
-    dataset: Dataset, connection: Connection | None, snapshot: Snapshot | None, job: Job | None
+    dataset: Dataset,
+    connection: Connection | None,
+    snapshot: Snapshot | None,
+    job: Job | None,
+    *,
+    full: bool = False,
 ) -> dict[str, Any]:
+    """A dataset for the API. `full` adds the refresh report with its sample values:
+    the caller hides them from those who may not see them (see samples_hidden_from)."""
     return {
         "id": str(dataset.id),
         "name": dataset.name,
@@ -95,10 +175,11 @@ def serialize(
         "cursorField": dataset.cursor_field,
         "primaryKey": dataset.primary_key,
         "columns": dataset.columns,
+        "columnOverrides": dataset.column_overrides or {},
         "restricted": dataset.restricted,
         "createdBy": str(dataset.created_by) if dataset.created_by else None,
-        "snapshot": snapshot_dict(snapshot, True) if snapshot else None,
-        "lastJob": job_dict(job) if job else None,
+        "snapshot": snapshot_dict(snapshot, True, report=full) if snapshot else None,
+        "lastJob": job_dict(job, brief=not full) if job else None,
         "createdAt": dataset.created_at.isoformat(),
     }
 
@@ -118,7 +199,7 @@ def detail(db: Session, dataset: Dataset) -> dict[str, Any]:
     connection = db.get(Connection, dataset.connection_id)
     current = db.get(Snapshot, dataset.current_snapshot_id) if dataset.current_snapshot_id else None
     job = _latest_jobs(db, [dataset.id]).get(str(dataset.id))
-    return serialize(dataset, connection, current, job)
+    return serialize(dataset, connection, current, job, full=True)
 
 
 def create(
@@ -230,6 +311,83 @@ def request_refresh(db: Session, actor: Principal, dataset: Dataset, *, full: bo
     )
 
 
+def set_overrides(
+    db: Session, actor: Principal, dataset: Dataset, submitted: dict[str, Any]
+) -> Job | None:
+    """Replace the dataset's column types chosen by hand, and rebuild it with them.
+
+    `submitted` maps a stored column name to {"type": ..., "format": ...}, or to
+    None to go back to the source's type. Returns the full refresh queued, if any.
+    """
+    snapshot = (
+        db.get(Snapshot, dataset.current_snapshot_id) if dataset.current_snapshot_id else None
+    )
+    if snapshot is None:
+        raise ApiError(
+            409, "no_data", "Refresh the dataset first: its columns are known after a refresh."
+        )
+    running = db.scalars(
+        select(Job).where(Job.dedupe_key == f"dataset:{dataset.id}", Job.status == "running")
+    ).first()
+    if running is not None:
+        raise ApiError(
+            409,
+            "refresh_running",
+            "The dataset is refreshing now. Change the column types when it has finished.",
+        )
+    known = {c["name"] for c in snapshot.columns}
+    overrides: dict[str, dict[str, Any]] = {}
+    problems = []
+    for name, chosen in submitted.items():
+        if chosen is None:
+            continue
+        path = f"/overrides/{name}"
+        if name not in known:
+            problems.append({"path": path, "message": f"The dataset has no column {name!r}."})
+            continue
+        kind = chosen.get("type") if isinstance(chosen, dict) else None
+        if kind not in OVERRIDE_TYPES:
+            problems.append(
+                {"path": path, "message": f"Choose one of: {', '.join(OVERRIDE_TYPES)}."}
+            )
+            continue
+        entry: dict[str, Any] = {"type": kind}
+        date_format = str(chosen.get("format") or "").strip()
+        if date_format:
+            if kind not in ("date", "datetime"):
+                problems.append(
+                    {"path": path, "message": "Only date and datetime columns take a format."}
+                )
+                continue
+            try:
+                entry["format"] = check_format(date_format)
+            except ValueError as exc:
+                problems.append({"path": path, "message": str(exc)})
+                continue
+        overrides[name] = entry
+    if problems:
+        raise ApiError(422, "invalid_overrides", "Some column types are not valid.", problems)
+    before = dict(dataset.column_overrides or {})
+    if overrides == before:
+        return None
+    dataset.column_overrides = overrides
+    audit.record(
+        db,
+        action="dataset.column_types_changed",
+        actor=actor,
+        target_type="dataset",
+        target_id=str(dataset.id),
+        detail={"name": dataset.name, "before": before, "after": overrides},
+    )
+    db.commit()
+    # The stored types change, so an incremental refresh could not add to the old files.
+    job = request_refresh(db, actor, dataset, full=True)
+    if job.status == "queued" and not job.payload.get("full"):
+        job.payload = {**job.payload, "full": True}  # one was already waiting: rebuild instead
+        db.commit()
+    return job
+
+
 def delete(db: Session, settings: Settings, actor: Principal, dataset: Dataset) -> None:
     dataset_id = dataset.id
     audit.record(
@@ -303,18 +461,50 @@ def preview(
     }
 
 
-def list_jobs(db: Session, dataset_id: uuid.UUID | None, limit: int) -> list[dict[str, Any]]:
+def _hidden_for(
+    db: Session, jobs: list[Job], settings: Settings | None, principal: Principal | None
+) -> set[str]:
+    if settings is None or principal is None:
+        return set()
+    reported = {
+        str(job.payload["dataset_id"])
+        for job in jobs
+        if job.payload.get("dataset_id")
+        and isinstance(job.result, dict)
+        and job.result.get("dataQuality")
+    }
+    return samples_hidden_from(db, settings, principal, reported)
+
+
+def list_jobs(
+    db: Session,
+    dataset_id: uuid.UUID | None,
+    limit: int,
+    *,
+    settings: Settings | None = None,
+    principal: Principal | None = None,
+) -> list[dict[str, Any]]:
+    """Recent jobs. With a principal, refresh reports of datasets they may not see
+    in full lose their sample values."""
     query = select(Job).order_by(Job.created_at.desc()).limit(max(1, min(limit, 200)))
     if dataset_id is not None:
         query = query.where(Job.payload["dataset_id"].astext == str(dataset_id))
-    return [job_dict(job) for job in db.scalars(query).all()]
+    jobs = list(db.scalars(query).all())
+    hidden = _hidden_for(db, jobs, settings, principal)
+    return [job_dict(job, hidden=hidden) for job in jobs]
 
 
-def get_job(db: Session, job_id: uuid.UUID) -> dict[str, Any]:
+def get_job(
+    db: Session,
+    job_id: uuid.UUID,
+    *,
+    settings: Settings | None = None,
+    principal: Principal | None = None,
+) -> dict[str, Any]:
     job = db.get(Job, job_id)
     if job is None:
         raise ApiError(404, "not_found", "Job not found.")
-    return job_dict(job)
+    return job_dict(job, hidden=_hidden_for(db, [job], settings, principal))
 
 
 def count_active_jobs(db: Session) -> int:

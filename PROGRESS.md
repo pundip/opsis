@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-24 (M8)
+Last updated: 2026-11-24 (legacy data, after M8)
 
 ## Milestone status
 
@@ -16,6 +16,26 @@ Last updated: 2026-11-24 (M8)
 | M6 Auth and sharing | Done, reviewed |
 | M7 In-app assistant | Done, reviewed |
 | M8 More connectors and hardening | Done, awaiting review. Still to do: your part of the install check (Proxmox, real Google sign-in), and real Salesforce and Google Sheets runs with your credentials |
+| After M8: legacy data | Done, awaiting review |
+
+## After M8: legacy data that does not fit its column
+
+The bug: a dataset from a MyISAM table (utf8mb3, non-strict `sql_mode`) failed with `Reading 'a_codes' failed: object of type <class 'str'> cannot be converted to int`. PyMySQL returns zero dates as text, and building the Arrow timestamp column failed the whole read. Fixed at the root, for every connector (details in ADR-027):
+
+- **One conversion layer** (`opsis/connectors/convert.py`) that every connector builds its batches through: CSV, Excel, PostgreSQL, MySQL, Google Sheets and Salesforce. A value that cannot become its column's type is stored as NULL and counted, per column and reason, with up to 5 raw samples. One bad value never fails a read. Clean columns still go straight through Arrow.
+- **Invalid dates** (`0000-00-00`, `2020-00-00`, `2020-05-00`, `2021-02-30`, Postgres `infinity` and dates outside years 1 to 9999) follow a new setting on every connection, **Invalid dates**: store as NULL (the default), read the connection's date columns as text, or stop the refresh.
+- **The report** is kept with each snapshot (migration 0012) and is the refresh job's `dataQuality` result: per column the count stored as NULL, the reason and samples. It shows on the dataset page (**Data quality**) and in the refresh history, and MCP's `describe_dataset` and `get_job_status` return it. Samples are left out for people who may not use a restricted dataset and where row-level security hides rows from them.
+- **Column types by hand** on the dataset page (**Column types**): text, whole number, decimal number, date (with a format such as `%d/%m/%Y`), date and time, or true or false. Saving rebuilds the dataset; the choices are kept when the source's columns change, and audited.
+- **Suggestions:** a text column whose values are consistently dates (ISO or a common format), numbers or true/false gets a suggested type with a **Use this type** button. Nothing is applied by itself; placeholders such as `n/a`, codes with leading zeros, and columns with too few values are handled.
+- **Errors** from conversion or a cursor column name the table, the column, its source type and a sample value.
+- **Type fixes:** MySQL `BIGINT UNSIGNED` and `BIT(64)` are exact decimals, `BIT(n)` is a number, `DECIMAL` or `numeric` beyond 38 digits is a double, `TIME` reads as `HH:MM:SS` (also past 24 hours), Postgres intervals read as Postgres writes them, binary data shows as `0x...`. An incremental cursor ignores invalid dates.
+
+### How it was verified
+
+- **Backend:** 317 pytest tests pass (22 new); `ruff check`, `ruff format --check` and `mypy --strict` pass. New tests cover the conversion layer (zero, zero-day, zero-month and impossible dates; NULLs; garbage in number columns; no rounding of 1.5 into an integer column; samples capped at 5; the three invalid-date settings; suggestions; overrides with formats), a MyISAM table created in `sql_mode=''` in the sample MySQL with ENUM, SET, YEAR, BIT(1), BIT(8), BIT(64), TINYINT(1), DECIMAL(10,2), DECIMAL(65,30), BIGINT UNSIGNED, JSON, TIME and virtual and stored generated columns (the report through the API, the job and MCP; column types set by hand, refused when wrong, kept after the source gains a column; stop and text; an append cursor over zero dates), Postgres `infinity`, BC dates, year 10000 and intervals, CSV and Excel suggestions and overrides, text in Google Sheets date and boolean columns, unparseable Salesforce values, and samples hidden from someone who may not see a restricted dataset.
+- **Frontend:** typecheck, lint and the 48 unit tests pass.
+- **Smoke tests:** `npm run smoke` passes at the root, under the sub-path and in server mode, with a new spec (`e2e/tests/data-quality.spec.ts`): suggestions shown but not applied, one taken and a type chosen by hand, the dataset rebuilt, the report's table with reasons and samples, the count in the refresh history, and back to the source's types. The root and the sub-path were run again on the final code.
+- **Your `a_codes` table:** the dataset that failed now refreshes (154 rows). Its report shows 96 values in `end_date` and 2 in `date_created` stored as NULL, all zero dates, and MCP's `describe_dataset` returns the same.
 
 ## M8 More connectors and hardening
 

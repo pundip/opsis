@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import ssl
 from typing import Any, ClassVar
 
@@ -29,7 +30,7 @@ TYPE_MAP = {
 
 COLUMNS_SQL = """
 SELECT c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.COLUMN_TYPE, c.IS_NULLABLE,
-       c.NUMERIC_SCALE, c.COLUMN_KEY, t.TABLE_ROWS
+       c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.COLUMN_KEY, t.TABLE_ROWS
 FROM information_schema.COLUMNS c
 JOIN information_schema.TABLES t
   ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
@@ -40,6 +41,35 @@ ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
 
 def _text(value: Any) -> str:
     return value.decode() if isinstance(value, bytes) else str(value)
+
+
+def column_spec(
+    name: str, data_type: str, column_type: str, nullable: bool, precision: Any, scale: Any
+) -> ColumnSpec:
+    """How a MySQL column is stored. Values that do not fit (a zero date, say) are
+    stored as NULL and reported by the conversion layer."""
+    ctype = TYPE_MAP.get(data_type, ColumnType.STRING)
+    exact: int | None = int(scale) if ctype == ColumnType.DECIMAL and scale is not None else None
+    if column_type.startswith("tinyint(1)") or column_type == "bit(1)":
+        ctype = ColumnType.BOOLEAN
+    elif data_type == "bit":
+        # BIT(n): a number. BIT(64) can exceed a 64-bit signed integer.
+        bits = re.search(r"\((\d+)\)", column_type)
+        if bits and int(bits.group(1)) > 63:
+            ctype, exact = ColumnType.DECIMAL, 0
+        else:
+            ctype = ColumnType.INTEGER
+    elif data_type == "bigint" and "unsigned" in column_type:
+        ctype, exact = ColumnType.DECIMAL, 0  # up to 18446744073709551615
+    elif ctype == ColumnType.DECIMAL and precision is not None and int(precision) > 38:
+        exact = None  # DECIMAL(65, 30) cannot be held exactly: stored as a double
+    return ColumnSpec(
+        name=name,
+        type=ctype,
+        nullable=nullable,
+        source_type=column_type,
+        scale=exact,
+    )
 
 
 class MySqlConnector(SqlConnector):
@@ -118,22 +148,14 @@ class MySqlConnector(SqlConnector):
         tables: dict[str, dict[str, Any]] = {}
         with conn.cursor() as cur:
             cur.execute(COLUMNS_SQL, (self.config["database"],))
-            for table, name, data_type, column_type, nullable, scale, key, rows in cur.fetchall():
+            for row in cur.fetchall():
+                table, name, data_type, column_type, nullable, precision, scale, key, rows = row
                 table, name = _text(table), _text(name)
                 data_type, column_type = _text(data_type).lower(), _text(column_type).lower()
-                ctype = TYPE_MAP.get(data_type, ColumnType.STRING)
-                if column_type.startswith("tinyint(1)") or column_type == "bit(1)":
-                    ctype = ColumnType.BOOLEAN
                 entry = tables.setdefault(table, {"columns": [], "pk": [], "rows": rows})
                 entry["columns"].append(
-                    ColumnSpec(
-                        name=name,
-                        type=ctype,
-                        nullable=_text(nullable) == "YES",
-                        source_type=column_type,
-                        scale=int(scale)
-                        if ctype == ColumnType.DECIMAL and scale is not None
-                        else None,
+                    column_spec(
+                        name, data_type, column_type, _text(nullable) == "YES", precision, scale
                     )
                 )
                 if _text(key) == "PRI":

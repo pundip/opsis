@@ -1,6 +1,6 @@
 // Types and data hooks for connections, datasets and jobs.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiDelete, apiGet, apiPatch, apiPost } from "./api";
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from "./api";
 
 export interface JsonSchemaProperty {
   type?: string;
@@ -104,10 +104,65 @@ export interface Job {
   full: boolean;
   attempts: number;
   error: string | null;
-  result: { rowCount?: number; sizeBytes?: number; mode?: string; seconds?: number } | null;
+  result: {
+    rowCount?: number;
+    sizeBytes?: number;
+    mode?: string;
+    seconds?: number;
+    /** A refresh's report: the whole of it on one job, only the count in lists. */
+    dataQuality?: Partial<DataQuality>;
+  } | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+}
+
+/** The types a column can be set to on the dataset page. */
+export type OverrideType = "text" | "integer" | "decimal" | "date" | "datetime" | "boolean";
+
+export interface ColumnOverride {
+  type: OverrideType;
+  /** strptime codes, for date and datetime: "%d/%m/%Y". */
+  format?: string | null;
+}
+
+/** Values a refresh stored as NULL in one column because they did not fit its type. */
+export interface EmptiedColumn {
+  column: string;
+  type: ColumnType;
+  sourceType: string | null;
+  count: number;
+  reasons: { reason: string; count: number }[];
+  /** Up to five raw values as the source holds them. */
+  samples: string[];
+  /** True when the samples are not shown to you (row-level security). */
+  samplesHidden?: boolean;
+}
+
+export interface TypeSuggestion {
+  column: string;
+  type: OverrideType;
+  format: string | null;
+  /** How many values were looked at. */
+  checked: number;
+  /** Values such as 0000-00-00 that would become NULL. */
+  invalidDates?: number;
+  /** Values such as "n/a" that would become NULL. */
+  emptyWords?: number;
+  note?: string;
+}
+
+/** What one refresh changed (opsis.connectors.convert). */
+export interface DataQuality {
+  invalidDates: "null" | "text" | "fail";
+  emptied: EmptiedColumn[];
+  emptiedValues: number;
+  /** Date columns read as text, by the connection's choice. */
+  textDates: string[];
+  overrides: Record<string, ColumnOverride>;
+  suggestions: TypeSuggestion[];
+  /** The source's own type of each column: "varchar(20)", "datetime". */
+  sourceTypes?: Record<string, string>;
 }
 
 export interface Snapshot {
@@ -116,6 +171,10 @@ export interface Snapshot {
   sizeBytes: number;
   mode: RefreshMode;
   columns: Column[];
+  /** Values the refresh stored as NULL because they did not fit their column. */
+  emptiedValues?: number;
+  /** The whole report, on the dataset's current snapshot. Null for old snapshots. */
+  report?: DataQuality | null;
   createdAt: string;
   current: boolean;
 }
@@ -134,6 +193,8 @@ export interface Dataset {
   cursorField: string | null;
   primaryKey: string[];
   columns: string[] | null;
+  /** Column types chosen by hand, applied on every refresh. */
+  columnOverrides?: Record<string, ColumnOverride>;
   restricted?: boolean;
   /** The dataset's owner: the person who created it. */
   createdBy?: string | null;
@@ -354,6 +415,20 @@ export function useRefreshDataset() {
     mutationFn: ({ id, full }: { id: string; full?: boolean }) =>
       apiPost<Job>(`/api/datasets/${id}/refresh`, { full: full ?? false }),
     onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["datasets"] });
+      void client.invalidateQueries({ queryKey: ["jobs"] });
+    },
+  });
+}
+
+/** Save the column types chosen by hand; the dataset is rebuilt with them. */
+export function useColumnTypes(id: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (overrides: Record<string, ColumnOverride | null>) =>
+      apiPut<Dataset & { job: Job | null }>(`/api/datasets/${id}/columns`, { overrides }),
+    onSuccess: (saved) => {
+      client.setQueryData(["datasets", id], saved);
       void client.invalidateQueries({ queryKey: ["datasets"] });
       void client.invalidateQueries({ queryKey: ["jobs"] });
     },

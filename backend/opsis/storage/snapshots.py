@@ -172,7 +172,7 @@ def build_snapshot(
     incremental = previous is not None and previous.is_dir() and bool(parts(previous))
     if not incremental:
         mode = RefreshMode.FULL
-    batches = _with_distinct_names(batches)
+    batches = with_distinct_names(batches)
     try:
         if mode == RefreshMode.MERGE:
             assert previous is not None
@@ -256,7 +256,7 @@ def distinct_names(names: list[str]) -> list[str]:
     return result
 
 
-def _with_distinct_names(batches: Iterator[pa.RecordBatch]) -> Iterator[pa.RecordBatch]:
+def with_distinct_names(batches: Iterator[pa.RecordBatch]) -> Iterator[pa.RecordBatch]:
     for batch in batches:
         names = distinct_names(batch.schema.names)
         yield batch if names == batch.schema.names else batch.rename_columns(names)
