@@ -2,9 +2,10 @@
 // The same password form is shown on its own when a new password is required.
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Badge, Button, Card, ErrorNote, Field, Input, PageHeader } from "../components/ui";
+import { Badge, Button, Card, Empty, ErrorNote, Field, Input, PageHeader, ROW, TD, TH } from "../components/ui";
 import { useChangePassword, useSignOut } from "../lib/access";
 import type { AppConfig, Me } from "../lib/config";
+import { formatRun, scheduleLabel, useMySubscriptions, useSetSubscription } from "../lib/operations";
 import { AuthFrame } from "./Login";
 import { MIN_PASSWORD } from "./SetPassword";
 
@@ -50,6 +51,58 @@ function PasswordForm({ onDone }: { onDone?: () => void }) {
         Change password
       </Button>
     </form>
+  );
+}
+
+function EmailedDashboards() {
+  const list = useMySubscriptions();
+  const stop = useSetSubscription();
+  const rows = list.data?.subscriptions ?? [];
+  return (
+    <Card className="mb-5 p-4">
+      <h2 className="mb-1 font-medium">Emailed dashboards</h2>
+      <p className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">
+        Dashboards emailed to you on a schedule. Start one with Email me on a dashboard.
+      </p>
+      <ErrorNote error={list.error ?? stop.error} />
+      {list.isSuccess && rows.length === 0 ? (
+        <Empty>None yet.</Empty>
+      ) : (
+        <table className="w-full">
+          <thead>
+            <tr>
+              <th className={TH}>Dashboard</th>
+              <th className={TH}>When</th>
+              <th className={TH}>Next email</th>
+              <th className={TH} />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.dashboardId} className={ROW}>
+                <td className={TD}>
+                  <Link to={`/dashboards/${row.dashboardId}`} className="text-brand underline">
+                    {row.title}
+                  </Link>
+                </td>
+                <td className={TD}>{scheduleLabel(row, list.data?.presets ?? [])}</td>
+                <td className={TD}>{formatRun(row.nextRunAt, row.timezone)}</td>
+                <td className={`${TD} text-right`}>
+                  <Button
+                    variant="ghost"
+                    aria-label={`Stop emailing ${row.title}`}
+                    busy={stop.isPending && stop.variables?.dashboardId === row.dashboardId}
+                    onClick={() => stop.mutate({ dashboardId: row.dashboardId, cron: null })}
+                  >
+                    Stop
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Card>
   );
 }
 
@@ -111,6 +164,7 @@ export function Account({ config, me }: { config: AppConfig; me: Me }) {
               </p>
             )}
           </Card>
+          {config.features.email && <EmailedDashboards />}
           <Card className="p-4">
             <h2 className="mb-1 font-medium">Sessions</h2>
             <p className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">

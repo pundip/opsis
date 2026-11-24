@@ -19,7 +19,6 @@ const config: AppConfig = {
     publicShareLinks: false,
     email: false,
     assistant: true,
-    sqlLab: true,
     backups: false,
   },
   calendar: {
@@ -43,7 +42,7 @@ const admin: Me = {
   google: false,
   permissions: [
     "dashboards:view", "datasets:edit", "models:edit", "connections:manage",
-    "sql_lab:use", "users:manage", "settings:manage",
+    "users:manage", "settings:manage",
   ],
 };
 
@@ -55,14 +54,10 @@ describe("navItems", () => {
   });
 
   it("follows feature flags", () => {
-    expect(paths(config, admin)).toContain("/sql-lab");
     expect(paths(config, admin)).not.toContain("/schedules");
-    const flipped = {
-      ...config,
-      features: { ...config.features, sqlLab: false, scheduledRefresh: true },
-    };
-    expect(paths(flipped, admin)).not.toContain("/sql-lab");
+    const flipped = { ...config, features: { ...config.features, scheduledRefresh: true } };
     expect(paths(flipped, admin)).toContain("/schedules");
+    expect(paths(flipped, admin)).not.toContain("/sql-lab"); // not in v1
   });
 
   it("hides user management in single-admin mode only", () => {

@@ -21,6 +21,11 @@ test("build a dashboard, save, reload, restore and publish", async ({ page }) =>
 
       await addVisual(page, "KPI card", fixture!.dataset, ["Value"]);
       await addVisual(page, "Bar chart", fixture!.dataset, ["Category", "Values"]);
+      // Drag and drop: a field from the list into a role that takes it.
+      const series = page.locator('fieldset[data-role="series"]');
+      await page.getByRole("list", { name: "Fields" }).getByText("Channel", { exact: true }).dragTo(series);
+      await expect(series.getByRole("listitem")).toHaveCount(1);
+      await expect(series.getByRole("listitem")).toContainText("Channel");
       await expect(tiles(page)).toHaveCount(2);
       // The KPI shows a number computed from the four rows; the bar chart draws.
       await expect(tiles(page).nth(0)).toContainText(/\d/);

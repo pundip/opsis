@@ -230,7 +230,31 @@ sequenceDiagram
 - Every dashboard change is a new version by the assistant; open editors reload it through the live-update channel of section 4. Undo in the panel restores the version before a step, or before the whole request.
 - Conversations, the history and the panel's entries are in Postgres (`assistant_*` tables); requests in progress are in the api process (`assistant/runs.py`).
 
-## 7. Contracts to review
+## 7. Schedules, backups and email (M8)
+
+```mermaid
+flowchart LR
+  subgraph runner["Job runner: worker container, or the inline thread in local mode"]
+    tick["Scheduler tick, every 30 s"]
+    loop["run_one: one job at a time"]
+  end
+  sched[("schedules table: cron in workspace time")]
+  jobs[("jobs table")]
+  tick -->|"due rows: queue a job, move to the next time"| jobs
+  sched --- tick
+  loop -->|"claim (SKIP LOCKED)"| jobs
+  loop --> refresh["refresh: connector to a new Parquet snapshot"]
+  loop --> backup["backup: pg_dump, uploads, current snapshots to /backups"]
+  loop --> cleanup["clean-up: ended sessions, links, old jobs"]
+  loop --> snapshot["emailed dashboard: built as its person, sent by SMTP"]
+  loop --> demo["demo data: datasets, models, dashboard"]
+```
+
+- Everything that runs on its own is a row in `schedules` (ADR-026) and becomes an ordinary job, so it shows on the Jobs page and runs one at a time with everything else. That is also what keeps a backup consistent: no refresh can swap a snapshot during it.
+- Email is sent by the request or job that makes it (an invitation by the api, an emailed dashboard by the runner) and is never stored.
+- Restore is not a job: it is a command run while the api and worker are stopped (`python -m opsis restore <file> --yes`).
+
+## 8. Contracts to review
 
 | File | What it defines |
 |---|---|

@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 import { Button, ErrorNote, Field, Input } from "../components/ui";
-import { useSignIn } from "../lib/access";
+import { useForgotPassword, useSignIn } from "../lib/access";
 import type { AppConfig } from "../lib/config";
 import { url } from "../lib/runtime";
 
@@ -32,6 +32,45 @@ export function AuthFrame({ config, title, children }: { config: AppConfig; titl
         {children}
       </div>
     </main>
+  );
+}
+
+/** "Forgotten your password?" (FEATURE_EMAIL): a link to set a new one, by email. */
+function ForgotPassword({ initialEmail }: { initialEmail: string }) {
+  const ask = useForgotPassword();
+  const [open, setOpen] = useState(false);
+  const [email, setEmail] = useState(initialEmail);
+  if (!open) {
+    return (
+      <p className="mt-4 text-xs">
+        <button type="button" className="text-brand underline" onClick={() => setOpen(true)}>
+          Forgotten your password?
+        </button>
+      </p>
+    );
+  }
+  return (
+    <form
+      className="mt-4 space-y-3 border-t border-zinc-200 pt-4 dark:border-zinc-800"
+      onSubmit={(event) => {
+        event.preventDefault();
+        ask.mutate(email.trim());
+      }}
+    >
+      <Field label="Email me a link to set a new password" htmlFor="forgot-email">
+        <Input id="forgot-email" type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} />
+      </Field>
+      <ErrorNote error={ask.error} />
+      {ask.data ? (
+        <p role="status" className="text-sm text-emerald-700 dark:text-emerald-400">
+          {ask.data.message}
+        </p>
+      ) : (
+        <Button type="submit" busy={ask.isPending}>
+          Send the link
+        </Button>
+      )}
+    </form>
   );
 }
 
@@ -88,9 +127,11 @@ export function Login({ config }: { config: AppConfig }) {
           Sign in
         </Button>
       </form>
-      <p className="mt-4 text-xs text-zinc-500">
-        Forgotten your password? Ask an admin for a reset link.
-      </p>
+      {config.features.email ? (
+        <ForgotPassword initialEmail={email} />
+      ) : (
+        <p className="mt-4 text-xs text-zinc-500">Forgotten your password? Ask an admin for a reset link.</p>
+      )}
     </AuthFrame>
   );
 }

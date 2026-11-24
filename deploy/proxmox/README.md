@@ -60,6 +60,8 @@ Edit `.env` and replace every value marked `CHANGE`:
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | from Google Cloud, see below |
 | `GOOGLE_ALLOWED_DOMAINS` / `GOOGLE_ALLOWED_EMAILS` | who may sign in with Google |
 | `ANTHROPIC_API_KEY` | for the editor's assistant (Claude), from the Claude Console. Or set `FEATURE_ASSISTANT=false`, or `ASSISTANT_PROVIDER=ollama` with an Ollama the LXC can reach (`OLLAMA_URL`) |
+| `FEATURE_EMAIL` and `SMTP_*` | optional: a mail server for invitations, resets and emailed dashboards (section 8) |
+| `BACKUP_SCHEDULE`, `BACKUP_RETENTION` | when backups run and how many are kept; the defaults are 02:30 and 7 (section 7) |
 
 **Which address goes in `TRUSTED_PROXIES`.** Opsis only believes `X-Forwarded-For`
 and `X-Forwarded-Proto` from these addresses. It must be the address the api sees,
@@ -228,42 +230,127 @@ The same tokens work for scripts on the REST API, for example
 
 ## 7. Backups and restore
 
-What matters: the Postgres database (users, connections, models, dashboards and
-versions, audit log), the `opsisdata` volume (Parquet snapshots and uploaded files),
-and `.env` (above all `ENCRYPTION_KEY`).
+With `FEATURE_BACKUPS=true` (the server default) the worker makes a backup every night
+at 02:30 (`BACKUP_SCHEDULE`, a cron expression in `WORKSPACE_TIMEZONE`) into the
+`backups` volume, which is `/backups` inside the api and worker containers. A backup is
+one file, `opsis-<date>-<time>.tar`, holding:
 
-The simplest complete backup is a Proxmox backup of the whole container
-(Datacenter, Backup, or `vzdump 120 --mode snapshot`). For finer-grained copies:
+- the metadata database: people, groups, connections, models, dashboards and every
+  version, schedules and the audit log;
+- the uploaded CSV and Excel files;
+- each dataset's current data, so dashboards work straight after a restore, before any
+  source is reached.
+
+The newest `BACKUP_RETENTION` files (7) are kept. **Settings** lists them and has
+**Back up now**; from the LXC's shell: `docker compose exec api python -m opsis backup`.
+
+**Not in a backup: `.env`.** Keep a copy of it away from the server (it holds
+secrets, so somewhere private). Its `ENCRYPTION_KEY` is needed to read the connection
+passwords and keys saved in a restored database.
+
+### Backups on NFS
+
+To keep backups off the LXC, give the container an NFS directory and point the
+`backups` volume at it, **before the first start** (or after copying the existing
+backups out and running `docker volume rm opsis_backups`).
+
+1. On the Proxmox host, mount the NFS export (for example in `/etc/fstab`) at
+   `/mnt/nas/opsis-backups`, and pass it into the container:
+
+   ```bash
+   pct set 120 -mp0 /mnt/nas/opsis-backups,mp=/mnt/backups
+   ```
+
+2. The Opsis containers write as uid 10001. In an unprivileged LXC that is uid
+   **110001** on the Proxmox host, so the export must let that uid write: either
+   `chown 110001:110001` the directory on the NAS, or export it with
+   `all_squash,anonuid=110001,anongid=110001`.
+
+3. In `/opt/opsis`, create `compose.override.yml` (Compose reads it with `compose.yml`
+   automatically):
+
+   ```yaml
+   volumes:
+     backups:
+       driver: local
+       driver_opts:
+         type: none
+         o: bind
+         device: /mnt/backups
+   ```
+
+4. `docker compose up -d`, then **Back up now** in Settings: the file appears on the NAS.
+
+For the whole container (Docker, the OS and `.env` included), also schedule a Proxmox
+backup of the LXC to your NAS storage (Datacenter, Backup, or `vzdump 120 --mode snapshot`).
+
+### Restore
+
+A restore replaces the database, the uploads and the datasets with the backup's. The
+previous uploads and datasets are moved aside (to `/data/before-restore-<time>` in the
+`opsisdata` volume), not deleted, so a mistaken restore can be undone by hand.
 
 ```bash
 cd /opt/opsis
-docker compose exec -T postgres pg_dump -U opsis -Fc opsis > /backups/opsis-$(date +%F).dump
-docker run --rm -v opsis_opsisdata:/data:ro -v /backups:/backup alpine \
-  tar czf /backup/opsisdata-$(date +%F).tgz -C /data .
-cp .env /backups/opsis-env-$(date +%F)   # contains secrets: keep the backups private
-```
-
-Restore onto a fresh install with the same `.env`:
-
-```bash
-docker compose up -d postgres
-docker compose exec -T postgres pg_restore -U opsis -d opsis --clean --if-exists < opsis-2026-11-19.dump
-docker run --rm -v opsis_opsisdata:/data -v /backups:/backup alpine \
-  sh -c "rm -rf /data/* && tar xzf /backup/opsisdata-2026-11-19.tgz -C /data"
+docker compose stop api worker
+docker compose run --rm api restore opsis-20261124-023000.tar --yes
 docker compose up -d
 ```
 
-A scheduled backup job inside Opsis (`FEATURE_BACKUPS`) arrives in a later release.
+The file name is looked up in `/backups`. Without `--yes` the command shows what the
+backup holds (date and version) and changes nothing. The api upgrades a restored
+database to the current version when it starts.
 
-## 8. Upgrades
+**Onto a new server:** install as in sections 1 to 3 with the **same `ENCRYPTION_KEY`**
+(the other values may differ), start it once, copy the backup in and restore:
+
+```bash
+docker compose up -d
+docker compose cp opsis-20261124-023000.tar api:/backups/
+docker compose stop api worker
+docker compose run --rm api restore opsis-20261124-023000.tar --yes
+docker compose up -d
+```
+
+## 8. Email
+
+Email is off by default (`FEATURE_EMAIL=false`); admins then pass invitation and reset
+links on themselves. With a mail server, set in `.env`:
+
+```ini
+FEATURE_EMAIL=true
+SMTP_HOST=smtp.example.org
+SMTP_PORT=587
+SMTP_SECURITY=starttls
+SMTP_USERNAME=bi@example.org
+SMTP_PASSWORD=...
+SMTP_FROM=Opsis <bi@example.org>
+```
+
+then `docker compose up -d`, and in **Settings** choose **Send me a test email**.
+`SMTP_SECURITY` is `starttls` (usually port 587), `ssl` (port 465) or `none` (a relay on
+your own network). Leave `SMTP_USERNAME` and `SMTP_PASSWORD` empty for a relay that
+needs no sign-in. Some common services: Google Workspace's SMTP relay
+(`smtp-relay.gmail.com`, port 587, set up in the Admin console), Gmail with an app
+password (`smtp.gmail.com`, 587), Microsoft 365 with SMTP AUTH enabled for the mailbox
+(`smtp.office365.com`, 587). The LXC needs outbound access to that port.
+
+With email on, Opsis emails invitations and password reset links, the sign-in page
+offers **Forgotten your password?**, and people can have a dashboard emailed to them on
+a schedule (**Email me** on a dashboard). Links in emails start with `PUBLIC_BASE_URL`.
+Messages are never stored. A failed send is in the api's or the worker's log
+(`docker compose logs worker | grep -i email`); for an invitation the admin also gets
+the link on screen, with the reason.
+
+## 9. Upgrades
 
 ```bash
 cd /opt/opsis && git pull && docker compose up -d --build
 ```
 
-Database migrations run when the api starts. Take a backup first.
+Database migrations run when the api starts. Make a backup first (**Back up now**).
 
-## 9. Locked out
+## 10. Locked out
 
 If no admin can sign in, run on the LXC:
 
@@ -274,7 +361,32 @@ docker compose exec api python -m opsis reset-link admin@example.org
 It prints a one-time link (valid 24 hours) to set that person's password, and
 reactivates the account. Anyone who can run this already controls the server.
 
-## 10. Troubleshooting
+## 11. Install check
+
+Run this once on a new install, from this guide and the README only. It is the final
+check of a release.
+
+1. **Fresh install:** sections 1 to 5, with your own values in `.env`.
+2. **Healthy:** `docker compose logs config-check` ends with "Configuration is valid";
+   `docker compose ps` shows `postgres`, `api` and `worker` running, `api` healthy.
+3. **First sign-in:** open `https://urlloom.com/opsis/` and sign in with `ADMIN_EMAIL`
+   and `ADMIN_INITIAL_PASSWORD`; you are asked to choose a new password.
+4. **Real client addresses:** **Audit log** shows your sign-in from your own computer's
+   address, not the proxy's (section 3, `TRUSTED_PROXIES`).
+5. **Google sign-in:** the checklist in section 3.
+6. **Demo data:** **Settings**, **Load demo data**, then **Open the demo dashboard**:
+   eight visuals with numbers, and the date and fund filters change them.
+7. **Backups:** **Settings**, **Back up now**: a new file in the list (and on the NAS,
+   with section 7's NFS set-up). If you can spare a test LXC, restore it there.
+8. **Email** (if on): **Send me a test email** arrives; an invitation to a second address
+   arrives and its link lets that person set a password.
+9. **Firewall:** from a computer other than the proxy, `curl -m 5 http://192.168.1.50:8080/opsis/healthz`
+   fails (section 5), while the site works through the proxy.
+10. **MCP:** with an access token (section 6), Claude Code lists your dashboards.
+11. **A real source:** a connection to one of your own sources tests and saves, and a
+    dataset from it refreshes.
+
+## 12. Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
@@ -285,3 +397,6 @@ reactivates the account. Anyone who can run this already controls the server.
 | Uploads fail with 413 | the proxy's body limit is lower than `MAX_UPLOAD_MB` |
 | Google says `redirect_uri_mismatch` | the redirect URI in Google Cloud differs from `PUBLIC_BASE_URL` + `/api/auth/google/callback` |
 | Every sign-in in the audit log shows the proxy's address | `TRUSTED_PROXIES` does not list the address the api sees (section 3) |
+| A backup fails with "permission denied" on NFS | the export does not let uid 110001 write (section 7) |
+| The test email fails | the message names the problem: a wrong `SMTP_HOST` or port, the LXC cannot reach it, or the mail server refused the sign-in |
+| Scheduled refreshes or backups do not run | the `worker` container is not running (`docker compose ps`); it runs every job and schedule in server mode |

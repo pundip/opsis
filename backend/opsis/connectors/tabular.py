@@ -98,3 +98,16 @@ def rows_to_batch(columns: Sequence[ColumnSpec], rows: Sequence[Sequence[Any]]) 
         for i, column in enumerate(columns)
     ]
     return pa.RecordBatch.from_arrays(arrays, schema=arrow_schema(columns))
+
+
+def unique_names(raw: list[Any]) -> list[str]:
+    """Column names from a header row: blanks named column_N, repeats numbered."""
+    names: list[str] = []
+    for index, value in enumerate(raw):
+        name = str(value).strip() if value is not None else ""
+        name = name or f"column_{index + 1}"
+        candidate, n = name, 2
+        while candidate in names:
+            candidate, n = f"{name}_{n}", n + 1
+        names.append(candidate)
+    return names

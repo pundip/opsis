@@ -12,6 +12,8 @@ export interface JsonSchemaProperty {
   maximum?: number;
   "x-secret"?: boolean;
   "x-upload"?: boolean;
+  /** The value can also be read from a local file of this type (".json"), in the browser. */
+  "x-file-text"?: string;
 }
 
 export interface ConfigSchema {
@@ -94,6 +96,8 @@ export interface Snapshot {
 }
 
 export interface Dataset {
+  /** With FEATURE_SCHEDULED_REFRESH: the refresh schedule, or null for none. */
+  schedule?: import("./operations").Schedule | null;
   id: string;
   name: string;
   label: string;
@@ -182,6 +186,16 @@ export function useSnapshots(id: string, snapshotId: string | undefined) {
   return useQuery({
     queryKey: ["datasets", id, "snapshots", snapshotId],
     queryFn: () => apiGet<Snapshot[]>(`/api/datasets/${id}/snapshots`),
+  });
+}
+
+/** One job, looked at again every moment while it is queued or running. */
+export function useJob(id: string | null | undefined) {
+  return useQuery({
+    queryKey: ["jobs", "one", id],
+    queryFn: () => apiGet<Job>(`/api/jobs/${id}`),
+    enabled: Boolean(id),
+    refetchInterval: (query) => (query.state.data === undefined || isActive(query.state.data) ? FAST : false),
   });
 }
 

@@ -2,7 +2,8 @@
 
 JOB_RUNNER=worker: `run_forever` is the worker container's main loop.
 JOB_RUNNER=inline: `InlineRunner` runs the same loop in a thread inside the api.
-Either way one job runs at a time per process, through `run_one`.
+Either way one job runs at a time per process, through `run_one`, and the same
+loop runs the scheduler (services/schedules.py) about every 30 seconds.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import logging
 import signal
 import socket
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -24,6 +26,7 @@ from opsis.settings import Settings
 from opsis.storage import snapshots
 
 log = logging.getLogger("opsis.jobs")
+TICK_SECONDS = 30.0
 
 # A handler does the work and returns the job result. It must not commit its
 # final writes: run_one commits them together with the job status.
@@ -37,11 +40,15 @@ AFTER_COMMIT: dict[str, AfterCommit] = {}
 
 def register_handlers() -> None:
     """Register every job type. Imported lazily to avoid import cycles."""
-    from opsis.services import refresh
+    from opsis.services import backups, demo, maintenance, refresh, schedules, subscriptions
     from opsis.services.datasets import REFRESH_JOB
 
     HANDLERS.setdefault(REFRESH_JOB, refresh.run_refresh)
     AFTER_COMMIT.setdefault(REFRESH_JOB, refresh.prune_snapshots)
+    HANDLERS.setdefault(schedules.BACKUP_JOB, backups.run_backup)
+    HANDLERS.setdefault(schedules.CLEANUP_JOB, maintenance.run_cleanup)
+    HANDLERS.setdefault(schedules.SNAPSHOT_JOB, subscriptions.run_snapshot)
+    HANDLERS.setdefault(demo.DEMO_JOB, demo.run_demo)
 
 
 def run_one(db: Session, worker_id: str, settings: Settings) -> bool:
@@ -75,18 +82,35 @@ def run_one(db: Session, worker_id: str, settings: Settings) -> bool:
     return True
 
 
+def _tick(session_factory: sessionmaker[Session], settings: Settings) -> None:
+    from opsis.services import schedules
+
+    try:
+        with session_factory() as db:
+            schedules.tick(db, settings)
+    except Exception:  # a broken schedule must never stop the runner
+        log.exception("Scheduler error; trying again later")
+
+
 def _loop(settings: Settings, worker_id: str, stop: threading.Event, idle_seconds: float) -> None:
+    from opsis.services import schedules
+
     engine = create_engine(settings.sqlalchemy_url, pool_pre_ping=True)
     session_factory = sessionmaker(engine, expire_on_commit=False)
     register_handlers()
     try:
         with session_factory() as db:
             stale = queue.fail_stale(db)
+            schedules.ensure_system(db, settings)
         if stale:
             log.warning("Marked %d interrupted job(s) as failed", stale)
         snapshots.sweep_temp(settings)
         log.info("Job runner %s started", worker_id)
+        last_tick = 0.0
         while not stop.is_set():
+            if time.monotonic() - last_tick >= TICK_SECONDS:
+                last_tick = time.monotonic()
+                _tick(session_factory, settings)
             try:
                 with session_factory() as db:
                     worked = run_one(db, worker_id, settings)

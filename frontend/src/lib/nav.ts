@@ -24,13 +24,6 @@ const RULES: NavRule[] = [
     permission: "datasets:edit",
     feature: "scheduledRefresh",
   },
-  {
-    path: "/sql-lab",
-    label: "SQL Lab",
-    group: "Admin",
-    permission: "sql_lab:use",
-    feature: "sqlLab",
-  },
   { path: "/users", label: "Users", group: "Admin", permission: "users:manage" },
   { path: "/audit", label: "Audit log", group: "Admin", permission: "audit:view" },
   { path: "/settings", label: "Settings", group: "Admin", permission: "settings:manage" },

@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-20 (M7 review changes)
+Last updated: 2026-11-24 (M8)
 
 ## Milestone status
 
@@ -13,69 +13,90 @@ Last updated: 2026-11-20 (M7 review changes)
 | M3.5 Timezones, conditional measures, model versions, benchmark | Done, reviewed |
 | M4 Dashboards and visuals | Done, reviewed |
 | M5 MCP | Done, reviewed |
-| M6 Auth and sharing | Done, reviewed; review changes done at the start of M7 |
-| M7 In-app assistant | Done, reviewed; review changes done, awaiting review |
-| M8 More connectors and hardening | Not started |
+| M6 Auth and sharing | Done, reviewed |
+| M7 In-app assistant | Done, reviewed |
+| M8 More connectors and hardening | Done, awaiting review. Still to do: your part of the install check (Proxmox, real Google sign-in), and real Salesforce and Google Sheets runs with your credentials |
 
-## M7 review changes
+## M8 More connectors and hardening
 
-Done after the M7 review, before M8:
+Built (details in ADR-026):
 
-- **Admin-set restrictions are admin-only, list included.** Once an admin restricts a dataset, its owner can neither change who is on its list nor lift it, and sees it read-only (ADR-024).
-- **Ollama through its own chat API** (`/api/chat`) instead of the OpenAI-compatible endpoint, with the context size sent on every request: `OLLAMA_NUM_CTX`, default 32,768, at least 16,384 (ADR-025). A default Ollama install now works, with nothing to set where Ollama runs. The one-visual-per-call instruction for Ollama stays. The context check against `/api/ps` is gone; instead a reply that used 95% or more of the context is reported, because Ollama then drops the oldest messages. The smoke tests' fake model speaks the native API and refuses a request without `num_ctx`.
-- **The test alias is gone** (`ollama rm gemma4-opsis-32k`), and your `.env` now says `OLLAMA_MODEL=gemma4:12b` (it was already the default).
-- **Refusal fallbacks** stay on by default. The real Claude check is skipped for now.
+- **Google Sheets connector:** each tab of a spreadsheet is a table, read as a Google Cloud service account with read-only access (the spreadsheet is shared with it as a Viewer). Column types come from the cells. Full refresh only.
+- **Salesforce connector:** each object is a table. Sign-in through an External Client App (client credentials, recommended) or a username, password and security token. Merge refresh follows `SystemModstamp` and merges by `Id`. Test connection names the org's edition, so a Developer Edition can be confirmed before anything is read.
+- **Refresh schedules** (`FEATURE_SCHEDULED_REFRESH`): presets or cron in the workspace timezone, the next runs shown before saving, at most every 15 minutes, and a **Schedules** page. Migration 0010.
+- **Backups** (`FEATURE_BACKUPS`): a nightly job writes one file to the `backups` volume (database, uploads, each dataset's current data), keeps the newest 7, and **Settings** has **Back up now**. Restore is `python -m opsis restore <file> --yes` with the api and worker stopped; the previous data is moved aside. The image now carries `pg_dump` 16.
+- **Clean-up job**, nightly: ended sessions, used password links, long-ended share links, old sign-in counts and old finished jobs. The audit log is kept.
+- **Email** (`FEATURE_EMAIL`, SMTP): invitations and password reset links are emailed (the admin gets the link instead if sending fails), **Forgotten your password?** on the sign-in page (the same answer for any address, rate-limited), **Send me a test email** in Settings, and **Email me** on a dashboard: the dashboard's numbers on a schedule, as that person sees them, listed under Account. Messages are never stored.
+- **Lenient agent inputs** (from the M7 follow-up): the MCP tools and the assistant read a single value as a list of one where a list is expected, worked out from the schemas, and log each one at debug level (`opsis.agent.lenient`). Stored specs, the REST API and the JSON tab stay strict.
+- **Models as a folder:** **Export all** (a zip of `models/<dataset>.yml`) and **Import** on the Semantic models page: every file checked first, nothing saved unless all are valid, unchanged models left alone.
+- **Two-hop joins:** a dimension two joins away (gifts to donors to regions), every join many-to-one or one-to-one, never through a restricted dataset; two ways to one dataset need a direct join to say which.
+- **Drag and drop** of fields into a visual's roles, and between roles, in the editor. The menus stay for the keyboard.
+- **Demo data:** **Settings**, **Load demo data**, or `python -m opsis seed-demo`: three made-up datasets with their models and joins, and a published dashboard that uses a field two joins away.
+- **SQL Lab is out of v1** (your M8 instructions): `FEATURE_SQL_LAB`, its permission and its menu entry are gone, and it is on the post-v1 backlog.
+- **Docs:** the README (demo data, Google Sheets and Salesforce set-up, schedules, backups and restore, email), the Windows guide, the Proxmox guide (backups on NFS, restore, email, an install checklist), ADR-026, an architecture section, and `BACKUP_*` and `SMTP_*` in both env templates.
 
-**Which Ollama the M7 run used.** The Ollama for Windows app on this laptop: `C:\Users\prakashm\AppData\Local\Programs\Ollama\ollama.exe`, version 0.40.16. Its server process (PID 15024) and its tray app (PID 11568) started at 7:42 PM on 19 November, most likely when you signed in: the installer put `Ollama.lnk` in your Windows Startup folder on 21 October. Its log (`%LOCALAPPDATA%\Ollama\server.log`) opens that session with "Listening on [::]:11434 (version 0.40.16)" at 19:42:05, and records all 23 of my chat requests on 20 November between 13:50 and 15:00: the first ones from my shell (`::1`, http://localhost:11434), the rest from the api container through `http://host.docker.internal:11434` (logged as `127.0.0.1`), and the four "tool call parsing failed" warnings. The same process is the one running now, so the re-run below used it too.
+### How M8 was verified
 
-**The real check again,** against that Ollama at http://host.docker.internal:11434 with the default settings (`gemma4:12b`, `OLLAMA_NUM_CTX=32768`, `ASSISTANT_TIMEOUT_SECONDS=600`), three times, through the panel's API, each time on a new dashboard: "Build a dashboard of giving from the gifts dataset: the total amount, the amount by fund, and the amount by month." Success means the three requested visuals exist and each returns data. Dropped tool calls are counted twice: the panel's notes that a call did not arrive, and Ollama's own "tool call parsing failed" warnings in its log.
+- **Backend:** 289 pytest tests pass (36 new); `ruff check`, `ruff format --check` and `mypy --strict` pass. New tests cover: both connectors against realistic fakes of the Google and Salesforce APIs (types, header rows, sign-in failures, merge refresh with the repeated second, append refused); schedules (presets, cron checks, the next runs across the end of daylight saving, the tick, no make-up runs, flags); backups (a real `pg_dump` and `pg_restore` into a separate database, retention, the manifest) and the clean-up job; email against a local SMTP server (invitations and resets by email and when sending fails, the same answer for unknown addresses, the rate limit, the test email, emailed dashboards with row-level security, escaping and the removal of a subscription when access ends); lenient inputs; the models folder (export, unchanged re-import, all-or-nothing, dry run, bad files); two-hop joins in the compiler and through the API, with ambiguous, unsafe, restricted and three-hop paths refused; the demo data locally and in server mode.
+- **Frontend:** `tsc`, ESLint and 48 Vitest tests pass.
+- **Browser (`npm run smoke`), all passed** at http://localhost:8080, at http://localhost:8088/opsis/ and in server mode. New: a dataset's refresh schedule (a preset, its next runs, a too-frequent cron refused), the Schedules page and Settings; dragging a field into a role in the editor; and in server mode, against a stand-in mail server whose messages the test reads (`e2e/fake-smtp.mjs`): an invitation by email whose link sets the password, **Email me** and stopping it from Account, **Forgotten your password?** through to a new password, the test email, a real backup made by the worker, and the demo data with its dashboard. The first run found two problems, both fixed: the Settings page stopped looking for a finished backup or demo after its first check (so a slow job never showed as done), and a wrong button name in the new test.
+- **Fresh install from the README:** see below.
 
-| Attempt | Time | Dashboard built | Model calls | Tool calls | Refused by validation | Dropped tool calls (panel / Ollama log) | Tokens in (cached) / out |
-|---|---|---|---|---|---|---|---|
-| 1 | 2 min 31 s | yes: KPI card, bar chart by fund, line chart by month, each with data | 7 | 6 | 1 | 0 / 0 | 49,158 (40,543) / 1,115 |
-| 2 | 2 min 21 s | yes, the same three | 7 | 6 | 1 | 0 / 0 | 49,269 (44,574) / 1,228 |
-| 3 | 3 min 4 s | yes, the same three | 7 | 6 | 1 | 0 / 0 | 49,297 (44,581) / 1,572 |
+### Performance, 10 million rows
 
-- **3 of 3 succeeded**, in 2 min 21 s to 3 min 4 s (the M7 run took 5 min 37 s through the OpenAI-compatible endpoint). **No dropped tool calls:** no retries in the panel and no "tool call parsing failed" in Ollama's log.
-- Each build lost one call the same way: the model first wrote the line chart's time field as a bare object instead of a list of one, validation refused it at `/items/2/bindings/x`, and its next call was right.
-- **An experiment, reverted:** to save that call I showed the list form in `list_visuals` and the guide, and ran three more builds. It made things worse: 2 of 3 built, Ollama dropped 3 calls (gemma4 writes `x:[{...}]` in its own tool-call format with one bracket too many), and one build ran out of the 10-minute budget after a call that thought for 8 minutes. The code is back to what the first three attempts ran.
+`node scripts/benchmark.mjs --rows 10000000` against your stack on this laptop (Docker Desktop, 16 CPUs, 15.4 GB for containers, default query settings, inline job runner). The new step opens a typical dashboard as a browser does: 8 visuals (4 KPI cards with a comparison to the year before, a line by month and channel, a pie, a bar, a table through a join), so 12 queries, 6 requests at a time, with a date range and a region filter.
 
-**Verified:** 253 backend tests pass (new or changed: the context size sent to Ollama and its setting, the report of a full context, the native request and history shapes, and an admin's restriction refusing the owner both ways); `ruff check`, `ruff format --check` and `mypy --strict` pass. `tsc`, ESLint and 48 frontend tests pass. `npm run smoke` passed at http://localhost:8080, at http://localhost:8088/opsis/ and in server mode, the assistant test included: through Ollama's native API at the root and /opsis (the fake model now refuses a request without `num_ctx`), through Claude's in server mode. The real Claude check was skipped, as agreed.
+| Step | Result |
+|---|---|
+| Ingestion, 10.2 million rows from Postgres to Parquet | 32.2 s (322,000 rows/s); snapshot 147 MB; api peak 290 MB |
 
-## M7 In-app assistant
+| Dashboard load | Total | Slowest item | Cached |
+|---|---|---|---|
+| Cold: first open | 492 ms | 380 ms | 0 of 8 |
+| **Warm: opened again** | **81 ms** | 65 ms | 8 of 8 |
+| After a filter change (two regions) | 516 ms | 381 ms | 0 of 8 |
+| That filter, warm | 92 ms | 71 ms | 8 of 8 |
 
-**From the M6 review, done first** (ADR-024):
+**The brief's target, under 1.5 s warm on 10 million rows, is met: 81 ms warm, and 0.5 s even with nothing cached.**
 
-- **Dataset owners:** the editor who created a dataset can restrict it and change its list, admins can do so for any dataset, and a restriction an admin set can only be lifted by an admin. Restrictions made in M6 count as admin-set.
-- **Sharing** (people, groups, everyone, share links) is for the dashboard's owner and admins only, in the UI, the REST API and the MCP tools. Editors still edit content.
-- **Restricted data through dashboards:** only the dataset's owner or an admin can show a restricted dataset's data to people outside its list, whether by sharing, by a share link, by letting outside editors work on a draft that uses it, or by publishing it to an audience that includes outsiders. The share dialog says which datasets are restricted and who would gain access, and blocks what the person may not do; the dataset access panel lists the dashboards that already show its data outside its list. The MCP sharing tools follow the same rules. Cross-filters can only use fields the dashboard uses, so a viewer cannot probe other fields.
-- **Google sign-in:** a checklist in `deploy/proxmox/README.md`, part of the M8 install check.
+| Query | Cold | Warm | Rows |
+|---|---|---|---|
+| KPI: total, count, distinct donors, last 12 months | 198 ms | 15 ms | 1 |
+| Bar: total by fund, two regions | 84 ms | 15 ms | 8 |
+| Line: total by month and channel, 3 years | 114 ms | 13 ms | 148 |
+| Join: by donor tier and financial quarter | 296 ms | 13 ms | 39 |
+| Table: top 100 of 200,000 donors | 185 ms | 12 ms | 100 |
 
-**Built in M7** (ADR-025):
+- Ten different uncached queries at once finished in 3.4 s and 2.6 s (two rounds), while `/healthz` answered in a median of 16 and 12 ms. Peak api memory during the queries: 422 MB.
+- At twice the M3.5 size, single queries are about 1.2 times slower and ingestion runs at the same speed per row.
 
-- **Providers:** Claude through the official `anthropic` SDK (2.11, API version 2026-10-21), and Ollama through its OpenAI-compatible endpoint. Claude runs with adaptive thinking, progress notes between tool calls (`display: "updates"`), effort from `ANTHROPIC_EFFORT`, prompt caching, and eager tool-input streaming with every input checked against its schema. **Refusal fallbacks are on by default** (`fallbacks: "default"`): a request Claude's safety checks decline is re-run on the model Anthropic recommends for it, and the panel says which model answered. `ANTHROPIC_FALLBACKS=false` turns that off.
-- **Tool loop** over 17 of the MCP tools, as the signed-in person with their access, with budgets: tool calls, output tokens, time, and rows shown to the model. It can change only the open dashboard, and cannot create, publish or share. Token use per request is logged, audited (`assistant.request`) and shown in the panel.
-- **Conversations** per person per dashboard, in Postgres (migration 0009): the provider's history byte for byte, and the panel's entries. A request runs on its own, so closing the panel does not stop it; **Stop** does.
-- **The Assistant tab** in the editor: streaming replies, progress notes, each tool call as a step you can open, **Undo** on each change and **Undo all of this** per request, Stop, New conversation, and the selected visual as context. Send waits until your own changes are saved. The editor reloads the assistant's versions as they land, without its banner while the tab is open. The disabled Assistant button in the header is gone.
-- **Settings:** `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` (default `claude-opus-5-5`), `ANTHROPIC_EFFORT`, `ANTHROPIC_FALLBACKS`, `OLLAMA_URL`, `OLLAMA_MODEL` (default `gemma4:12b`), `ASSISTANT_MAX_STEPS`, `ASSISTANT_MAX_OUTPUT_TOKENS`, `ASSISTANT_TIMEOUT_SECONDS`, `ASSISTANT_MAX_ROWS`. `ASSISTANT_PROVIDER=anthropic` without a key fails fast. The `ollama` Compose image is pinned (0.40.16) and given a 32k context.
-- **Ollama's context** (replaced at the M7 review, see above): its OpenAI-compatible endpoint cannot set the context size, and its default (4,096 tokens on this laptop) cuts off the assistant's instructions and tools, so M7 detected that and said to set `OLLAMA_CONTEXT_LENGTH=32768`.
-- **Small models:** gemma4 12B writes long nested tool calls that Ollama cannot convert to JSON, and Ollama then drops the call (its log says "tool call parsing failed"). So with Ollama the assistant asks for one dashboard item per call, and a reply that is empty or only announces a step is answered with a request to make the call again, at most twice a request, with a note in the panel.
-- **Tests:** a scripted fake model (`e2e/fake-llm.mjs`) streams like both APIs and refuses what the real Claude API refuses (forced tool use, thinking turned off, sampling parameters). The smoke run plugs it in at the root and the sub-path (`compose.fakellm.yml`, Ollama's API) and in server mode (Claude's API), then puts your stack back as `.env` has it.
+Not measured: the Proxmox LXC (fewer cores, less memory), slow disks, worker mode, and many people at once.
 
-### How M7 was verified
+### Fresh install from the README
 
-- **Backend, automated:** 252 pytest tests pass (20 new in `tests/test_assistant.py`; `tests/test_review_m6.py` and updated M6 tests cover the review changes); `ruff check`, `ruff format --check` and `mypy --strict` pass. The assistant tests run both providers through their real clients against scripted fake servers (the Anthropic SDK parses the fake's event stream) and cover: building a dashboard step by step; what Claude is sent (adaptive thinking with updates, effort, fallbacks, cache breakpoints, sorted tools with eager streaming, no sampling parameters or forced tool choice, the beta headers); the history sent back append-only, with Claude's thinking blocks and signatures unchanged; follow-ups that see the whole conversation; token totals and the audit; refusals (nothing kept), a fallback in mid-reply (the declined part not sent back), API errors; tool calls cut off at max_tokens (answered, not run); the step budget; calls on another dashboard, unreadable arguments and unknown tools; Ollama's context check; Stop (keeps the partial text) and one request at a time; empty replies and replies whose tool call was dropped; template tokens a local model leaks; who may use it (viewers, other people's conversations, access tokens, the flag off); row and length caps; the context block; settings that fail fast.
-- **Frontend, automated:** `tsc`, ESLint and 48 Vitest tests pass (3 new, for the event stream and the live view).
-- **Browser, automated with `npm run smoke`, all passed** at http://localhost:8080, at http://localhost:8088/opsis/ behind the proxytest nginx, and in server mode behind it (sign-in, the worker, and the assistant on Claude's API). The new assistant test asks the fake model, from the panel, to build a dashboard from a fresh dataset: the reply streams, Stop shows while it works, three steps appear (one opened to show its input), the canvas follows along without a banner, Undo restores the empty dashboard as version 3, the history reads user, assistant, user, and after a reload the conversation and its token line are still there, with no script errors or CSP violations. At the root and /opsis this goes through the Ollama provider, in server mode through Claude's, whose progress note shows too. The earlier tests (dashboards, MCP with live updates, tokens, local mode; in server mode sign-in, sharing, share links, Google and tokens) pass with the M6 review changes in.
-- **With a real model, Ollama:** `gemma4:12b` on this laptop (through a 32k-context copy of it, since removed), asked through the panel's API to "Build a dashboard of giving from the gifts dataset: the total amount, the amount by fund, and the amount by month". It described the dataset, listed the visuals, then added a KPI card, a bar chart by fund and a line chart by month, one per call. Its first line chart was refused by validation (the x binding was not a list) and it fixed that from the error message. 7 model calls, 6 tool calls, 5 min 37 s, 49,553 input tokens (40,814 of them cached) and 2,583 output tokens; each visual returns data, and the history shows three versions by the assistant with its notes. Before the one-item-per-call change, two runs stopped at that step: Ollama's log showed it had dropped the model's long `patch_dashboard` call ("gemma4 tool call parsing failed"). So with this model a build works, slowly, but not every time.
-- **With a real model, Claude:** not run. There is no `ANTHROPIC_API_KEY` here, so Claude was exercised only through the fake (in pytest and in the server-mode browser run). See Q2.
+On this laptop, from a clean clone from GitHub (the `m8-wip` branch, before the merge) into an empty folder, following the README alone. Two test-only differences, because your own stack holds port 8080 and the project name `opsis`: ports 8090 and 8091, and the Compose project name `opsis-fresh`, so it had volumes of its own. All of it was removed afterwards (containers, volumes, image and folder).
+
+- **Laptop template:** `copy .env.local.example .env`, then `docker compose up -d`. The image built from scratch, with no cache, in 64 s; `config-check` reported a valid configuration and the api became healthy. `docker compose exec api python -m opsis seed-demo` loaded the demo data. The browser tests that fit the default settings passed against it (4 of 4): building a dashboard, local mode, MCP with live updates, and access tokens.
+- **Server template:** `cp .env.server.example .env`, the key from `generate-key`, and every `CHANGE` value filled with test values (`FEATURE_ASSISTANT=false`, for want of a Claude key). Postgres, the api and the worker became healthy, serving at `/opsis`. The first sign-in asked for a new password, and the nightly backup and clean-up were scheduled. The worker loaded the demo data (all 8 visuals with rows) and made a backup; `python -m opsis backup` wrote another. After the demo dashboard was deleted, the README's restore (stop, `restore <file> --yes`, start) brought it back with its data and moved the previous data aside, and the admin's password was again the one from the time of the backup.
+- Not covered here: TLS, a real reverse proxy, Google sign-in, real email, and Linux itself. The server-mode smoke test covers a proxy, a fake Google and a stand-in mail server; the rest is the Proxmox install check.
+
+### Your stack
+
+- **Test leftovers deleted**, as you approved: the ten check dashboards ("Real model check" four times, "Ollama check 1" to "3" twice each), and "Smoke mwh0pics" with its dataset and connection.
+- **The demo data is loaded** (with `python -m opsis seed-demo`): **Giving overview (demo)** and the datasets `demo_gifts`, `demo_donors` and `demo_regions`.
+- Left as they were: "Gifts overview", "Giving overview (built over MCP)", and **"Test1"** (made today at 17:04, not one of mine, so not on the list).
+- Your `.env` still has `FEATURE_SQL_LAB=true`. It is now ignored, so the line can go.
 
 Not verified:
 
-- The real Claude API (no key), so also not the fallbacks, progress notes and prompt caching against the live service, or how well Claude builds dashboards with these tools.
-- The Sonnet run of the MCP tools (not run yet, as you said).
-- The `ollama` Compose profile itself (the pinned image and its context setting were not started).
-- Long conversations near a model's context limit with real models, and several people using the assistant at once.
+- Salesforce and Google Sheets against the real services (they need your credentials; see the next step).
+- A real mail server (only the stand-in and a local SMTP server in pytest), and how emailed dashboards look in Outlook and Gmail.
+- The Proxmox install, backups on NFS, the real reverse proxy and Google sign-in: your part, the checklist in `deploy/proxmox/README.md`, section 11.
+- Restoring a backup made by an older version.
+
+## M7 In-app assistant (reviewed)
+
+Built in M7 (ADR-025): the Assistant tab in the editor, on Claude (the `anthropic` SDK, adaptive thinking, prompt caching, refusal fallbacks) or Ollama (its own chat API, with the context size sent on every request), a tool loop over 17 of the MCP tools with budgets and Stop, and conversations kept in Postgres. At the M7 review: admin-set restrictions became admin-only, Ollama moved to its native API, and the real Ollama check passed 3 of 3 builds (2 min 21 s to 3 min 4 s, no dropped tool calls). The real Claude check was skipped, as agreed.
 
 ## M6 Auth and sharing (reviewed)
 
@@ -96,12 +117,13 @@ M3.5 benchmark, in one line: 5 million rows on this laptop, typical queries 77 t
 - **M4:** approved. Field selector is fine for v1 (drag-and-drop to the M8 backlog). Playwright smoke test at the start of M5, at both URLs, replacing manual browser checks from then on. Combo chart gets an optional right-hand axis per measure. Filter and drill state in the URL in M6 with share links. MCP tool descriptions and errors must work for a smaller model: anything Sonnet struggles with counts as a tool design issue.
 - **M5:** approved. REST previews apply the RLS filter, or refuse where a rule cannot be applied. Access tokens on the REST API in M6 with the MCP scopes. Keep MCP stateless. In M6, verify `MCP_AUTH=token` against the running container in server mode through the proxytest profile (done).
 - **M6:** approved. Dataset owners restrict their datasets; admins can override, and only an admin lifts an admin's restriction. Sharing is limited to a dashboard's owner and admins. Restricted data must not reach people outside its list through a dashboard, with warnings in the share dialog, and the same rules in the MCP sharing tools. Real Google sign-in becomes a checklist in the Proxmox guide and part of the M8 install check. The Sonnet test has not been run yet. (All done at the start of M7.)
-- **M7:** approved. Admin-set restrictions are admin-only, list included. The real Claude check is skipped for now. Ollama moves to its own chat API with the context size set per request (`OLLAMA_NUM_CTX`, default 32768), keeping one visual per call; then the test alias goes and `OLLAMA_MODEL=gemma4:12b`. Refusal fallbacks stay on by default. (All done; see "M7 review changes".)
+- **M7:** approved. Admin-set restrictions are admin-only, list included. The real Claude check is skipped for now. Ollama moves to its own chat API with the context size set per request (`OLLAMA_NUM_CTX`, default 32768), keeping one visual per call; then the test alias goes and `OLLAMA_MODEL=gemma4:12b`. Refusal fallbacks stay on by default. (All done.)
+- **M7 follow-up and M8 instructions:** agent tool inputs accept a single value where a list is expected (stored specs, REST and the JSON tab stay strict; each normalisation logged at debug level). Salesforce is tested against a Developer Edition org only, never a production org, with credentials you provide when needed; for Google Sheets I say when a service account is needed and what access it needs. The Proxmox install and the real Google sign-in are the final install check, done by you from the checklist. SQL Lab is not built for v1 (post-v1 backlog). The test leftovers in your stack are deleted, keeping the demo data. (Done, apart from the real Salesforce and Google Sheets runs and the Proxmox check: see the next step.)
 - **For the LXC work (noted at the M2 review):** the server will use port forwarding to the LXC. Check then what source address the api sees for proxied requests, because that is the address `TRUSTED_PROXIES` must list (it may be the forwarder or the Docker gateway, not the reverse proxy itself).
 
 ## What exists
 
-Run: `copy .env.local.example .env`, `docker compose up -d`, open http://localhost:8080. Add `COMPOSE_PROFILES=sample` for a sample MySQL source (see README).
+Run: `copy .env.local.example .env`, `docker compose up -d`, open http://localhost:8080, then Settings, Load demo data. Add `COMPOSE_PROFILES=sample` for a sample MySQL source (see README).
 
 **Platform (M1 and catch-up)**
 - `compose.yml` profiles: `server` (worker), `caddy`, `tunnel`, `ollama`, `proxytest`, `sample`. A one-shot `config-check` service gates `api` and `worker`.
@@ -153,6 +175,14 @@ Run: `copy .env.local.example .env`, `docker compose up -d`, open http://localho
 - `opsis/services/assistant.py` (conversations, history, entries), `opsis/api/assistant.py` (the panel's routes). Migration `0009`. `opsis/mcp/guide.py` now shares its spec reference (`SPEC_GUIDE`) with the assistant.
 - Frontend: `components/dashboard/AssistantPanel.tsx`, `lib/assistant.ts` (state, the event stream, the live view), the Assistant tab in `DashboardEditor`.
 - `e2e/fake-llm.mjs`, `e2e/tests/assistant.spec.ts`, `compose.fakellm.yml`.
+
+**Connectors, schedules, backups, email (M8)**
+- Connectors: `opsis/connectors/gsheets`, `opsis/connectors/salesforce`; `x-file-text` in the schema form reads a key file into a field.
+- `opsis/services/`: `schedules.py` (cron, presets, the tick), `backups.py` (backup and restore), `maintenance.py` (the clean-up job), `mail.py` (SMTP and the messages), `subscriptions.py` (emailed dashboards), `model_files.py` (the models folder), `demo.py` (the demo data). Migration `0010` (`schedules`).
+- `opsis/api/operations.py`: schedules, backups, the test email, emailed dashboards and the demo data. `POST /api/auth/forgot-password`. `GET|POST /api/model-files`. CLI `backup`, `restore`, `seed-demo`.
+- `opsis/mcp/lenient.py`; two-hop joins in `opsis/semantic/compiler.py` with `reachable` in `opsis/semantic/model.py`.
+- Frontend: `pages/Schedules`, `pages/Settings`, `components/ScheduleCard`, `components/dashboard/EmailPanel`, drag and drop in `EditorPanels`, import and export on `pages/Models`, `lib/operations.ts`.
+- `e2e/fake-smtp.mjs`, `e2e/tests/operations.spec.ts`; `scripts/benchmark.mjs` times a dashboard too.
 
 ## M3.5 (from the M3 review)
 
@@ -232,27 +262,30 @@ Not verified:
 - ADR-017: the CSV and Excel connector id is `file`, not `csv`.
 - ADR-018: connection forms use a small built-in schema form; visual config panels use rjsf with our own CSP-safe validator. shadcn/ui is still not added.
 - ADR-019: a fourth spec file; query values are SQL literals rendered by sqlglot (approved); the model editor is still a plain text area.
-- ADR-021: field wells are selectors (accepted for v1); cross-filter and drill state live in the view (now also in the URL), not in the spec; the chart palette and mark rules are fixed in code.
+- ADR-021: field wells were selectors (drag and drop came in M8, ADR-026); cross-filter and drill state live in the view (now also in the URL), not in the spec; the chart palette and mark rules are fixed in code.
 - ADR-022: the MCP endpoint is stateless with JSON responses (kept at the M5 review); JSON Patch is our own code.
-- ADR-023 (new, M6): `ADMIN_INITIAL_PASSWORD` is optional (Google or `reset-link` instead); Google's ID token is verified with `joserfc` (Authlib's JOSE library) and the HTTP calls use the standard library; `GOOGLE_DISCOVERY_URL` exists for testing; invitations and resets are links the admin passes on until email arrives (M8); the audit log page is available in local mode too.
+- ADR-023 (new, M6): `ADMIN_INITIAL_PASSWORD` is optional (Google or `reset-link` instead); Google's ID token is verified with `joserfc` (Authlib's JOSE library) and the HTTP calls use the standard library; `GOOGLE_DISCOVERY_URL` exists for testing; invitations and resets are links the admin passes on unless email is on (M8); the audit log page is available in local mode too.
 - ADR-025 (new, M7): the assistant uses 17 of the 23 MCP tools (no creating, publishing or sharing from the panel); only people in the editor can use it, not access tokens; Ollama through its own chat API (`/api/chat`, with `num_ctx` on every request) rather than the OpenAI-compatible endpoint the brief names (decided at the M7 review); our own tool loop rather than the SDK's beta tool runner, so one loop serves both providers.
+- ADR-026 (new, M8): Google Sheets through its REST API with `google-auth` for the token, not the Google API client library; emailed dashboards carry numbers and tables, not pictures of charts; SQL Lab is not in v1 (your decision); unknown non-GET `/api` paths answer 404.
 - ADR-015: the task runner is npm scripts, not `tasks.py`; `httpx2` for the test client (approved), and now also for Ollama.
 
 ## Open issues and notes
 
-- No email yet (`FEATURE_EMAIL`, M8): invitation and reset links are shown to the admin to pass on.
 - No TOTP second factor (a later item in the brief).
 - "View as" shows a person's data, not whether they may open the dashboard.
 - A dashboard's owner cannot be changed in the UI, and a deleted owner leaves admins and existing shares as the only way in.
 - Share links show filters but no "reset filters" control; reloading without `?s=` resets them.
-- Sessions and links are kept as rows after they end; there is no clean-up job yet (M8, with backups).
 - Lockouts can be used to lock someone out for a while by guessing their email; they back off from one minute to an hour. The per-address limit only works if the api sees real client addresses, which depends on `TRUSTED_PROXIES` being right.
 - The MCP SDK is on 2.3, a new major version, used through its low-level API.
 - The live event hub lives in the single api process; several processes would need Postgres LISTEN/NOTIFY (R5).
 - A right-hand axis showing counts can have decimal tick labels.
-- Bundle size: main chunk 804 kB (248 kB gzipped), up from 755 kB with the M6 pages; ECharts (562 kB) and Monaco (3.4 MB) are lazy.
-- Joins are one hop (two-hop: M8). The query builder has one filter row.
-- Merge refresh does not remove rows deleted in the source. One job runs at a time. Datasets cannot be edited after creation.
+- Bundle size: main chunk 839 kB (257 kB gzipped), up from 804 kB with the M8 pages; ECharts (562 kB) and Monaco (3.4 MB) are lazy.
+- Joins reach two hops at most. The query builder has one filter row.
+- Merge refresh does not remove rows deleted in the source (Salesforce included) until a full rebuild. One job runs at a time, so a long refresh delays a scheduled backup or email. Datasets cannot be edited after creation.
+- Google Sheets refresh in full only (a sheet has no change marker). Dates in sheets must be formatted as dates to be read as dates.
+- Emailed dashboards show numbers and short tables, not chart pictures, and use each filter's default.
+- A schedule run missed while the stack was down is not made up.
+- Backups on NFS need the export to let uid 110001 write (an unprivileged LXC's view of the containers' uid 10001).
 - Assistant conversations are kept until their dashboard or their person is deleted; there is no clean-up or export yet.
 - A request to the assistant runs in the api process (R5): a restart stops it (Stop is pressed for it, and after 10 seconds it is cancelled). The next request carries on with the conversation.
 - A local model is slower than Claude: `gemma4:12b` builds a three-visual dashboard in 2.5 to 3 minutes on this laptop. After a dropped tool call it can think for several minutes, and one such build ran out of the 10-minute budget (`ASSISTANT_TIMEOUT_SECONDS`).
@@ -260,20 +293,18 @@ Not verified:
 
 ## Backlog agreed at reviews
 
-- **M8:** bulk export and import of a `models/` folder; two-hop joins; the 10 million row check; drag-and-drop of fields into wells; email for invitations, resets and snapshots; a clean-up job for ended sessions and links.
+- **M8:** bulk export and import of a `models/` folder; two-hop joins; the 10 million row check; drag-and-drop of fields into wells; email for invitations, resets and snapshots; a clean-up job for ended sessions and links. (All done.)
+- **Post-v1 (decided at M8):** SQL Lab, the admin-only read-only SQL page (`FEATURE_SQL_LAB` in the brief).
 - **Later (brief):** OAuth for the MCP server so it can be a claude.ai connector; TOTP second factor.
 
 ## Questions for review
 
-- **Q1. The extra call per build.** The time field written without its list could be accepted as a list of one in the tools agents use (`"x": {...}` read as `"x": [{...}]`), as they already forgive a few slips such as numbers sent as text. That would save about 20 seconds per build with gemma4. Do it in M8, or keep the spec strict?
-- **Q2. Test leftovers in your stack.** Ten dashboards from the real-model checks (four "Real model check ...", six "Ollama check 1" to "3"), and a "Smoke mwh0pics" dashboard with its `smoke_mwh0pics` dataset and connection, left by an interrupted smoke run on 15 November (the assistant lists that dataset among yours). "Gifts overview" and "Giving overview (built over MCP)" are not mine to judge, so they stay. Shall I delete the others?
+- **Q1. Emailed dashboards carry numbers, not pictures of charts** (ADR-026): a KPI's value and its comparison, the first 10 rows of each other visual with a bar beside a chart's first measure, and a link to the dashboard. Pictures would need a headless browser in the image (a few hundred MB more, and a browser to keep patched), while tables show reliably in every mail client. Is that enough for v1?
 
 ## Exact next step
 
-After review, start **M8 (More connectors and hardening)**. Read the M8 section of BUILD_BRIEF.md first. In outline:
+Your part, then the M8 review:
 
-1. Google Sheets and Salesforce (incremental) connectors.
-2. The backup job with a restore document; the scheduled refresh UI with cron presets; email behind `FEATURE_EMAIL` (invitations, resets, snapshots).
-3. The performance check: a typical dashboard on a 10 million row dataset loads in under 1.5 s warm.
-4. Full Windows and Proxmox documentation, a demo seed dataset, and the install check on each target from the README alone, including the Google sign-in checklist.
-5. The M8 backlog agreed at reviews: model export and import, two-hop joins, drag-and-drop fields, a clean-up job for ended sessions and links.
+1. **Salesforce, Developer Edition only.** In your Developer Edition org, create an External Client App as the README's Salesforce section describes (OAuth with the `api` scope, the Client Credentials Flow, running as a user who can read Account, Contact and Opportunity). Then add a **Salesforce** connection yourself in Opsis at http://localhost:8080 with the My Domain URL, the consumer key and the consumer secret, press **Test** (it should name a Developer Edition org), save it, and tell me its name. I will confirm the edition before reading anything, then test discovery, a full refresh and a merge refresh. I will not type the key or the secret myself.
+2. **Google Sheets: a service account.** As the README's Google Sheets section describes: a Google Cloud project with the Google Sheets API enabled, a service account with no roles, and a JSON key. The only access it needs is Viewer on the spreadsheets you share with its email address. Share one test spreadsheet with it (a few tabs, with numbers, dates and text), add a **Google Sheets** connection in Opsis with the sheet's URL and the key file, and tell me its name. I will then test discovery, the column types and a refresh.
+3. **The install check on Proxmox:** follow `deploy/proxmox/README.md` from section 1, then its section 11 checklist, which includes the Google sign-in checklist in section 3. Tell me anything that fails, and which address the audit log shows for your sign-in.

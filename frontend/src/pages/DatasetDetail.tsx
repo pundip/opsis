@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { DatasetAccessPanel } from "../components/DatasetAccessPanel";
+import { ScheduleCard } from "../components/ScheduleCard";
 import type { AppConfig, Me } from "../lib/config";
 import {
   type Job,
@@ -131,6 +132,7 @@ export function DatasetDetail({ config, me }: { config: AppConfig; me: Me }) {
       {config.authMode !== "none" && (me.permissions.includes("settings:manage") || data.createdBy === me.id) && (
         <DatasetAccessPanel datasetId={id} />
       )}
+      {config.features.scheduledRefresh && <ScheduleCard key={data.schedule?.cron ?? "none"} datasetId={id} schedule={data.schedule} />}
 
       <Card className="mb-5 p-4">
         <dl className="grid grid-cols-2 gap-4 md:grid-cols-5">

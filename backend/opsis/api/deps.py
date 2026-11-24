@@ -24,7 +24,6 @@ ADMIN_PERMISSIONS = frozenset(
         Permission.SETTINGS_MANAGE,
         Permission.AUDIT_VIEW,
         Permission.CONNECTIONS_MANAGE,
-        Permission.SQL_LAB_USE,
     }
 )
 

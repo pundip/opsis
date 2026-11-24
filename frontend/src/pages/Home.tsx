@@ -3,7 +3,6 @@ import { fiscalYearLabel, monthName, todayIn } from "../lib/calendar";
 
 const FEATURE_LABELS: Record<keyof Features, string> = {
   assistant: "In-app assistant",
-  sqlLab: "SQL Lab",
   scheduledRefresh: "Scheduled refresh",
   publicShareLinks: "Public share links",
   backups: "Nightly backups",

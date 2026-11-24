@@ -28,6 +28,7 @@ from opsis.api import (
     auth,
     dashboards,
     ingestion,
+    operations,
     semantic,
     sharing,
     system,
@@ -40,7 +41,7 @@ from opsis.auth import cookies
 from opsis.jobs.worker import InlineRunner
 from opsis.mcp.server import OpsisMcp
 from opsis.query.duckdb_engine import DuckDBEngine, ResultCache
-from opsis.services import accounts, users
+from opsis.services import accounts, subscriptions, users
 from opsis.services.query import QueryRuntime
 from opsis.settings import Settings, load_settings
 
@@ -71,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_concurrent=settings.query_max_concurrent,
     )
     mcp = OpsisMcp(settings, session_factory, runtime)
+    subscriptions.use_runtime(runtime)  # emailed dashboards, when the runner is inline
     # The in-app assistant: one provider client and the requests in progress.
     runs = Runs()
     provider = build_provider(settings) if settings.feature_assistant else None
@@ -181,6 +183,15 @@ def register_feature_routers(api: APIRouter, settings: Settings) -> None:
         api.include_router(sharing.router)
     if settings.feature_assistant:
         api.include_router(assistant.router)
+    if settings.feature_scheduled_refresh:
+        api.include_router(operations.schedules_router)
+    if settings.feature_backups:
+        api.include_router(operations.backups_router)
+    api.include_router(operations.demo_router)
+    if settings.feature_email:
+        api.include_router(operations.email_router)
+        if settings.sign_in:
+            api.include_router(operations.subscriptions_router)
     if settings.feature_public_share_links:
         api.include_router(sharing.links_router)
         api.include_router(sharing.public_router)
@@ -221,6 +232,16 @@ def _mount_frontend(app: FastAPI, settings: Settings) -> None:
         @app.get(base, include_in_schema=False)
         def to_slash() -> Response:
             return RedirectResponse(f"{base}/", status_code=308)
+
+    # Anything else under /api that no router took is not there: 404 for every
+    # method, as for GET (routes of a flag that is off are never registered).
+    @app.api_route(
+        base + "/api/{path:path}",
+        methods=["POST", "PUT", "PATCH", "DELETE"],
+        include_in_schema=False,
+    )
+    def no_route(path: str) -> Response:
+        raise ApiError(404, "not_found", "Not found.")
 
     @app.get(base + "/{path:path}", include_in_schema=False)
     def spa(path: str) -> Response:

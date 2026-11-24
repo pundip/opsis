@@ -33,6 +33,7 @@ from opsis.auth.principal import Permission, Principal
 from opsis.dashboards import patch as patches
 from opsis.db.models import Dashboard, Dataset
 from opsis.errors import ApiError
+from opsis.mcp import lenient
 from opsis.services import (
     access,
     audit,
@@ -69,6 +70,14 @@ class ToolContext:
     principal: Principal
     # "agent" for MCP and the assistant. Recorded on every version the call creates.
     author_type: str = "agent"
+    # Who is calling, for the debug log of forgiven input slips (see lenient.py).
+    client: str = "an MCP client"
+
+    def lists(self, schema_name: str, value: Any, what: str) -> Any:
+        """A spec document from an agent, with single values read as lists of one."""
+        return lenient.spec_lists(
+            self.settings.spec_dir, schema_name, value, what=what, client=self.client
+        )
 
 
 Handler = Callable[[ToolContext, Session, dict[str, Any]], Any]
@@ -625,7 +634,7 @@ def preview_dataset(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
 
 def run_query(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    query = dict(args["query"])
+    query = dict(ctx.lists("semantic-query.schema.json", args["query"], "run_query query"))
     limit = query.get("limit")
     if not isinstance(limit, int) or isinstance(limit, bool) or limit > MAX_QUERY_ROWS:
         query["limit"] = (
@@ -720,7 +729,8 @@ def profile_column(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
 def validate_model(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     dataset = _dataset(ctx, db, args["dataset"])
-    found = models.problems(db, ctx.settings, dataset, args["definition"])
+    definition = ctx.lists("semantic-model.schema.json", args["definition"], "validate_model")
+    found = models.problems(db, ctx.settings, dataset, definition)
     return {"valid": not found, "problems": found[:50]}
 
 
@@ -734,7 +744,11 @@ def patch_semantic_model(ctx: ToolContext, db: Session, args: dict[str, Any]) ->
             f"The model of {dataset.name!r} is at version {described['version']}, not {base}.",
             [{"path": "/base_version", "message": f"Current version is {described['version']}."}],
         )
-    patched = patches.apply(described["definition"], args["ops"])
+    patched = ctx.lists(
+        "semantic-model.schema.json",
+        patches.apply(described["definition"], args["ops"]),
+        "patch_semantic_model (the patched model)",
+    )
     record = models.save(
         db,
         ctx.settings,
@@ -821,6 +835,8 @@ def _saved(ctx: ToolContext, db: Session, dashboard: Dashboard, what: str) -> di
 
 def create_dashboard(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     spec = args.get("spec")
+    if spec is not None:
+        spec = ctx.lists("dashboard.schema.json", spec, "create_dashboard spec")
     title = str(args.get("title") or (spec or {}).get("title") or "").strip()
     if not title:
         raise _fail("invalid_request", "Give the dashboard a `title`.")
@@ -855,12 +871,16 @@ def patch_dashboard(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
         base_version=int(args["base_version"]),
         message=args.get("message"),
         author_type=ctx.author_type,
+        transform=lambda spec: ctx.lists(
+            "dashboard.schema.json", spec, "patch_dashboard (the patched spec)"
+        ),
     )
     return _saved(ctx, db, patched, "Saved.")
 
 
 def validate_spec(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
-    found = dashboards.problems(db, ctx.settings, args["spec"], ctx.principal)
+    spec = ctx.lists("dashboard.schema.json", args["spec"], "validate_spec spec")
+    found = dashboards.problems(db, ctx.settings, spec, ctx.principal)
     result: dict[str, Any] = {"valid": not found, "problems": found[:50]}
     if found:
         result["whatToDo"] = GENERAL_HINTS["invalid_spec"]
@@ -1554,6 +1574,7 @@ def call(ctx: ToolContext, name: str, arguments: Mapping[str, Any] | None) -> An
             f"The role of this user ({ctx.principal.role}) does not allow {tool.name}.",
         )
     args = _coerce(tool.input_schema, dict(arguments or {}))
+    args = lenient.lists_of_one(tool.input_schema, args, what=tool.name, client=ctx.client)
     _check_arguments(tool, args)
     with ctx.session_factory() as db:
         try:

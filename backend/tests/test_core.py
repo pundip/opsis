@@ -27,7 +27,7 @@ def test_role_permissions() -> None:
     assert not viewer.can(Permission.DASHBOARDS_EDIT)
     assert editor.can(Permission.DASHBOARDS_EDIT) and editor.can(Permission.MODELS_EDIT)
     assert not editor.can(Permission.CONNECTIONS_MANAGE)
-    assert not editor.can(Permission.SQL_LAB_USE)
+    assert not editor.can(Permission.SETTINGS_MANAGE)
     assert ROLE_PERMISSIONS[Role.ADMIN] == frozenset(Permission)
     assert all(admin.can(p) for p in Permission)
 

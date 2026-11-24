@@ -203,7 +203,12 @@ async def send_message(
         raise
     queue = run.listen()
     ctx = tools.ToolContext(
-        settings, session_factory, request.app.state.query_runtime, principal, author_type="agent"
+        settings,
+        session_factory,
+        request.app.state.query_runtime,
+        principal,
+        author_type="agent",
+        client=f"the assistant ({provider.name}, {provider.model})",
     )
     work = loop.Request(
         run=run,

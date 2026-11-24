@@ -1,7 +1,9 @@
 // Renders a connector's config_schema() as a form.
 //
 // Supports what connector schemas use: text, number, boolean, enum, secret
-// ("x-secret") and file upload ("x-upload") fields. Validation is done by the
+// ("x-secret") and file upload ("x-upload") fields, and text read from a local
+// file ("x-file-text"), such as a key file, which never leaves the browser except
+// as the field's value. Validation is done by the
 // backend, which returns one message per JSON path; they are shown under the
 // matching field. See ADR-018 for why this is not react-jsonschema-form.
 import { useState } from "react";
@@ -29,6 +31,36 @@ export function schemaDefaults(schema: ConfigSchema): Values {
     if (property.default !== undefined) values[name] = property.default;
   }
   return values;
+}
+
+/** Reads a small local file (a key file) into a field, in the browser. */
+function FileTextButton(props: { id: string; accept: string; onText: (text: string, name: string) => void }) {
+  const [problem, setProblem] = useState<string | null>(null);
+  return (
+    <span className="mt-1 flex items-center gap-2 text-xs">
+      <label htmlFor={props.id} className="cursor-pointer text-brand underline">
+        Load from a file
+      </label>
+      <input
+        id={props.id}
+        type="file"
+        accept={props.accept}
+        className="sr-only"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.target.value = "";
+          if (!file) return;
+          if (file.size > 64 * 1024) {
+            setProblem("That file is too large to be a key file.");
+            return;
+          }
+          setProblem(null);
+          void file.text().then((text) => props.onText(text.trim(), file.name));
+        }}
+      />
+      {problem && <span className="text-red-700 dark:text-red-400">{problem}</span>}
+    </span>
+  );
 }
 
 function UploadField(props: {
@@ -141,7 +173,7 @@ export function SchemaForm(props: Props) {
       );
     }
     const secret = Boolean(property["x-secret"]);
-    return (
+    const input = (
       <Input
         id={id}
         type={secret ? "password" : "text"}
@@ -150,6 +182,13 @@ export function SchemaForm(props: Props) {
         value={typeof value === "string" ? value : ""}
         onChange={(e) => set(name, e.target.value)}
       />
+    );
+    if (!property["x-file-text"]) return input;
+    return (
+      <>
+        {input}
+        <FileTextButton id={`${id}-file`} accept={property["x-file-text"]} onText={(text) => set(name, text)} />
+      </>
     );
   }
 

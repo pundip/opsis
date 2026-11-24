@@ -23,11 +23,11 @@ from jsonschema import Draft202012Validator
 from opsis.dashboards.manifests import Manifest
 from opsis.semantic.calendar import CalendarConfig, resolve_relative_range
 from opsis.semantic.model import (
-    SAFE_JOINS,
     Dimension,
     Measure,
     Model,
     Problem,
+    reachable,
     schema_problems,
     schema_validator,
 )
@@ -98,15 +98,13 @@ def blank_spec(title: str) -> dict[str, Any]:
 
 def resolve_field(models: Mapping[str, Model], base: str | None, ref: str) -> Field | None:
     """Look up "dataset.field". With `base`, the field must be reachable from that
-    dataset: its own dimension or measure, or a dimension across a safe join."""
+    dataset: its own dimension or measure, or a dimension one or two safe joins away."""
     dataset, _, name = ref.partition(".")
     model = models.get(dataset)
     if model is None:
         return None
     if base is not None and dataset != base:
-        origin = models.get(base)
-        join = next((j for j in origin.joins if j.to == dataset), None) if origin else None
-        if join is None or join.relationship not in SAFE_JOINS:
+        if dataset not in reachable(models, base):
             return None
         return ("dimension", model.dimensions[name]) if name in model.dimensions else None
     if name in model.dimensions:
@@ -188,9 +186,8 @@ def _unknown_field(models: Mapping[str, Model], dataset: str, ref: str, kind: st
     model = models[dataset]
     measures = [f"{dataset}.{name}" for name in model.measures]
     dimensions = [f"{dataset}.{name}" for name in model.dimensions]
-    for join in model.joins:
-        if join.relationship in SAFE_JOINS and join.to in models:
-            dimensions += [f"{join.to}.{name}" for name in models[join.to].dimensions]
+    for other in reachable(models, dataset):
+        dimensions += [f"{other}.{name}" for name in models[other].dimensions]
     known = (
         measures
         if kind == "measure"

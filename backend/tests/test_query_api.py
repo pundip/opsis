@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from opsis.db.models import AuditLog, SemanticModel
 from opsis.services import models
 from opsis.settings import Settings
-from tests.test_ingestion import connect, make_dataset, ok, refresh, run_jobs
+from tests.test_ingestion import connect, make_dataset, ok, refresh, run_jobs, upload
 
 ClientFor = Callable[..., TestClient]
 
@@ -452,3 +452,40 @@ def test_query_errors_are_precise(client_for: ClientFor, source: dict[str, Any])
     assert error("SELECT * FROM gifts")["status"] == 422
     # Nothing leaks about the server in an error.
     assert "/data" not in str(schema) and "/data" not in str(semantic)
+
+
+def test_a_field_two_joins_away(client_for: ClientFor, source: dict[str, Any]) -> None:
+    """gifts -> donors -> regions, with regions from a CSV file (M8)."""
+    client = client_for()
+    load(client, source)
+    ok(client.put("/api/models/gifts", json={"yaml": MODEL_YAML}))
+    states = b"code,state\nVIC,Victoria\nNSW,New South Wales\nQLD,Queensland\n"
+    uploaded = upload(client, "regions.csv", states)
+    connection = connect(client, "file", {"file": uploaded["file"]}, name="Regions file")
+    make_dataset(client, connection, "regions", name="regions")
+    run_jobs(client)
+    donors = ok(client.get("/api/models/donors"))["definition"]
+    donors["joins"] = [
+        {"to": "regions", "type": "left", "on": {"region": "code"}, "relationship": "many_to_one"}
+    ]
+    ok(client.put("/api/models/donors", json={"definition": donors}))
+    # The field lists offer it, as they do fields one join away.
+    fields = {f["ref"]: f for f in ok(client.get("/api/models/gifts"))["fields"]}
+    assert fields["regions.state"]["kind"] == "dimension" and "regions.state_count" not in fields
+    assert "donors.tier" in fields
+
+    result = query(
+        client,
+        {"dataset": "gifts", "dimensions": ["regions.state"], "measures": ["gifts.gift_count"]},
+    )
+    expected = dict(
+        source["conn"]
+        .execute(
+            """SELECT CASE d.region WHEN 'VIC' THEN 'Victoria' WHEN 'NSW' THEN 'New South Wales'
+                      WHEN 'QLD' THEN 'Queensland' END, count(*)
+               FROM src.gifts g LEFT JOIN src.donors d ON d.id = g.donor_id GROUP BY 1"""
+        )
+        .fetchall()
+    )
+    assert {row[0]: row[1] for row in result["rows"]} == expected
+    assert sum(expected.values()) == 2000 and None in expected  # donors 41 to 45 do not exist

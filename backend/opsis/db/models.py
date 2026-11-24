@@ -495,3 +495,30 @@ class AssistantEntry(Base):
     kind: Mapped[str] = mapped_column(String(20))  # request | text | update | step | notice | done
     data: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Schedule(Base):
+    """Something to do on a cron schedule, run by the job runner's scheduler.
+
+    `key` names what it is for, so there is one row per thing: "refresh:<dataset
+    id>", "snapshot:<dashboard id>:<user id>" (an emailed dashboard), "backup" and
+    "cleanup". Times are cron expressions in the workspace timezone.
+    """
+
+    __tablename__ = "schedules"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String(200), unique=True)
+    kind: Mapped[str] = mapped_column(String(30))  # refresh | snapshot | backup | cleanup
+    target_id: Mapped[uuid.UUID | None] = mapped_column()  # the dataset or dashboard
+    # For a snapshot: the person it is emailed to, and whose access it is built with.
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    cron: Mapped[str] = mapped_column(String(100))
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

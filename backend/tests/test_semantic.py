@@ -510,6 +510,86 @@ def test_join_to_a_dimension_of_another_dataset(sources: dict[str, Source]) -> N
     assert sum(r["gifts.gift_count"] for r in rows) == 400  # the join never duplicates gifts
 
 
+def test_fields_two_joins_away(sources: dict[str, Source], tmp_path: Path) -> None:
+    """gifts -> donors -> regions: each hop many_to_one, so no gift is counted twice."""
+    regions = [{"code": "VIC", "state": "Victoria"}, {"code": "NSW", "state": "New South Wales"}]
+    to_regions = {"to": "regions", "on": {"region": "code"}, "relationship": "many_to_one"}
+
+    def donors_with(*joins: dict[str, Any], restricted: bool = False) -> Source:
+        definition = {**DONORS_MODEL, "joins": [*DONORS_MODEL["joins"], *joins]}
+        return Source(semantic.parse_model("donors", definition), DONOR_COLUMNS,
+                      sources["donors"].table, restricted=restricted)  # fmt: skip
+
+    three = {
+        **sources,
+        "donors": donors_with(to_regions),
+        "regions": Source(
+            semantic.parse_model(
+                "regions", {"dimensions": {"state": {"column": "state", "type": "string"}}}
+            ),
+            {"code": "string", "state": "string"},
+            TableRef("regions", "d3", "s3", write_parquet(tmp_path / "regions", regions)),
+        ),
+    }
+    query = {
+        "dataset": "gifts",
+        "dimensions": ["regions.state"],
+        "measures": ["gifts.total_amount", "gifts.gift_count"],
+    }
+    rows = run(three, query)
+    donor_region = {d["id"]: d["region"] for d in DONORS}
+    state = {r["code"]: r["state"] for r in regions}
+    expected: dict[str | None, Decimal] = defaultdict(Decimal)
+    for gift in GIFTS:
+        expected[state.get(str(donor_region.get(gift["donor_id"])))] += gift["amount"]
+    assert {r["regions.state"]: r["gifts.total_amount"] for r in rows} == dict(expected)
+    assert sum(r["gifts.gift_count"] for r in rows) == 400  # left joins keep every gift
+    assert None in expected  # QLD donors, and gifts whose donor is missing
+    sql = compiled(three, query).sql
+    assert sql.count("LEFT JOIN") == 2 and '"donors"."region" = "regions"."code"' in sql
+
+    # A filter on a field two joins away.
+    filtered = run(three, {"dataset": "gifts", "measures": ["gifts.gift_count"],
+                           "filters": [{"field": "regions.state", "op": "in", "values": ["Victoria"]}]})  # fmt: skip
+    assert filtered[0]["gifts.gift_count"] == sum(
+        1 for g in GIFTS if donor_region.get(g["donor_id"]) == "VIC"
+    )
+
+    # Two ways there: a direct join has to say which.
+    agents = Source(
+        semantic.parse_model("agents", {"dimensions": {}, "joins": [to_regions]}),
+        {"id": "integer", "region": "string"},
+        TableRef("agents", "d4", "s4", str(tmp_path / "agents")),
+    )
+    gifts_two = Source(
+        semantic.parse_model("gifts", {**GIFTS_MODEL, "joins": [*GIFTS_MODEL["joins"],
+                             {"to": "agents", "on": {"donor_id": "id"}, "relationship": "many_to_one"}]}),
+        GIFT_COLUMNS, sources["gifts"].table,
+    )  # fmt: skip
+    ways = problems({**three, "gifts": gifts_two, "agents": agents}, query)["/dimensions/0"]
+    assert "through 'donors' and through 'agents'" in ways and "direct join" in ways
+
+    # Never through a restricted dataset, nor over a join that would fan out.
+    hidden = problems({**three, "donors": donors_with(to_regions, restricted=True)}, query)
+    assert "restricted" in hidden["/dimensions/0"]
+    fan_out = {**to_regions, "relationship": "one_to_many"}
+    assert (
+        "double-count"
+        in problems({**three, "donors": donors_with(fan_out)}, query)["/dimensions/0"]
+    )
+    # Three joins away is too far.
+    far = {**three, "regions": Source(
+        semantic.parse_model("regions", {"dimensions": {}, "joins": [
+            {"to": "countries", "on": {"code": "region"}, "relationship": "many_to_one"}]}),
+        {"code": "string"}, three["regions"].table,
+    ), "countries": Source(
+        semantic.parse_model("countries", {"dimensions": {"name": {"column": "name", "type": "string"}}}),
+        {"name": "string", "region": "string"}, TableRef("countries", "d5", "s5", str(tmp_path / "c")),
+    )}  # fmt: skip
+    too_far = problems(far, {"dataset": "gifts", "dimensions": ["countries.name"]})
+    assert "no join to, directly or through a dataset it joins to" in too_far["/dimensions/0"]
+
+
 def test_unsafe_or_missing_joins_are_refused(sources: dict[str, Source]) -> None:
     fan_out = problems(
         sources,

@@ -41,17 +41,57 @@ interface ItemPanelProps {
 }
 
 export function ItemPanel({ item, datasets, fields, onChange, onRemove }: ItemPanelProps) {
+  // Drag and drop: a field from the list (from undefined) or from another role.
+  const [dragging, setDragging] = useState<{ ref: string; from?: string } | null>(null);
+  const [over, setOver] = useState<string | null>(null);
   const manifest = manifests[item.visual];
   if (!manifest) return <p className="text-sm text-red-700">There is no visual called "{item.visual}".</p>;
   const roles = Object.entries(manifest.roles);
+  type Rule = (typeof roles)[number][1];
   const bindings = item.bindings ?? {};
   const boundRefs = Object.values(bindings).flat().map(bindingField);
-  const setBindings = (role: string, next: Binding[]) => {
-    const all = { ...bindings, [role]: next };
+  const setAll = (all: Record<string, Binding[]>) => {
     const still = new Set(Object.values(all).flat().map(bindingField));
     onChange({ ...item, bindings: all, sort: item.sort?.filter((s) => still.has(s.field)) });
   };
+  const setBindings = (role: string, next: Binding[]) => setAll({ ...bindings, [role]: next });
   const hasGrain = Object.values(bindings).flat().some((b) => bindingGrain(b));
+  const fits = (rule: Rule, field: ModelField) =>
+    (field.kind === "dimension" || (field.kind === "measure" && field.dataset === item.dataset)) &&
+    (rule.kind === "any" || rule.kind === field.kind) &&
+    (!rule.types || field.kind !== "dimension" || rule.types.includes(field.type));
+  // A date on a chart starts grouped by month; a table shows each value.
+  const firstEntry = (field: ModelField): Binding => {
+    const grain =
+      field.type === "time" && item.visual !== "table" && !hasGrain
+        ? field.grains?.includes("month")
+          ? "month"
+          : field.grains?.[0]
+        : undefined;
+    return grain ? { field: field.ref, grain } : field.ref;
+  };
+  /** Add a field to a role, or move it there from the role it was dragged from. */
+  const place = (role: string, rule: Rule, field: ModelField, from?: string) => {
+    const target = bindings[role] ?? [];
+    if (from === role || target.length >= rule.max || !fits(rule, field)) return;
+    if (!from) {
+      setBindings(role, [...target, firstEntry(field)]);
+      return;
+    }
+    const moved = (bindings[from] ?? []).find((e) => bindingField(e) === field.ref) ?? field.ref;
+    // A right-hand axis only means something in a role that has axes.
+    const entry: Binding =
+      typeof moved === "string" || rule.axis || !moved.axis ? moved : moved.grain ? { field: moved.field, grain: moved.grain } : moved.field;
+    setAll({ ...bindings, [from]: (bindings[from] ?? []).filter((e) => bindingField(e) !== field.ref), [role]: [...target, entry] });
+  };
+  const dragged = dragging ? fields.find((f) => f.ref === dragging.ref) : undefined;
+  const endDrag = () => {
+    setDragging(null);
+    setOver(null);
+  };
+  const palette = fields.filter(
+    (f) => (f.kind === "dimension" || (f.kind === "measure" && f.dataset === item.dataset)) && !boundRefs.includes(f.ref),
+  );
 
   return (
     <div className="space-y-3">
@@ -93,19 +133,62 @@ export function ItemPanel({ item, datasets, fields, onChange, onRemove }: ItemPa
               ))}
             </Select>
           </Field>
+          {item.dataset && palette.length > 0 && (
+            <div>
+              <p id="fields-hint" className="mb-1 text-xs text-zinc-500">
+                Drag a field into a role below, or choose it under Add a field.
+              </p>
+              <ul aria-label="Fields" aria-describedby="fields-hint" className="flex max-h-40 flex-wrap gap-1 overflow-auto">
+                {palette.map((field) => (
+                  <li
+                    key={field.ref}
+                    draggable
+                    title={field.ref}
+                    onDragStart={(event) => {
+                      event.dataTransfer.setData("text/plain", field.ref);
+                      event.dataTransfer.effectAllowed = "copy";
+                      setDragging({ ref: field.ref });
+                    }}
+                    onDragEnd={endDrag}
+                    className={`cursor-grab rounded border px-1.5 py-0.5 text-xs ${
+                      field.kind === "measure"
+                        ? "border-sky-300 bg-sky-50 dark:border-sky-800 dark:bg-sky-950/40"
+                        : "border-zinc-300 bg-white dark:border-zinc-700 dark:bg-zinc-900"
+                    }`}
+                  >
+                    {field.label}
+                    {field.dataset !== item.dataset ? ` (${field.dataset})` : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {item.dataset &&
             roles.map(([role, rule]) => {
               const entries = bindings[role] ?? [];
-              const eligible = fields.filter(
-                (f) =>
-                  !boundRefs.includes(f.ref) &&
-                  (f.kind === "dimension" || (f.kind === "measure" && f.dataset === item.dataset)) &&
-                  (rule.kind === "any" || rule.kind === f.kind) &&
-                  (!rule.types || f.kind !== "dimension" || rule.types.includes(f.type)),
-              );
+              const eligible = fields.filter((f) => !boundRefs.includes(f.ref) && fits(rule, f));
               const count = rule.min === rule.max ? `${rule.min}` : `${rule.min} to ${rule.max}`;
+              const accepts = dragged !== undefined && dragging?.from !== role && entries.length < rule.max && fits(rule, dragged);
               return (
-                <fieldset key={role} data-role={role}>
+                <fieldset
+                  key={role}
+                  data-role={role}
+                  className={`rounded-md ${over === role ? "outline outline-2 outline-brand" : accepts ? "outline-1 outline-dashed outline-zinc-400" : ""}`}
+                  onDragOver={(event) => {
+                    if (!accepts) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = dragging?.from ? "move" : "copy";
+                    if (over !== role) setOver(role);
+                  }}
+                  onDragLeave={(event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOver((now) => (now === role ? null : now));
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    if (dragged && accepts) place(role, rule, dragged, dragging?.from);
+                    endDrag();
+                  }}
+                >
                   <legend className="mb-1 text-sm font-medium">
                     {rule.label ?? role} <span className="font-normal text-zinc-500">({count})</span>
                   </legend>
@@ -115,10 +198,19 @@ export function ItemPanel({ item, datasets, fields, onChange, onRemove }: ItemPa
                       const field = fields.find((f) => f.ref === ref);
                       const replace = (next: Binding) => setBindings(role, entries.map((e, i) => (i === index ? next : e)));
                       return (
-                        <li key={ref} className="flex items-center gap-1 rounded-md bg-zinc-100 px-2 py-1 text-sm dark:bg-zinc-800">
-                          <span className="mr-auto truncate" title={ref}>
-                            {fieldLabel(fields, ref)}
-                          </span>
+                        <li
+                          key={ref}
+                          draggable
+                          title={`${ref}: drag it to another role to move it`}
+                          onDragStart={(event) => {
+                            event.dataTransfer.setData("text/plain", ref);
+                            event.dataTransfer.effectAllowed = "move";
+                            setDragging({ ref, from: role });
+                          }}
+                          onDragEnd={endDrag}
+                          className="flex cursor-grab items-center gap-1 rounded-md bg-zinc-100 px-2 py-1 text-sm dark:bg-zinc-800"
+                        >
+                          <span className="mr-auto truncate">{fieldLabel(fields, ref)}</span>
                           {field?.type === "time" && item.visual !== "table" && (
                             <select
                               aria-label={`Group ${fieldLabel(fields, ref)} by`}
@@ -165,12 +257,7 @@ export function ItemPanel({ item, datasets, fields, onChange, onRemove }: ItemPa
                       value=""
                       onChange={(event) => {
                         const field = fields.find((f) => f.ref === event.target.value);
-                        if (!field) return;
-                        // A date on a chart starts grouped by month; a table shows each value.
-                        const grain = field.type === "time" && item.visual !== "table" && !hasGrain
-                          ? (field.grains?.includes("month") ? "month" : field.grains?.[0])
-                          : undefined;
-                        setBindings(role, [...entries, grain ? { field: field.ref, grain } : field.ref]);
+                        if (field) place(role, rule, field);
                       }}
                     >
                       <option value="">Add a field...</option>

@@ -1,7 +1,8 @@
 # Server mode on the laptop, for the smoke tests (scripts/smoke.mjs): sign-in with
 # local accounts and a fake Google, share links, access tokens for MCP, the
-# worker container, and the assistant on Claude's API (answered by a scripted
-# fake model), behind the proxytest nginx at http://localhost:8088/opsis/.
+# worker container, refresh schedules, backups, email (to a fake mail server whose
+# messages the tests read), and the assistant on Claude's API (answered by a
+# scripted fake model), behind the proxytest nginx at http://localhost:8088/opsis/.
 #
 # Run it under its own project name so it gets its own database and volumes:
 #   docker compose -p opsis-servertest --env-file .env.servertest \
@@ -25,9 +26,13 @@ x-server: &server
   GOOGLE_ALLOWED_DOMAINS: allowed.test
   GOOGLE_DISCOVERY_URL: http://fake-oidc:9400/.well-known/openid-configuration
   FEATURE_PUBLIC_SHARE_LINKS: "true"
-  FEATURE_SCHEDULED_REFRESH: "false"
-  FEATURE_SQL_LAB: "false"
-  FEATURE_BACKUPS: "false"
+  FEATURE_SCHEDULED_REFRESH: "true"
+  FEATURE_BACKUPS: "true"
+  FEATURE_EMAIL: "true"
+  SMTP_HOST: fake-smtp
+  SMTP_PORT: "2525"
+  SMTP_SECURITY: none
+  SMTP_FROM: Opsis smoke <opsis@smoke.test>
   FEATURE_ASSISTANT: "true"
   ASSISTANT_PROVIDER: anthropic
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -45,6 +50,13 @@ services:
     command: ["node", "/fake/fake-llm.mjs"]
     volumes:
       - ./e2e/fake-llm.mjs:/fake/fake-llm.mjs:ro
+  fake-smtp:
+    image: node:24-bookworm-slim
+    command: ["node", "/fake/fake-smtp.mjs"]
+    volumes:
+      - ./e2e/fake-smtp.mjs:/fake/fake-smtp.mjs:ro
+    ports:
+      - "127.0.0.1:9600:9600"
   fake-oidc:
     image: node:24-bookworm-slim
     command: ["node", "/fake/fake-oidc.mjs"]

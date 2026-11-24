@@ -9,6 +9,9 @@ Written in Python, not shell, so it behaves the same on every platform.
   healthcheck      call the app's own health endpoint (used by the Docker healthcheck)
   generate-key     print a new ENCRYPTION_KEY
   reset-link EMAIL print a one-time link to set the password of EMAIL (recovery)
+  backup           write a backup to BACKUP_DIR now
+  restore FILE     replace the database and data with a backup (api and worker stopped)
+  seed-demo        load the demo datasets and dashboard (made-up giving data)
 """
 
 from __future__ import annotations
@@ -18,7 +21,18 @@ import sys
 
 from opsis.settings import ConfigError, Settings, load_settings
 
-COMMANDS = ("api", "worker", "migrate", "check-config", "healthcheck", "generate-key", "reset-link")
+COMMANDS = (
+    "api",
+    "worker",
+    "migrate",
+    "check-config",
+    "healthcheck",
+    "generate-key",
+    "reset-link",
+    "backup",
+    "restore",
+    "seed-demo",
+)
 USAGE = f"usage: python -m opsis <{'|'.join(COMMANDS)}>"
 
 
@@ -68,6 +82,78 @@ def _reset_link(settings: Settings, args: list[str]) -> None:
     print(url)
 
 
+def _backup(settings: Settings) -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from opsis.errors import JobError
+    from opsis.services import backups
+
+    engine = create_engine(settings.sqlalchemy_url)
+    try:
+        with sessionmaker(engine)() as db:
+            made = backups.create(db, settings)
+    except JobError as exc:
+        raise SystemExit(str(exc)) from None
+    finally:
+        engine.dispose()
+    print(f"Backup written: {settings.backup_dir / made['file']} ({made['bytes']:,} bytes).")
+
+
+def _restore(settings: Settings, args: list[str]) -> None:
+    from pathlib import Path
+
+    from opsis.errors import JobError
+    from opsis.services import backups
+
+    files = [a for a in args if not a.startswith("--")]
+    if len(files) != 1:
+        raise SystemExit("usage: python -m opsis restore <backup file> --yes")
+    path = Path(files[0])
+    if not path.is_absolute() and not path.exists():
+        path = settings.backup_dir / path
+    try:
+        manifest = backups.read_manifest(path)
+    except JobError as exc:
+        raise SystemExit(str(exc)) from None
+    print(
+        f"Backup {path.name}: made {manifest.get('createdAt')} by Opsis {manifest.get('version')}."
+    )
+    if "--yes" not in args:
+        raise SystemExit(
+            "This replaces the whole database and the uploads and datasets in the data "
+            "folder with the backup's (the current ones are moved aside, not deleted). Stop "
+            "the api and worker first, then run again with --yes."
+        )
+    try:
+        done = backups.restore(settings, path)
+    except JobError as exc:
+        raise SystemExit(str(exc)) from None
+    print("Restored. Start the stack: the api upgrades the database when it starts.")
+    if done["previousDataMovedTo"]:
+        print(f"The previous uploads and datasets are in {done['previousDataMovedTo']}.")
+
+
+def _seed_demo(settings: Settings) -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from opsis.errors import JobError
+    from opsis.services import demo
+
+    engine = create_engine(settings.sqlalchemy_url)
+    try:
+        with sessionmaker(engine, expire_on_commit=False)() as db:
+            made = demo.seed(db, settings)
+    except JobError as exc:
+        raise SystemExit(str(exc)) from None
+    finally:
+        engine.dispose()
+    rows = ", ".join(f"{name} ({count:,} rows)" for name, count in made["rows"].items())
+    print(f"Demo data loaded: {rows}.")
+    print(f"Open the dashboard: {made['url']}")
+
+
 def main(argv: list[str]) -> None:
     if not argv or argv[0] not in COMMANDS:
         raise SystemExit(USAGE)
@@ -93,6 +179,15 @@ def main(argv: list[str]) -> None:
 
     if command == "reset-link":
         _reset_link(settings, argv[1:])
+        return
+    if command == "backup":
+        _backup(settings)
+        return
+    if command == "restore":
+        _restore(settings, argv[1:])
+        return
+    if command == "seed-demo":
+        _seed_demo(settings)
         return
 
     from opsis.db.migrate import upgrade_to_head

@@ -6,6 +6,9 @@
 //   1. Creates a synthetic `bench.gifts` table (and `bench.donors`) in the Compose Postgres.
 //   2. Connects Opsis to it, creates datasets and times the first refresh (ingestion).
 //   3. Runs five typical dashboard queries cold (first run) and warm (cached).
+//   3b. Opens a typical dashboard the way a browser does (every item's data, six
+//       requests at a time): cold, warm, and after a filter change. The brief's
+//       target is under 1.5 s warm on 10 million rows.
 //   4. Fires 10 different queries at once, twice, and measures how long /healthz takes
 //      to answer meanwhile (it must stay fast: queries run off the event loop).
 //   5. Samples `docker stats` throughout and reports the api container's peak memory.
@@ -155,7 +158,71 @@ async function waitForRefresh(id) {
   }
 }
 
+// ---- a typical dashboard ---------------------------------------------------------------
+const DASHBOARD_TITLE = "Benchmark dashboard";
+function dashboardSpec() {
+  const g = "bench_gifts";
+  const kpi = (id, x, measure) => ({
+    id, visual: "kpi", position: { x, y: 0, w: 3, h: 3 }, dataset: g,
+    bindings: { value: [`${g}.${measure}`] }, config: { comparison: "previous_year" },
+  });
+  return {
+    specVersion: 1,
+    title: DASHBOARD_TITLE,
+    layout: { columns: 12, rowHeight: 40 },
+    filters: [
+      { id: "period", type: "dateRange", field: `${g}.gift_date`, label: "Period", default: { relative: "last_12_months" } },
+      { id: "region", type: "multiSelect", field: `${g}.region`, label: "Region" },
+    ],
+    items: [
+      kpi("total", 0, "total_amount"),
+      kpi("count", 3, "row_count"),
+      kpi("donors", 6, "donors"),
+      kpi("online", 9, "online_amount"),
+      {
+        id: "by_month", visual: "line", position: { x: 0, y: 3, w: 8, h: 7 }, dataset: g,
+        bindings: { x: [{ field: `${g}.gift_date`, grain: "month" }], y: [`${g}.total_amount`], series: [`${g}.channel`] },
+      },
+      {
+        id: "by_channel", visual: "pie", position: { x: 8, y: 3, w: 4, h: 7 }, dataset: g,
+        bindings: { category: [`${g}.channel`], value: [`${g}.total_amount`] },
+      },
+      {
+        id: "by_fund", visual: "bar", position: { x: 0, y: 10, w: 6, h: 7 }, dataset: g,
+        bindings: { category: [`${g}.fund`], value: [`${g}.total_amount`, `${g}.row_count`] },
+        sort: [{ field: `${g}.total_amount`, dir: "desc" }],
+      },
+      {
+        id: "by_tier", visual: "table", position: { x: 6, y: 10, w: 6, h: 7 }, dataset: g,
+        bindings: { columns: ["bench_donors.tier", `${g}.total_amount`, `${g}.donors`] },
+      },
+    ],
+    interactions: { crossFilter: true },
+  };
+}
+
+/** Open a dashboard as the browser does: the spec, then every item's data, six at a time. */
+async function loadDashboard(id, state) {
+  const start = performance.now();
+  const dashboard = await api("GET", `/api/dashboards/${id}`);
+  const items = [...dashboard.spec.items];
+  const timings = [];
+  const worker = async () => {
+    while (items.length > 0) {
+      const item = items.shift();
+      const t = performance.now();
+      const body = await api("POST", `/api/dashboards/${id}/data`, { itemId: item.id, source: "draft", state });
+      timings.push({ item: item.id, wall: ms(t), cacheHit: body.cacheHit });
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  return { total: ms(start), slowest: Math.max(...timings.map((t) => t.wall)), hits: timings.filter((t) => t.cacheHit).length, items: timings.length };
+}
+
 async function cleanup() {
+  for (const dashboard of await api("GET", "/api/dashboards")) {
+    if (dashboard.title === DASHBOARD_TITLE) await api("DELETE", `/api/dashboards/${dashboard.id}`);
+  }
   for (const dataset of await api("GET", "/api/datasets")) {
     if (dataset.name.startsWith("bench_")) await api("DELETE", `/api/datasets/${dataset.id}`);
   }
@@ -217,6 +284,20 @@ async function main() {
     const warm = await timedQuery(query);
     if (cold.cacheHit || !warm.cacheHit) throw new Error(`unexpected cache state for ${name}`);
     console.log(`${name.padEnd(50)} ${String(cold.wall).padStart(7)} ms ${String(cold.engine).padStart(9)} ms ${String(warm.wall).padStart(7)} ms ${String(cold.rows).padStart(5)}`);
+  }
+
+  // 3b. A typical dashboard, opened three times.
+  const made = await api("POST", "/api/dashboards", { title: DASHBOARD_TITLE, spec: dashboardSpec() });
+  console.log("\nDashboard load (8 items, 4 with a comparison)     total      slowest item  cached items");
+  const loads = [
+    ["cold: first open", undefined],
+    ["warm: opened again", undefined],
+    ["after a filter change (two regions)", { filters: { region: ["VIC", "NSW"] } }],
+    ["that filter, warm", { filters: { region: ["VIC", "NSW"] } }],
+  ];
+  for (const [name, state] of loads) {
+    const load = await loadDashboard(made.id, state);
+    console.log(`${name.padEnd(50)} ${String(load.total).padStart(5)} ms ${String(load.slowest).padStart(9)} ms ${String(load.hits).padStart(8)}/${load.items}`);
   }
 
   // 4. Ten different (uncached) queries at once, while timing /healthz.
