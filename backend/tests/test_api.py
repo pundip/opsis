@@ -18,12 +18,13 @@ ClientFor = Callable[..., TestClient]
 
 
 def add_probe(client: TestClient, path: str, methods: list[str], **kwargs: Any) -> None:
-    """Add a test-only route ahead of the SPA fallback."""
+    """Add a test-only route ahead of the fallbacks (the 404 under /api, and the SPA)."""
     app: Any = client.app
     base = app.state.settings.base_path
-    fallback = app.router.routes.pop()
     app.add_api_route(f"{base}{path}", lambda: {"ok": True}, methods=methods, **kwargs)
-    app.router.routes.append(fallback)
+    route = app.router.routes.pop()
+    names = [getattr(r, "name", "") for r in app.router.routes]
+    app.router.routes.insert(min(names.index("no_route"), names.index("spa")), route)
 
 
 def test_healthz(client_for: ClientFor) -> None:

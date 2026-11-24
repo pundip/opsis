@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -9,15 +10,49 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from opsis.api.deps import client_ip, get_db, get_settings, signed_in_person
+from opsis.api.deps import client_ip, get_db, get_settings, require_feature, signed_in_person
 from opsis.api.errors import ApiError
 from opsis.auth import cookies, google
 from opsis.auth.principal import Principal
 from opsis.db.models import User
-from opsis.services import accounts, audit, sessions, users
+from opsis.services import accounts, audit, mail, sessions, users
 from opsis.settings import Settings
 
+log = logging.getLogger("opsis.auth")
 router = APIRouter(prefix="/api/auth")
+
+
+class ForgotIn(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+@router.post(
+    "/forgot-password", status_code=202, dependencies=[Depends(require_feature("feature_email"))]
+)
+def forgot_password(
+    body: ForgotIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Email a link to set a new password. The answer is the same whether or not
+    the address has an account."""
+    made = accounts.forgot_password(db, settings, body.email, client_ip(request))
+    if made is not None:
+        message = (
+            mail.invitation(settings, made["name"], made["url"], settings.app_name)
+            if made["purpose"] == "invite"
+            else mail.password_reset(settings, made["name"], made["url"])
+        )
+        try:
+            mail.send(settings, made["email"], message)
+        except mail.MailError as exc:  # the answer must not differ, so only the log says
+            log.warning("Password reset email to %s failed: %s", made["email"], exc.message)
+    return {
+        "sent": True,
+        "message": "If there is an account for that address, a link to set a new password "
+        "is on its way.",
+    }
 
 
 class LoginIn(BaseModel):

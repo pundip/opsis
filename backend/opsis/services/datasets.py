@@ -15,7 +15,7 @@ from opsis.connectors.base import RefreshMode
 from opsis.db.models import Connection, Dataset, Job, Snapshot
 from opsis.errors import ApiError
 from opsis.jobs import queue
-from opsis.services import audit, connections
+from opsis.services import audit, connections, schedules
 from opsis.settings import Settings
 from opsis.storage import snapshots
 
@@ -240,6 +240,7 @@ def delete(db: Session, settings: Settings, actor: Principal, dataset: Dataset) 
         target_id=str(dataset_id),
         detail={"name": dataset.name},
     )
+    schedules.forget(db, dataset_id)
     db.delete(dataset)
     db.commit()
     snapshots.remove_dataset(settings, dataset_id)

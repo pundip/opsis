@@ -13,6 +13,8 @@ import { Jobs } from "../pages/Jobs";
 import { ModelDetail } from "../pages/ModelDetail";
 import { Models } from "../pages/Models";
 import { Placeholder } from "../pages/Placeholder";
+import { Schedules } from "../pages/Schedules";
+import { Settings } from "../pages/Settings";
 import { Account, ForcedPasswordChange } from "../pages/Account";
 import { Audit } from "../pages/Audit";
 import { Login } from "../pages/Login";
@@ -84,13 +86,17 @@ export function App() {
       case "/jobs":
         return <Jobs config={appConfig} />;
       case "/models":
-        return <Models />;
+        return <Models me={user} />;
       case "/dashboards":
         return <Dashboards me={user} />;
       case "/users":
         return <Users me={user} />;
       case "/audit":
         return <Audit config={appConfig} />;
+      case "/schedules":
+        return <Schedules />;
+      case "/settings":
+        return <Settings config={appConfig} />;
       default:
         return null;
     }

@@ -1,8 +1,10 @@
 // People and groups (admins, sign-in modes). Invitations and password resets are
+// emailed with FEATURE_EMAIL; otherwise, or when the email cannot be sent, they are
 // one-time links shown here once, for the admin to pass on.
 import { useState } from "react";
 import { Badge, Button, Card, Empty, ErrorNote, Field, Input, PageHeader, ROW, Select, TD, TH } from "../components/ui";
 import {
+  type Delivery,
   type Group,
   type Role,
   type UserRow,
@@ -25,11 +27,12 @@ const ROLE_HELP: Record<Role, string> = {
 };
 
 /** A link shown once, with a copy button. */
-export function OneTimeLink({ label, link, onDone }: { label: string; link: string; onDone: () => void }) {
+export function OneTimeLink({ label, link, note, onDone }: { label: string; link: string; note?: string; onDone: () => void }) {
   const [copied, setCopied] = useState(false);
   return (
     <div role="alert" className="mb-4 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm dark:border-emerald-900 dark:bg-emerald-950/40">
       <p className="font-medium">{label}</p>
+      {note && <p className="text-xs text-amber-800 dark:text-amber-300">{note}</p>}
       <p className="mb-2 text-xs text-zinc-600 dark:text-zinc-400">It is shown only now. Send it to the person yourself.</p>
       <div className="flex flex-wrap items-center gap-2">
         <code className="break-all rounded bg-white px-2 py-1 font-mono text-xs dark:bg-zinc-900" aria-label="One-time link">
@@ -43,6 +46,31 @@ export function OneTimeLink({ label, link, onDone }: { label: string; link: stri
         </Button>
       </div>
     </div>
+  );
+}
+
+/** An emailed link is confirmed; a link that was not emailed is shown once. */
+function Delivered({ label, delivery, onDone }: { label: string; delivery: Delivery; onDone: () => void }) {
+  if (delivery.link === null) {
+    return (
+      <div
+        role="status"
+        className="mb-4 flex items-center gap-2 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm dark:border-emerald-900 dark:bg-emerald-950/40"
+      >
+        <p className="mr-auto">{label}</p>
+        <Button variant="ghost" onClick={onDone}>
+          Done
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <OneTimeLink
+      label={label}
+      link={delivery.link}
+      note={delivery.emailError ? `The email could not be sent: ${delivery.emailError}` : undefined}
+      onDone={onDone}
+    />
   );
 }
 
@@ -127,12 +155,12 @@ function People({ me, groups }: { me: Me; groups: Group[] }) {
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [role, setRole] = useState<Role>("viewer");
-  const [shown, setShown] = useState<{ label: string; link: string } | null>(null);
+  const [shown, setShown] = useState<{ label: string; delivery: Delivery } | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
 
   return (
     <>
-      {shown && <OneTimeLink label={shown.label} link={shown.link} onDone={() => setShown(null)} />}
+      {shown && <Delivered label={shown.label} delivery={shown.delivery} onDone={() => setShown(null)} />}
       <Card className="mb-5 p-4">
         <h2 className="mb-3 font-medium">Invite someone</h2>
         <form
@@ -143,7 +171,12 @@ function People({ me, groups }: { me: Me; groups: Group[] }) {
               { email: email.trim(), displayName: name.trim(), role },
               {
                 onSuccess: (made) => {
-                  setShown({ label: `Invitation for ${made.user.email} (valid 7 days)`, link: made.link });
+                  setShown({
+                    label: made.emailed
+                      ? `Invitation emailed to ${made.user.email}. Its link works for 7 days.`
+                      : `Invitation for ${made.user.email} (valid 7 days)`,
+                    delivery: made,
+                  });
                   setEmail("");
                   setName("");
                 },
@@ -231,10 +264,17 @@ function People({ me, groups }: { me: Me; groups: Group[] }) {
                           variant="ghost"
                           onClick={() =>
                             newLink.mutate(user.id, {
-                              onSuccess: ({ link }) =>
+                              onSuccess: (delivery) =>
                                 setShown({
-                                  label: user.status === "invited" ? `New invitation for ${user.email}` : `Password reset for ${user.email} (valid 24 hours)`,
-                                  link,
+                                  label:
+                                    user.status === "invited"
+                                      ? delivery.emailed
+                                        ? `A new invitation was emailed to ${user.email}.`
+                                        : `New invitation for ${user.email}`
+                                      : delivery.emailed
+                                        ? `A password reset link was emailed to ${user.email} (valid 24 hours).`
+                                        : `Password reset for ${user.email} (valid 24 hours)`,
+                                  delivery,
                                 }),
                             })
                           }

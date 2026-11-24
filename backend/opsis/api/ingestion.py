@@ -19,7 +19,7 @@ from opsis.auth.principal import Permission, Principal
 from opsis.connectors.file import ALLOWED_SUFFIXES
 from opsis.db.models import Dataset
 from opsis.errors import ApiError
-from opsis.services import access, connections, datasets
+from opsis.services import access, connections, datasets, schedules
 from opsis.settings import Settings
 
 router = APIRouter(prefix="/api")
@@ -255,9 +255,16 @@ def create_dataset(
 
 @router.get("/datasets/{dataset_id}")
 def get_dataset(
-    dataset_id: uuid.UUID, db: Session = Depends(get_db), principal: Principal = Depends(edit)
+    dataset_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    principal: Principal = Depends(edit),
 ) -> dict[str, Any]:
-    return datasets.detail(db, _allowed(db, dataset_id, principal))
+    dataset = _allowed(db, dataset_id, principal)
+    found = datasets.detail(db, dataset)
+    if settings.feature_scheduled_refresh:
+        found["schedule"] = schedules.refresh_schedule(db, settings, dataset)
+    return found
 
 
 @router.delete("/datasets/{dataset_id}", status_code=204)

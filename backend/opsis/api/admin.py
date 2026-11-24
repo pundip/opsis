@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from opsis.api.deps import get_db, get_settings, require
 from opsis.auth.principal import Permission, Principal
 from opsis.db.models import AuditLog, User
-from opsis.services import access, accounts
+from opsis.services import access, accounts, audit, mail
 from opsis.settings import Settings
 
 users_router = APIRouter(prefix="/api")
@@ -62,7 +62,8 @@ def invite_user(
     settings: Settings = Depends(get_settings),
     actor: Principal = Depends(manage),
 ) -> dict[str, Any]:
-    """The invitation link is returned once; pass it on to the person."""
+    """With FEATURE_EMAIL the invitation is emailed. Otherwise, or if sending
+    fails, the link is returned once to pass on to the person."""
     user, url = accounts.invite(
         db,
         settings,
@@ -73,7 +74,25 @@ def invite_user(
         attributes=body.attributes,
         group_ids=body.groupIds,
     )
-    return {"user": user, "link": url}
+    message = mail.invitation(settings, user["displayName"], url, actor.display_name)
+    return {"user": user, **_deliver(db, settings, actor, user["email"], url, message)}
+
+
+def _deliver(
+    db: Session, settings: Settings, actor: Principal, to: str, url: str, message: mail.Message
+) -> dict[str, Any]:
+    """Email a password link, or hand it back: {link, emailed, emailError}."""
+    if not settings.feature_email:
+        return {"link": url, "emailed": False}
+    try:
+        mail.send(settings, to, message)
+    except mail.MailError as exc:
+        return {"link": url, "emailed": False, "emailError": exc.message}
+    audit.record(
+        db, action="user.link_emailed", actor=actor, target_type="user", detail={"email": to}
+    )
+    db.commit()
+    return {"link": None, "emailed": True}
 
 
 @users_router.patch("/users/{user_id}")
@@ -93,8 +112,15 @@ def password_link(
     settings: Settings = Depends(get_settings),
     actor: Principal = Depends(manage),
 ) -> dict[str, Any]:
-    """A new invitation (never signed in) or reset link, returned once."""
-    return {"link": accounts.password_link(db, settings, actor, user_id)}
+    """A new invitation (never signed in) or reset link: emailed with
+    FEATURE_EMAIL, otherwise returned once."""
+    made = accounts.password_link(db, settings, actor, user_id)
+    message = (
+        mail.invitation(settings, made["name"], made["url"], actor.display_name)
+        if made["purpose"] == "invite"
+        else mail.password_reset(settings, made["name"], made["url"])
+    )
+    return _deliver(db, settings, actor, made["email"], made["url"], message)
 
 
 @users_router.get("/groups")

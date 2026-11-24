@@ -8,7 +8,7 @@ follow the same rules.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from sqlalchemy import func, select
@@ -23,7 +23,7 @@ from opsis.errors import ApiError
 from opsis.semantic.compiler import UserContext
 from opsis.semantic.model import Model, Problem, schema_problems, schema_validator
 from opsis.services import access as acl
-from opsis.services import audit, events
+from opsis.services import audit, events, schedules
 from opsis.services import query as queries
 from opsis.services.query import QueryRuntime
 from opsis.settings import Settings
@@ -311,11 +311,13 @@ def patch(
     base_version: int,
     message: str | None = None,
     author_type: str = "agent",
+    transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> Dashboard:
     """Apply JSON Patch operations to the draft and store the result as a new version.
 
     The patch is applied to `base_version`, which must be the latest version:
-    a stale one is refused with 409 before anything is applied.
+    a stale one is refused with 409 before anything is applied. `transform` gets
+    the patched spec before it is checked (the agent tools forgive slips there).
     """
     dashboard = get(db, dashboard_id)
     acl.require_dashboard(db, dashboard, actor, "edit")
@@ -323,6 +325,8 @@ def patch(
         raise _conflict(base_version, dashboard.version)
     current = _version_row(db, dashboard, dashboard.version).spec
     patched = patches.apply(current, ops)
+    if transform is not None:
+        patched = transform(patched)
     return save(
         db,
         settings,
@@ -445,6 +449,7 @@ def delete(db: Session, actor: Principal, dashboard: Dashboard) -> None:
         target_id=str(dashboard.id),
         detail={"title": dashboard.title},
     )
+    schedules.forget(db, dashboard.id)  # its emailed snapshots
     db.delete(dashboard)
     db.commit()
 

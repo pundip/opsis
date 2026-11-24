@@ -5,6 +5,10 @@ Rules (brief section 6):
   the model, values become literals in the tree, and sqlglot renders the text.
 - Row-level security is always applied, inside the subquery that reads each
   dataset, so no join or filter can widen what a user sees.
+- A field may come from a dataset the query's dataset joins to, or from one two
+  joins away (gifts -> donors -> regions). Every join on the way must be
+  many_to_one or one_to_one, so measures are never counted twice, and a path
+  never goes through a restricted dataset.
 - Every query has a row cap and a timeout.
 
 Shape of the result:
@@ -34,7 +38,7 @@ from opsis.query.engine import CompiledQuery, ResultColumn, TableRef
 from opsis.semantic import expressions
 from opsis.semantic.calendar import CalendarConfig, resolve_relative_range
 from opsis.semantic.expressions import ExpressionError
-from opsis.semantic.model import SAFE_JOINS, Dimension, Measure, Model
+from opsis.semantic.model import SAFE_JOINS, Dimension, Join, Measure, Model
 
 DIALECT = "duckdb"
 DEFAULT_LIMIT = 500
@@ -68,6 +72,8 @@ class Source:
     table: TableRef
     # Timestamp columns that hold instants, and the zone they are stored in (UTC).
     timezones: Mapping[str, str] = field(default_factory=dict)
+    # A restricted dataset (an access list): a two-join path may not go through it.
+    restricted: bool = False
 
 
 @dataclass(frozen=True)
@@ -185,32 +191,90 @@ class _Compiler:
             )
         self.base = sources[base_name]
         self.used: list[str] = [base_name]
+        # How each joined dataset is reached: (the dataset it joins from, the join).
+        self.hops: dict[str, tuple[str, Join]] = {}
         self.rls_bypassed = False
 
     # ---- field lookup --------------------------------------------------------------
 
     def _source(self, path: str, ref: str) -> tuple[Source, str] | None:
         dataset, _, name = ref.partition(".")
-        base_name = self.base.model.dataset
-        if dataset != base_name:
-            join = next((j for j in self.base.model.joins if j.to == dataset), None)
-            if join is None or dataset not in self.sources:
-                self.problems.add(
-                    path,
-                    f"{ref!r} is in dataset {dataset!r}, which {base_name!r} has no join to. "
-                    f"Add a join in the {base_name} model.",
-                )
+        if dataset != self.base.model.dataset and dataset not in self.hops:
+            route = self._route(path, ref, dataset)
+            if route is None:
                 return None
-            if join.relationship not in SAFE_JOINS:
-                self.problems.add(
-                    path,
-                    f"The join from {base_name!r} to {dataset!r} is {join.relationship}, which "
-                    "would double-count measures. Query from the other dataset instead.",
-                )
-                return None
-            if dataset not in self.used:
-                self.used.append(dataset)
+            for start, join in route:
+                if join.to not in self.hops:
+                    self.hops[join.to] = (start, join)
+                    self.used.append(join.to)
         return self.sources[dataset], name
+
+    def _unsafe(self, path: str, start: str, join: Join) -> bool:
+        if join.relationship in SAFE_JOINS:
+            return False
+        self.problems.add(
+            path,
+            f"The join from {start!r} to {join.to!r} is {join.relationship}, which would "
+            "double-count measures. Query from the other dataset instead.",
+        )
+        return True
+
+    def _route(self, path: str, ref: str, dataset: str) -> list[tuple[str, Join]] | None:
+        """The joins from the query's dataset to `dataset`: one, or two through a
+        dataset in between. None (with a problem) when there is no safe way."""
+        base = self.base.model
+        direct = next((j for j in base.joins if j.to == dataset), None)
+        if direct is not None and dataset in self.sources:
+            return None if self._unsafe(path, base.dataset, direct) else [(base.dataset, direct)]
+        routes = []
+        if dataset in self.sources:
+            for first in base.joins:
+                middle = self.sources.get(first.to)
+                if middle is None or first.to == base.dataset:
+                    continue
+                second = next((j for j in middle.model.joins if j.to == dataset), None)
+                if second is not None:
+                    routes.append((first, middle, second))
+        if not routes:
+            self.problems.add(
+                path,
+                f"{ref!r} is in dataset {dataset!r}, which {base.dataset!r} has no join to, "
+                f"directly or through a dataset it joins to. Add a join in the {base.dataset} "
+                "model.",
+            )
+            return None
+        usable = [
+            (first, middle, second)
+            for first, middle, second in routes
+            if first.relationship in SAFE_JOINS
+            and second.relationship in SAFE_JOINS
+            and not middle.restricted
+        ]
+        if len(usable) > 1:
+            through = " and through ".join(repr(first.to) for first, _, _ in usable)
+            self.problems.add(
+                path,
+                f"{ref!r} can be reached from {base.dataset!r} through {through}. Add a "
+                f"direct join from {base.dataset} to {dataset} to say which way.",
+            )
+            return None
+        if not usable:
+            first, _, second = routes[0]
+            if not (
+                self._unsafe(path, base.dataset, first) or self._unsafe(path, first.to, second)
+            ):
+                self.problems.add(
+                    path,
+                    f"{ref!r} is two joins away, through {first.to!r}, which is a restricted "
+                    "dataset, and a path never goes through one. Add a direct join from "
+                    f"{base.dataset} to {dataset} instead.",
+                )
+            return None
+        first, _, second = usable[0]
+        # After a left join, the next one must keep every row too.
+        then = Join(second.to, "left" if first.type == "left" else second.type, second.on,
+                    second.relationship)  # fmt: skip
+        return [(base.dataset, first), (first.to, then)]
 
     def dimension(self, path: str, ref: str) -> tuple[Source, Dimension] | None:
         found = self._source(path, ref)
@@ -600,10 +664,10 @@ class _Compiler:
         limit = min(int(query.get("limit") or DEFAULT_LIMIT), max_rows)
         statement = exp.select(*projections).from_(self._table(self.base))
         for name in self.used[1:]:
-            join = next(j for j in self.base.model.joins if j.to == name)
+            start, join = self.hops[name]
             condition = exp.and_(
                 *[
-                    exp.EQ(this=_col(self.base.model.dataset, local), expression=_col(name, remote))
+                    exp.EQ(this=_col(start, local), expression=_col(name, remote))
                     for local, remote in join.on
                 ]
             )

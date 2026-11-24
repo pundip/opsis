@@ -21,7 +21,8 @@ from opsis.errors import ApiError
 
 WINDOW = timedelta(minutes=15)
 MAX_LOCK = timedelta(hours=1)
-LIMITS = {"email": 5, "ip": 30, "link": 5}
+# "forgot" counts every password reset request, not only failures.
+LIMITS = {"email": 5, "ip": 30, "link": 5, "forgot": 3, "forgotip": 10}
 
 
 def _limit(key: str) -> int:

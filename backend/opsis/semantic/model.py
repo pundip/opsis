@@ -100,6 +100,29 @@ def humanize(name: str) -> str:
     return text[:1].upper() + text[1:]
 
 
+def reachable(models: Mapping[str, Model], base: str) -> dict[str, str | None]:
+    """The datasets whose dimensions a query on `base` can use, each with the dataset
+    it is reached through (None when `base` joins to it directly). Every join on
+    the way is many_to_one or one_to_one. A dataset two joins away by two ways is
+    left out: the compiler asks for a direct join to say which."""
+    origin = models.get(base)
+    if origin is None:
+        return {}
+    joined = {j.to for j in origin.joins}
+    direct: dict[str, str | None] = {
+        j.to: None
+        for j in origin.joins
+        if j.relationship in SAFE_JOINS and j.to in models and j.to != base
+    }
+    farther: dict[str, list[str]] = {}
+    for middle in direct:
+        for join in models[middle].joins:
+            usable = join.relationship in SAFE_JOINS and join.to in models
+            if usable and join.to != base and join.to not in joined:
+                farther.setdefault(join.to, []).append(middle)
+    return {**direct, **{name: via[0] for name, via in farther.items() if len(via) == 1}}
+
+
 def parse_model(dataset: str, definition: Mapping[str, Any]) -> Model:
     """Build a Model from a definition that has already passed `validate`."""
     return Model(
@@ -151,15 +174,21 @@ def parse_model(dataset: str, definition: Mapping[str, Any]) -> Model:
     )
 
 
-@lru_cache(maxsize=4)
-def schema_validator(spec_dir: Path, name: str) -> Draft202012Validator:
-    """A validator for one of the spec schemas, with cross-file references resolved."""
+@lru_cache(maxsize=2)
+def schema_registry(spec_dir: Path) -> tuple[Registry[Any], dict[str, dict[str, Any]]]:
+    """Every spec schema, by file name, in a registry that resolves their references."""
     schemas = [json.loads(p.read_text(encoding="utf-8")) for p in spec_dir.glob("*.schema.json")]
     registry: Registry[Any] = Registry().with_resources(
         (s["$id"], Resource.from_contents(s)) for s in schemas
     )
-    target = next(s for s in schemas if s["$id"].endswith(f"/{name}"))
-    return Draft202012Validator(target, registry=registry)
+    return registry, {s["$id"].rsplit("/", 1)[-1]: s for s in schemas}
+
+
+@lru_cache(maxsize=4)
+def schema_validator(spec_dir: Path, name: str) -> Draft202012Validator:
+    """A validator for one of the spec schemas, with cross-file references resolved."""
+    registry, schemas = schema_registry(spec_dir)
+    return Draft202012Validator(schemas[name], registry=registry)
 
 
 def schema_problems(validator: Draft202012Validator, document: Any) -> list[Problem]:

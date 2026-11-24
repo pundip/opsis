@@ -25,6 +25,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_NO_CACHE=1 \
     PATH=/opt/venv/bin:$PATH
 COPY --from=ghcr.io/astral-sh/uv:0.13.8 /uv /usr/local/bin/uv
+# pg_dump and pg_restore for backups, at the server's major version (16): Debian's
+# own client is 15 and refuses to dump a newer server. From the PostgreSQL apt repository.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && install -d /usr/share/postgresql-common/pgdg \
+    && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+         https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+         > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-16 \
+    && apt-get purge -y curl \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 10001 opsis \
     && useradd --uid 10001 --gid opsis --create-home opsis \
     && mkdir -p /app /data /backups \

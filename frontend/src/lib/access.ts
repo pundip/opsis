@@ -96,7 +96,7 @@ function usePeopleMutation<Input, Output>(run: (input: Input) => Promise<Output>
 
 export const useInvite = () =>
   usePeopleMutation((input: { email: string; displayName: string; role: Role }) =>
-    apiPost<{ user: UserRow; link: string }>("/api/users", input),
+    apiPost<{ user: UserRow } & Delivery>("/api/users", input),
   );
 
 export const useUpdateUser = () =>
@@ -105,7 +105,20 @@ export const useUpdateUser = () =>
   );
 
 export const useNewPasswordLink = () =>
-  usePeopleMutation((id: string) => apiPost<{ link: string }>(`/api/users/${id}/password-link`));
+  usePeopleMutation((id: string) => apiPost<Delivery>(`/api/users/${id}/password-link`));
+
+/** How a password link reached the person: emailed (FEATURE_EMAIL), or a link
+ *  for the admin to pass on, with the reason when the email could not be sent. */
+export interface Delivery {
+  link: string | null;
+  emailed: boolean;
+  emailError?: string;
+}
+
+export const useForgotPassword = () =>
+  useMutation({
+    mutationFn: (email: string) => apiPost<{ sent: boolean; message: string }>("/api/auth/forgot-password", { email }),
+  });
 
 export const useSaveGroup = () =>
   usePeopleMutation(({ id, ...body }: { id?: string; name: string; description?: string | null; memberIds?: string[] }) =>

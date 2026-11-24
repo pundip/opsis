@@ -1,5 +1,7 @@
-// Server mode: sign-in, invitations, viewers who cannot edit, sharing, share links,
-// Sign in with Google (against the fake provider) and access tokens for scripts.
+// Server mode: sign-in, invitations and password resets by email (read from the
+// fake mail server, e2e/fake-smtp.mjs), viewers who cannot edit, sharing, emailed
+// dashboards, share links, Sign in with Google (against the fake provider), the
+// test email, and access tokens for scripts.
 // Runs only against the disposable server-mode stack (OPSIS_MODE=server), which is
 // removed afterwards, so it does not tidy up after itself.
 import { expect, request, test, type Browser, type Page } from "@playwright/test";
@@ -14,6 +16,42 @@ const PASSWORD = "Smoke-Test-Pass-2026";
 async function freshPage(browser: Browser): Promise<Page> {
   const context = await browser.newContext({ storageState: NOBODY, viewport: { width: 1500, height: 950 } });
   return context.newPage();
+}
+
+interface Email {
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+}
+
+/** The newest email to an address with this subject, from the fake mail server. */
+async function emailTo(address: string, subject: string): Promise<Email> {
+  const mailbox = await request.newContext({ storageState: NOBODY });
+  let found: Email | undefined;
+  try {
+    await expect
+      .poll(
+        async () => {
+          const response = await mailbox.get(`http://localhost:9600/messages?to=${encodeURIComponent(address)}`);
+          const messages = (await response.json()) as Email[];
+          found = messages.filter((m) => m.subject === subject).at(-1);
+          return found !== undefined;
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+  } finally {
+    await mailbox.dispose();
+  }
+  return found!;
+}
+
+function linkIn(email: Email): string {
+  const link = /http:\/\/localhost:8088\/opsis\/set-password\/[A-Za-z0-9_-]+/.exec(email.text)?.[0];
+  if (!link) throw new Error(`No set-password link in: ${email.text}`);
+  expect(email.html).toContain(`href="${link}"`);
+  return link;
 }
 
 async function csrfHeader(page: Page): Promise<Record<string, string>> {
@@ -44,14 +82,17 @@ test("people sign in; viewers cannot edit; share links stop when revoked; Google
   const dashboard = await api(page, "POST", "api/dashboards", { title, spec: spec(title) });
   await api(page, "POST", `api/dashboards/${dashboard.id}/publish`);
 
-  await test.step("an admin invites a viewer, who sets a password from the link", async () => {
+  await test.step("an admin invites a viewer by email; she sets a password from the email", async () => {
     await page.goto("users");
     await page.getByLabel("Email", { exact: true }).fill(`vera-${stamp}@smoke.test`);
     await page.getByLabel("Name", { exact: true }).fill("Vera Smoke");
     await page.getByLabel("Role", { exact: true }).selectOption("viewer");
     await page.getByRole("button", { name: "Invite", exact: true }).click();
-    const link = (await page.getByLabel("One-time link").innerText()).trim();
-    expect(link).toContain("/opsis/set-password/");
+    await expect(page.getByRole("status").filter({ hasText: `Invitation emailed to vera-${stamp}@smoke.test` })).toBeVisible();
+    await expect(page.getByLabel("One-time link")).toHaveCount(0);
+    const invitation = await emailTo(`vera-${stamp}@smoke.test`, "You are invited to Opsis");
+    expect(invitation.text).toContain("Hello Vera Smoke,");
+    const link = linkIn(invitation);
 
     const vera = await freshPage(browser);
     await vera.goto(link);
@@ -86,6 +127,45 @@ test("people sign in; viewers cannot edit; share links stop when revoked; Google
       });
       expect(put.status()).toBe(403);
     });
+
+    await test.step("she has the dashboard emailed to her, and stops it from her account", async () => {
+      await vera.goto(`dashboards/${dashboard.id}`);
+      await vera.getByRole("button", { name: "Email me" }).click();
+      await expect(vera.getByText(`Sent to vera-${stamp}@smoke.test`, { exact: false })).toBeVisible();
+      await vera.getByLabel("When").selectOption({ label: "Mondays at 07:00" });
+      await vera.getByRole("button", { name: "Save", exact: true }).click();
+      await expect(vera.getByText(/^Next email /)).toBeVisible();
+      await vera.goto("account");
+      const row = vera.getByRole("row").filter({ hasText: title });
+      await expect(row).toContainText("Mondays at 07:00");
+      await row.getByRole("button", { name: `Stop emailing ${title}` }).click();
+      await expect(vera.getByText("None yet.")).toBeVisible();
+    });
+
+    await test.step("Forgotten your password? emails a link that sets a new one", async () => {
+      const someone = await freshPage(browser);
+      await someone.goto("");
+      await someone.getByRole("button", { name: "Forgotten your password?" }).click();
+      await someone.getByLabel("Email me a link to set a new password").fill(`vera-${stamp}@smoke.test`);
+      await someone.getByRole("button", { name: "Send the link" }).click();
+      await expect(someone.getByRole("status")).toContainText("If there is an account for that address");
+      const reset = await emailTo(`vera-${stamp}@smoke.test`, "Set a new password for Opsis");
+      await someone.goto(linkIn(reset));
+      await expect(someone.getByRole("heading", { name: "Choose a new password" })).toBeVisible();
+      await someone.getByLabel("New password").fill(`${PASSWORD}-2`);
+      await someone.getByLabel("Repeat the password").fill(`${PASSWORD}-2`);
+      await someone.getByRole("button", { name: "Set password and sign in" }).click();
+      await expect(someone.getByRole("navigation", { name: "Main" })).toBeVisible();
+      expect((await api(someone, "GET", "api/me")).email).toBe(`vera-${stamp}@smoke.test`);
+    });
+  });
+
+  await test.step("an admin sends a test email from Settings", async () => {
+    await page.goto("settings");
+    await page.getByRole("button", { name: "Send me a test email" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "A test email was sent to" })).toBeVisible();
+    const me = (await api(page, "GET", "api/me")).email as string;
+    expect((await emailTo(me, "Test email from Opsis")).text).toContain("Email works.");
   });
 
   await test.step("a share link shows the published version, and stops when revoked", async () => {

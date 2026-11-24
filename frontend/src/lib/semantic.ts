@@ -180,3 +180,33 @@ export const GRAIN_LABELS: Record<Grain, string> = {
   fiscal_quarter: "Financial quarter",
   fiscal_year: "Financial year",
 };
+
+/** One file of a models/ import and what happened to it. */
+export interface ModelFileResult {
+  file: string;
+  dataset: string | null;
+  status: "changed" | "unchanged" | "invalid" | "unknown_dataset" | "saved";
+  problems?: { path: string; message: string }[];
+  version?: number;
+}
+
+export interface ModelImport {
+  applied: boolean;
+  valid: boolean;
+  files: ModelFileResult[];
+}
+
+/** Import a zip of a models/ folder, or .yml files. dryRun only checks them. */
+export function useImportModels() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ files, dryRun }: { files: File[]; dryRun: boolean }) => {
+      const form = new FormData();
+      for (const file of files) form.append("files", file);
+      return apiPost<ModelImport>(`/api/model-files?dryRun=${dryRun ? "true" : "false"}`, form);
+    },
+    onSuccess: (result) => {
+      if (result.applied) void client.invalidateQueries({ queryKey: ["models"] });
+    },
+  });
+}

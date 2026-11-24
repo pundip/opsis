@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response, UploadFile
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from opsis.api.deps import get_db, get_settings, require
+from opsis.api.errors import ApiError
 from opsis.auth.principal import Permission, Principal
 from opsis.db.models import Dataset
-from opsis.services import access, models, query
+from opsis.services import access, model_files, models, query
 from opsis.settings import Settings
 
 router = APIRouter(prefix="/api")
@@ -51,6 +52,38 @@ def list_models(
 ) -> list[dict[str, Any]]:
     blocked = access.blocked_datasets(db, principal)
     return [m for m in models.list_models(db) if m["dataset"] not in blocked]
+
+
+@router.get("/model-files")
+def export_models(db: Session = Depends(get_db), principal: Principal = Depends(read)) -> Response:
+    """Every model the caller may use, as a zip of models/<dataset>.yml."""
+    name, content = model_files.export_zip(db, principal)
+    return Response(
+        content,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+@router.post("/model-files")
+def import_models(
+    files: list[UploadFile],
+    dryRun: bool = False,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    actor: Principal = Depends(write),
+) -> dict[str, Any]:
+    """Import a zip of a models/ folder, or .yml files: all checked first, and
+    saved only if every one is valid. With dryRun=true nothing is saved."""
+    uploads, total = [], 0
+    for upload in files:
+        content = upload.file.read(model_files.MAX_UPLOAD_BYTES + 1)
+        total += len(content)
+        if total > model_files.MAX_UPLOAD_BYTES:
+            raise ApiError(413, "too_large", "Send at most 20 MB of model files at once.")
+        uploads.append((upload.filename or "model.yml", content))
+    found = model_files.read_uploads(uploads)
+    return model_files.import_files(db, settings, actor, found, dry_run=dryRun)
 
 
 @router.get("/models/{dataset}")

@@ -425,9 +425,12 @@ def update_user(
     return next(u for u in list_users(db) if u["id"] == str(user.id))
 
 
-def password_link(db: Session, settings: Settings, actor: Principal, user_id: uuid.UUID) -> str:
+def password_link(
+    db: Session, settings: Settings, actor: Principal, user_id: uuid.UUID
+) -> dict[str, str]:
     """A new invitation link for someone who has never signed in, otherwise a
-    password reset link. Shown once to the admin, who passes it on."""
+    password reset link: {url, purpose, email, name}. Emailed to them with
+    FEATURE_EMAIL, otherwise shown once to the admin, who passes it on."""
     user = _get(db, user_id)
     if not user.is_active and _status(user) != "invited":
         raise ApiError(409, "deactivated", "This user is deactivated. Reactivate them first.")
@@ -442,7 +445,45 @@ def password_link(db: Session, settings: Settings, actor: Principal, user_id: uu
         detail={"email": user.email},
     )
     db.commit()
-    return url
+    return {"url": url, "purpose": purpose, "email": user.email, "name": user.display_name}
+
+
+def forgot_password(
+    db: Session, settings: Settings, email: str, ip: str | None
+) -> dict[str, str] | None:
+    """A reset link for the sign-in page's "Forgot your password?", to be emailed.
+
+    Every request counts against the address and the client, so this cannot be
+    used to flood a mailbox. None when there is no such active person: the
+    caller answers the same either way, so addresses cannot be probed."""
+    try:
+        address = normalise_email(email)
+    except ApiError:
+        return None
+    keys = [f"forgot:{address}", f"forgotip:{ip or 'unknown'}"]
+    try:
+        lockout.check(db, keys)
+    except ApiError as exc:
+        raise ApiError(
+            429, "too_many_requests", exc.message.replace("failed attempts", "requests")
+        ) from None
+    lockout.failed(db, keys)
+    db.commit()
+    user = db.scalar(select(User).where(User.email == address))
+    if user is None or user.is_builtin or not user.is_active:
+        return None
+    purpose = "invite" if _status(user) == "invited" else "reset"
+    url = make_link(db, settings, user, purpose, None)
+    audit.record(
+        db,
+        action="user.reset_requested",
+        target_type="user",
+        target_id=str(user.id),
+        detail={"email": user.email},
+        ip=ip,
+    )
+    db.commit()
+    return {"url": url, "purpose": purpose, "email": user.email, "name": user.display_name}
 
 
 def reset_link_for_email(db: Session, settings: Settings, email: str) -> str:

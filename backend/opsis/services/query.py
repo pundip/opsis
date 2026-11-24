@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -68,6 +68,8 @@ class QueryRuntime:
 
 def load_sources(db: Session, settings: Settings, names: set[str]) -> dict[str, Source]:
     """The model, columns and current snapshot of each named dataset that has data."""
+    if not names:
+        return {}
     rows = db.execute(
         select(Dataset, Snapshot, SemanticModel)
         .join(Snapshot, Snapshot.id == Dataset.current_snapshot_id)
@@ -85,7 +87,20 @@ def load_sources(db: Session, settings: Settings, names: set[str]) -> dict[str, 
             columns=columns,
             table=TableRef(dataset.name, str(dataset.id), str(snapshot.id), str(path)),
             timezones={c["name"]: c["tz"] for c in snapshot.columns if c.get("tz")},
+            restricted=dataset.restricted,
         )
+    return sources
+
+
+def load_with_joins(
+    db: Session, settings: Settings, names: set[str], base: str
+) -> dict[str, Source]:
+    """The named datasets, and the ones `base` joins to: a field two joins away is
+    reached through one of those."""
+    sources = load_sources(db, settings, names)
+    if base in sources:
+        hops = {join.to for join in sources[base].model.joins} - set(sources)
+        sources.update(load_sources(db, settings, hops))
     return sources
 
 
@@ -220,8 +235,10 @@ def execute(
     *,
     max_rows: int | None = None,
     today: date | None = None,
+    check: Callable[[CompiledQuery], None] | None = None,
 ) -> tuple[CompiledQuery, dict[str, Any]]:
-    """Compile and run a schema-valid query against already loaded sources."""
+    """Compile and run a schema-valid query against already loaded sources.
+    `check` sees the compiled query before it runs, and may refuse it."""
     compiled, columns = compile_query(
         query,
         sources,
@@ -231,6 +248,8 @@ def execute(
         max_rows=min(max_rows or settings.query_max_rows, settings.query_max_rows),
         timeout_s=settings.query_timeout_seconds,
     )
+    if check is not None:
+        check(compiled)
     try:
         result = runtime.execute(compiled, wait_seconds=settings.query_timeout_seconds)
     except QueryTimeoutError as exc:
@@ -274,8 +293,8 @@ def run(
     from opsis.services import access  # import here: access imports nothing from queries
 
     access.require_datasets(db, principal, names)
-    sources = load_sources(db, settings, names)
     base = str(query["dataset"])
+    sources = load_with_joins(db, settings, names, base)
     if base not in sources:
         exists = db.scalar(select(Dataset).where(Dataset.name == base))
         if exists is None:
@@ -295,6 +314,8 @@ def run(
         query,
         max_rows=max_rows,
         today=today,
+        # A dataset joined through is read too: the caller must be allowed to use it.
+        check=lambda made: access.require_datasets(db, principal, {t.alias for t in made.tables}),
     )
     if include_sql and principal.can(Permission.MODELS_EDIT):
         body["sql"] = compiled.sql

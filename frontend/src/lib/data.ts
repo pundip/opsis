@@ -12,6 +12,8 @@ export interface JsonSchemaProperty {
   maximum?: number;
   "x-secret"?: boolean;
   "x-upload"?: boolean;
+  /** The value can also be read from a local file of this type (".json"), in the browser. */
+  "x-file-text"?: string;
 }
 
 export interface ConfigSchema {
@@ -94,6 +96,8 @@ export interface Snapshot {
 }
 
 export interface Dataset {
+  /** With FEATURE_SCHEDULED_REFRESH: the refresh schedule, or null for none. */
+  schedule?: import("./operations").Schedule | null;
   id: string;
   name: string;
   label: string;

@@ -26,24 +26,12 @@ from opsis.connectors.base import (
     StreamSpec,
     TestResult,
 )
-from opsis.connectors.tabular import arrow_schema, rows_to_batch
+from opsis.connectors.tabular import arrow_schema, rows_to_batch, unique_names
 
 CSV_SUFFIXES = {".csv", ".tsv", ".txt"}
 EXCEL_SUFFIXES = {".xlsx", ".xlsm"}
 ALLOWED_SUFFIXES = CSV_SUFFIXES | EXCEL_SUFFIXES
 DELIMITERS = {"comma": ",", "semicolon": ";", "tab": "\t", "pipe": "|"}
-
-
-def _unique_names(raw: list[Any]) -> list[str]:
-    names: list[str] = []
-    for index, value in enumerate(raw):
-        name = str(value).strip() if value is not None else ""
-        name = name or f"column_{index + 1}"
-        candidate, n = name, 2
-        while candidate in names:
-            candidate, n = f"{name}_{n}", n + 1
-        names.append(candidate)
-    return names
 
 
 def _infer(values: list[Any]) -> ColumnType:
@@ -222,7 +210,7 @@ class FileConnector:
                 width = max(len(row) for row in rows)
                 rows = [tuple(row) + (None,) * (width - len(row)) for row in rows]
                 if self._header:
-                    names, data = _unique_names(list(rows[0])), rows[1:]
+                    names, data = unique_names(list(rows[0])), rows[1:]
                 else:
                     names, data = [f"column_{i + 1}" for i in range(width)], rows
                 columns = [

@@ -189,13 +189,29 @@ def describe(db: Session, dataset: Dataset) -> dict[str, Any]:
     definition = record.definition if record else starter(dataset, columns) if columns else {}
     model = semantic.parse_model(dataset.name, definition)
     fields = _fields(dataset.name, model, joined=False)
+    direct = {join.to for join in model.joins}
+    # Datasets two joins away, and the datasets they are reached through.
+    farther: dict[str, list[str]] = {}
     for join in model.joins:
         if join.relationship not in semantic.SAFE_JOINS:
             continue
         other = db.scalar(select(Dataset).where(Dataset.name == join.to))
         other_record = get_record(db, other) if other else None
-        if other_record:
-            fields += _fields(join.to, semantic.parse_model(join.to, other_record.definition), True)
+        if other is None or other_record is None:
+            continue
+        other_model = semantic.parse_model(join.to, other_record.definition)
+        fields += _fields(join.to, other_model, True)
+        if other.restricted:
+            continue  # a path never goes through a restricted dataset
+        for hop in other_model.joins:
+            if hop.relationship in semantic.SAFE_JOINS and hop.to not in direct | {dataset.name}:
+                farther.setdefault(hop.to, []).append(join.to)
+    for name, through in sorted(farther.items()):
+        far = db.scalar(select(Dataset).where(Dataset.name == name))
+        far_record = get_record(db, far) if far else None
+        # Reached two ways, it needs a direct join to say which (the compiler says so).
+        if far_record is not None and len(through) == 1:
+            fields += _fields(name, semantic.parse_model(name, far_record.definition), True)
     return {
         "dataset": {
             "id": str(dataset.id),

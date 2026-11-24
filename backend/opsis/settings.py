@@ -150,6 +150,20 @@ class Settings(BaseSettings):
     assistant_timeout_seconds: float = Field(default=600, ge=10, le=3600)
     assistant_max_rows: int = Field(default=100, ge=1, le=1000)
 
+    # Backups (FEATURE_BACKUPS): the metadata database, uploaded files and each
+    # dataset's current snapshot, as one file, on a cron schedule in workspace time.
+    backup_dir: Path = Path("/backups")
+    backup_schedule: str = "30 2 * * *"
+    backup_retention: int = Field(default=7, ge=1, le=365)
+
+    # Email (FEATURE_EMAIL): invitations, password resets and emailed dashboards.
+    smtp_host: str = ""
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_security: Literal["starttls", "ssl", "none"] = "starttls"
+    smtp_username: str = ""
+    smtp_password: SecretStr | None = None
+    smtp_from: str = ""  # for example: Opsis <bi@example.org>
+
     # Data and limits
     max_upload_mb: int = Field(default=200, ge=1, le=10_000)
     snapshot_retention: int = Field(default=3, ge=2, le=100)
@@ -223,7 +237,22 @@ class Settings(BaseSettings):
             raise ValueError("must be an http or https URL, for example http://localhost:11434")
         return value
 
-    @field_validator("admin_initial_password", "google_client_secret", "anthropic_api_key")
+    @field_validator("backup_schedule")
+    @classmethod
+    def _check_cron(cls, value: str) -> str:
+        from croniter import croniter
+
+        value = " ".join(value.split())
+        if len(value.split()) != 5 or not croniter.is_valid(value):
+            raise ValueError(
+                "must be a cron expression with five fields, for example 30 2 * * * "
+                "(every day at 02:30 workspace time)"
+            )
+        return value
+
+    @field_validator(
+        "admin_initial_password", "google_client_secret", "anthropic_api_key", "smtp_password"
+    )
     @classmethod
     def _empty_secret_is_unset(cls, value: SecretStr | None) -> SecretStr | None:
         if value is None or not value.get_secret_value().strip():
@@ -325,6 +354,17 @@ class Settings(BaseSettings):
                 problems.append(
                     f"{self.assistant_provider.upper()}_MODEL is empty. Name the model the "
                     "assistant should use."
+                )
+        if self.feature_email:
+            if not self.smtp_host.strip():
+                problems.append(
+                    "FEATURE_EMAIL=true needs SMTP_HOST, the mail server to send through "
+                    "(and usually SMTP_USERNAME and SMTP_PASSWORD). Or set FEATURE_EMAIL=false."
+                )
+            if "@" not in self.smtp_from:
+                problems.append(
+                    "FEATURE_EMAIL=true needs SMTP_FROM, the sender address, for example "
+                    "Opsis <bi@example.org>."
                 )
         parts = urlsplit(self.public_base_url)
         if server and parts.scheme != "https" and parts.hostname not in LOCAL_HOSTNAMES:
@@ -439,6 +479,7 @@ def _problems_from(exc: ValidationError) -> list[str]:
                 "ADMIN_INITIAL_PASSWORD",
                 "GOOGLE_CLIENT_SECRET",
                 "ANTHROPIC_API_KEY",
+                "SMTP_PASSWORD",
             )
             shown = f" (got {got!r})" if isinstance(got, str | int | bool) and not secret else ""
             problems.append(f"{name}{shown}: {message}")

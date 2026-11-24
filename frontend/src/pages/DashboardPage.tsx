@@ -4,6 +4,7 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Canvas } from "../components/dashboard/Canvas";
+import { EmailPanel } from "../components/dashboard/EmailPanel";
 import { FiltersBar } from "../components/dashboard/FiltersBar";
 import { SharePanel } from "../components/dashboard/SharePanel";
 import { Badge, Button, ErrorNote, Input, Select } from "../components/ui";
@@ -74,6 +75,7 @@ export function DashboardPage({ config, me }: { config: AppConfig; me: Me }) {
   const [state, setState] = useUrlViewState();
   const [showPublished, setShowPublished] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [emailing, setEmailing] = useState(false);
   const [viewAs, setViewAs] = useState<ViewAs | null>(null);
   const data = dashboard.data;
   const published = useDashboardVersion(id, showPublished && data ? data.publishedVersion : null);
@@ -121,6 +123,11 @@ export function DashboardPage({ config, me }: { config: AppConfig; me: Me }) {
             )}
           </>
         )}
+        {config.features.email && config.authMode !== "none" && (
+          <Button aria-expanded={emailing} onClick={() => setEmailing(!emailing)}>
+            Email me
+          </Button>
+        )}
         {data.canShare && config.authMode !== "none" && (
           <Button aria-expanded={sharing} onClick={() => setSharing(!sharing)}>
             Share
@@ -138,6 +145,7 @@ export function DashboardPage({ config, me }: { config: AppConfig; me: Me }) {
       {sharing && (
         <SharePanel dashboardId={id} config={config} me={me} published={data.publishedVersion !== null} canPublish={data.canPublish} />
       )}
+      {emailing && <EmailPanel dashboardId={id} />}
       {viewAs && (
         <p role="status" className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm dark:border-amber-900 dark:bg-amber-950/40">
           Viewing as {viewAs.label}: row-level security applies as it would for them. This shows their data, not whether
