@@ -63,7 +63,6 @@ def public_config(settings: Settings) -> dict[str, Any]:
             "publicShareLinks": settings.feature_public_share_links,
             "email": settings.feature_email,
             "assistant": settings.feature_assistant,
-            "sqlLab": settings.feature_sql_lab,
             "backups": settings.feature_backups,
         },
         "calendar": {

@@ -25,7 +25,6 @@ class Permission(StrEnum):
     SETTINGS_MANAGE = "settings:manage"
     AUDIT_VIEW = "audit:view"
     CONNECTIONS_MANAGE = "connections:manage"
-    SQL_LAB_USE = "sql_lab:use"
     DATASETS_EDIT = "datasets:edit"
     MODELS_EDIT = "models:edit"
     DASHBOARDS_EDIT = "dashboards:edit"

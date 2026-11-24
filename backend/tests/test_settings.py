@@ -21,7 +21,7 @@ def test_defaults_are_the_local_mode_defaults() -> None:
     )
     assert s.bind_address == "127.0.0.1"
     assert s.base_path == "" and s.cookie_path == "/" and s.trusted_proxy_list == []
-    assert s.feature_sql_lab and s.feature_assistant
+    assert s.feature_assistant and not s.feature_backups and not s.feature_email
     assert not s.feature_public_share_links and not s.feature_scheduled_refresh
     assert (s.workspace_timezone, s.week_start, s.fiscal_year_start_month) == (
         "Australia/Melbourne",

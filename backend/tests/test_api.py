@@ -37,8 +37,9 @@ def test_config_reflects_flags(client_for: ClientFor) -> None:
     local = client_for().get("/api/config").json()
     assert local["deployMode"] == "local" and local["authMode"] == "none"
     assert local["basePath"] == ""
-    assert local["features"]["sqlLab"] is True
+    assert local["features"]["backups"] is False
     assert local["features"]["publicShareLinks"] is False
+    assert "sqlLab" not in local["features"]  # not in v1 (ADR-026)
     assert local["calendar"] == {
         "timezone": "Australia/Melbourne",
         "weekStart": "monday",
@@ -47,13 +48,13 @@ def test_config_reflects_flags(client_for: ClientFor) -> None:
     }
 
     changed = client_for(
-        feature_sql_lab=False,
+        feature_backups=True,
         app_name="Acme BI",
         fiscal_year_start_month=4,
         fiscal_year_label="year_span",
     )
     body = changed.get("/api/config").json()
-    assert body["features"]["sqlLab"] is False
+    assert body["features"]["backups"] is True
     assert body["appName"] == "Acme BI" and body["branding"]["name"] == "Acme BI"
     assert body["calendar"]["fiscalYearStartMonth"] == 4
     assert body["calendar"]["fiscalYearLabel"] == "year_span"
@@ -88,16 +89,16 @@ def test_other_auth_modes_require_sign_in(client_for: ClientFor) -> None:
 
 def test_feature_flag_guard_returns_404_and_permission_guard_runs(client_for: ClientFor) -> None:
     guards = [
-        Depends(require_feature("feature_sql_lab")),
-        Depends(require(Permission.SQL_LAB_USE)),
+        Depends(require_feature("feature_backups")),
+        Depends(require(Permission.SETTINGS_MANAGE)),
     ]
-    on = client_for()
-    add_probe(on, "/api/_probe/sql", ["GET"], dependencies=guards)
-    assert on.get("/api/_probe/sql").json() == {"ok": True}
+    on = client_for(feature_backups=True)
+    add_probe(on, "/api/_probe/flagged", ["GET"], dependencies=guards)
+    assert on.get("/api/_probe/flagged").json() == {"ok": True}
 
-    off = client_for(feature_sql_lab=False)
-    add_probe(off, "/api/_probe/sql", ["GET"], dependencies=guards)
-    response = off.get("/api/_probe/sql")
+    off = client_for(feature_backups=False)
+    add_probe(off, "/api/_probe/flagged", ["GET"], dependencies=guards)
+    response = off.get("/api/_probe/flagged")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "not_found"
 

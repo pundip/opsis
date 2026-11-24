@@ -1,12 +1,13 @@
 // Admin settings: backups, the email check, the demo data, and which features this
 // install has on.
 // Everything here is set in .env; the page shows it and runs the on-demand parts.
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { Link } from "react-router-dom";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button, Card, Empty, ErrorNote, PageHeader, ROW, TD, TH } from "../components/ui";
 import { apiPost } from "../lib/api";
 import type { AppConfig, Features } from "../lib/config";
+import { type Job, isActive, useJob } from "../lib/data";
 import { formatBytes, formatDateTime } from "../lib/format";
 import { formatRun, useBackUpNow, useBackups, useDemo, useLoadDemo } from "../lib/operations";
 
@@ -16,46 +17,46 @@ const FLAGS: { key: keyof Features; env: string; label: string }[] = [
   { key: "email", env: "FEATURE_EMAIL", label: "Email" },
   { key: "publicShareLinks", env: "FEATURE_PUBLIC_SHARE_LINKS", label: "Public share links" },
   { key: "assistant", env: "FEATURE_ASSISTANT", label: "Assistant in the editor" },
-  { key: "sqlLab", env: "FEATURE_SQL_LAB", label: "SQL Lab" },
 ];
 
+/** Follow a job started from this page; when it succeeds, refresh what it changed. */
+function useFollow(job: Job | undefined, refresh: readonly unknown[]) {
+  const client = useQueryClient();
+  const followed = useJob(job?.id);
+  const status = followed.data?.status;
+  useEffect(() => {
+    if (status === "succeeded") void client.invalidateQueries({ queryKey: refresh });
+  }, [status, client, refresh]);
+  return { running: job !== undefined && (followed.data === undefined || isActive(followed.data)), job: followed.data };
+}
+
+function JobFailed({ job, what }: { job: Job | undefined; what: string }) {
+  if (job?.status !== "failed") return null;
+  return (
+    <p role="alert" className="mb-2 rounded-md bg-red-50 px-3 py-2 text-sm text-red-800 dark:bg-red-950/50 dark:text-red-300">
+      {what} failed: {job.error ?? "no reason was given"}. The job is listed under Jobs.
+    </p>
+  );
+}
+
+const BACKUPS = ["backups"] as const;
+const DEMO = ["demo"] as const;
+
 function BackupsCard({ config }: { config: AppConfig }) {
-  const [waiting, setWaiting] = useState(false);
   const list = useBackups(true);
   const now = useBackUpNow();
-  // After "Back up now", look again every few seconds until the new file is there.
-  const count = list.data?.backups.length ?? 0;
-  const [before, setBefore] = useState<number | null>(null);
-  useEffect(() => {
-    if (!waiting) return;
-    if (before !== null && count > before) {
-      setWaiting(false);
-      return;
-    }
-    const timer = window.setTimeout(() => void list.refetch(), 3000);
-    return () => window.clearTimeout(timer);
-  }, [waiting, before, count, list]);
+  const followed = useFollow(now.data, BACKUPS);
 
   const data = list.data;
   return (
     <Card className="mb-5 p-4">
       <div className="mb-2 flex items-center gap-2">
         <h2 className="mr-auto font-medium">Backups</h2>
-        <Button
-          variant="primary"
-          busy={now.isPending || waiting}
-          onClick={() =>
-            now.mutate(undefined, {
-              onSuccess: () => {
-                setBefore(count);
-                setWaiting(true);
-              },
-            })
-          }
-        >
-          {waiting ? "Backing up" : "Back up now"}
+        <Button variant="primary" busy={now.isPending || followed.running} onClick={() => now.mutate()}>
+          {followed.running ? "Backing up" : "Back up now"}
         </Button>
       </div>
+      <JobFailed job={followed.job} what="The backup" />
       {data && (
         <p className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">
           {data.schedule ? `Next backup ${formatRun(data.schedule.nextRunAt, data.schedule.timezone)} (${data.schedule.cron}). ` : ""}
@@ -120,17 +121,7 @@ function EmailCard() {
 function DemoCard() {
   const demo = useDemo();
   const load = useLoadDemo();
-  const [waiting, setWaiting] = useState(false);
-  // The job takes a few seconds: look again until the dashboard is there.
-  useEffect(() => {
-    if (!waiting) return;
-    if (demo.data?.loaded) {
-      setWaiting(false);
-      return;
-    }
-    const timer = window.setTimeout(() => void demo.refetch(), 2000);
-    return () => window.clearTimeout(timer);
-  }, [waiting, demo]);
+  const followed = useFollow(load.data, DEMO);
   return (
     <Card className="mb-5 p-4">
       <h2 className="mb-1 font-medium">Demo data</h2>
@@ -139,17 +130,14 @@ function DemoCard() {
         dashboard, to try things out without connecting a source. Remove them by deleting the dashboard and the three demo datasets.
       </p>
       <ErrorNote error={demo.error ?? load.error} />
+      <JobFailed job={followed.job} what="Loading the demo data" />
       {demo.data?.loaded && demo.data.dashboardId ? (
         <Link to={`/dashboards/${demo.data.dashboardId}`} className="text-sm text-brand underline">
           Open the demo dashboard
         </Link>
       ) : (
-        <Button
-          busy={load.isPending || waiting}
-          disabled={!demo.data}
-          onClick={() => load.mutate(undefined, { onSuccess: () => setWaiting(true) })}
-        >
-          {waiting ? "Loading the demo data" : "Load demo data"}
+        <Button busy={load.isPending || followed.running} disabled={!demo.data} onClick={() => load.mutate()}>
+          {followed.running ? "Loading the demo data" : "Load demo data"}
         </Button>
       )}
     </Card>

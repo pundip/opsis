@@ -27,7 +27,6 @@ x-server: &server
   GOOGLE_DISCOVERY_URL: http://fake-oidc:9400/.well-known/openid-configuration
   FEATURE_PUBLIC_SHARE_LINKS: "true"
   FEATURE_SCHEDULED_REFRESH: "true"
-  FEATURE_SQL_LAB: "false"
   FEATURE_BACKUPS: "true"
   FEATURE_EMAIL: "true"
   SMTP_HOST: fake-smtp

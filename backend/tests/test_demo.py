@@ -77,3 +77,17 @@ def test_the_demo_rows_are_the_same_for_the_same_day() -> None:
     assert len(gifts) == demo.GIFT_ROWS + 1
     dates = sorted(line.split(",")[2] for line in gifts[1:])
     assert dates[0] >= "2023-11-25" and dates[-1] <= "2026-11-24"
+
+
+def test_demo_data_in_server_mode(client_for: ClientFor) -> None:
+    """The way the server runs it: signed in, at /opsis, from Settings."""
+    from tests.test_auth import SERVER_SIGN_IN, admin_client
+
+    admin = admin_client(client_for, **SERVER_SIGN_IN)
+    job = ok(admin.post("/api/admin/demo"), 202)
+    run_jobs(admin)
+    done = ok(admin.get(f"/api/jobs/{job['id']}"))
+    assert done["status"] == "succeeded", done.get("error")
+    status = ok(admin.get("/api/admin/demo"))
+    assert status["loaded"] is True
+    assert done["result"]["url"] == f"https://bi.test/opsis/dashboards/{status['dashboardId']}"

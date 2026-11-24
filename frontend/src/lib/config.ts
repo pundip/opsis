@@ -6,7 +6,6 @@ export interface Features {
   publicShareLinks: boolean;
   email: boolean;
   assistant: boolean;
-  sqlLab: boolean;
   backups: boolean;
 }
 

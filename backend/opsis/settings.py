@@ -82,7 +82,6 @@ class Settings(BaseSettings):
     feature_assistant: bool = True
     assistant_provider: Literal["anthropic", "ollama"] = "ollama"
     mcp_auth: Literal["none", "token"] = "none"
-    feature_sql_lab: bool = True
     feature_backups: bool = False
     bind_address: str = "127.0.0.1"
     http_port: int = Field(default=8080, ge=1, le=65535)

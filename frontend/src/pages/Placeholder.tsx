@@ -7,7 +7,7 @@ export function Placeholder({ title, missing = false }: { title: string; missing
       <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
         {missing
           ? "This page does not exist, or the feature is switched off on this server."
-          : "Nothing here yet. This area is built in a later milestone."}
+          : "This page is not available."}
       </p>
       <Link to="/" className="mt-4 inline-block text-sm font-medium text-brand underline">
         Back to home

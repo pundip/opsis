@@ -3,6 +3,9 @@
 .env.*
 !.env.local.example
 !.env.server.example
+# Your own Compose overrides (for example backups on NFS)
+compose.override.yml
+compose.override.yaml
 
 # Python
 __pycache__/

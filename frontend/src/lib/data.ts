@@ -189,6 +189,16 @@ export function useSnapshots(id: string, snapshotId: string | undefined) {
   });
 }
 
+/** One job, looked at again every moment while it is queued or running. */
+export function useJob(id: string | null | undefined) {
+  return useQuery({
+    queryKey: ["jobs", "one", id],
+    queryFn: () => apiGet<Job>(`/api/jobs/${id}`),
+    enabled: Boolean(id),
+    refetchInterval: (query) => (query.state.data === undefined || isActive(query.state.data) ? FAST : false),
+  });
+}
+
 export function useJobs(datasetId?: string) {
   return useQuery({
     queryKey: ["jobs", datasetId ?? "all"],

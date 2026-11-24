@@ -2,7 +2,7 @@
 
 A self-hosted, AI-native business intelligence platform. Open source, Docker-based, and built so that a person and an AI agent edit the same dashboards.
 
-**Status:** early development. You can connect to CSV or Excel files, PostgreSQL and MySQL, pull tables into local storage, define a semantic model for each dataset (dimensions, measures, joins, row-level security), run queries against it, build dashboards on top with a drag-and-resize editor, let an AI agent do the same through the built-in MCP server, and, on a server, sign in (local accounts and Google), share dashboards with people and groups, and publish read-only share links. More connectors and hardening come next. See [PROGRESS.md](PROGRESS.md).
+**Status:** version 1 is feature-complete and in its final install checks. You can connect to CSV or Excel files, PostgreSQL, MySQL, Google Sheets and Salesforce, pull tables into local storage on demand or on a schedule, define a semantic model for each dataset (dimensions, measures, joins, row-level security), build dashboards with a drag-and-drop editor, let an AI agent do the same through the built-in MCP server or the assistant in the editor, and, on a server, sign in (local accounts and Google), share dashboards, publish read-only share links, have dashboards emailed, and take nightly backups. See [PROGRESS.md](PROGRESS.md).
 
 ## Quick start
 
@@ -15,17 +15,44 @@ copy .env.local.example .env
 docker compose up -d
 ```
 
-(On macOS or Linux use `cp` in place of `copy`.) Open http://localhost:8080. There is no sign-in in local mode: you are the built-in admin, and the app only listens on your own machine.
+(On macOS or Linux use `cp` in place of `copy`.) Open http://localhost:8080. There is no sign-in in local mode: you are the built-in admin, and the app only listens on your own machine. The first start takes a minute or two while the image builds. The Windows set-up (Docker Desktop memory, Ollama, Claude Desktop) is in [deploy/windows/README.md](deploy/windows/README.md).
 
-### Try it with sample data
+### Demo data
 
-Set `COMPOSE_PROFILES=sample` in `.env` and run `docker compose up -d` again. This adds a small MySQL database with `donors` and `gifts` tables. Then, in Opsis:
+To have something to look at straight away, open **Settings** and choose **Load demo data**, or run:
 
-1. **Connections, New connection.** Type MySQL, host `sample-mysql`, database `sample`, user `reader`, password `reader-sample-pw`. Press Test, then Save.
-2. **Datasets, New dataset.** Choose the connection and the `gifts` table, then Create and refresh.
-3. The dataset page shows a preview, the refresh history and the snapshots kept. Refresh now makes a new snapshot.
+```
+docker compose exec api python -m opsis seed-demo
+```
 
-To use your own data, add a connection of type CSV or Excel file (upload it in the form), PostgreSQL or MySQL.
+It makes three datasets of made-up giving data (`demo_gifts`, `demo_donors`, `demo_regions`, joined to each other), their semantic models, and a published dashboard, **Giving overview (demo)**. To remove it, delete the dashboard and the three datasets.
+
+### Your own data
+
+Open **Connections**, **New connection**, and choose the type:
+
+- **CSV or Excel file:** upload it in the form. Each sheet of a workbook is a table.
+- **PostgreSQL or MySQL:** host, port, database, and a user that can read the tables. From inside Docker, a database on your own machine is at `host.docker.internal`.
+- **Google Sheets:** see below.
+- **Salesforce:** see below.
+
+Press **Test**, then **Save**. Then **Datasets**, **New dataset**: choose the connection and a table, then **Create and refresh**. The dataset page shows a preview, the refresh history and the snapshots kept; **Refresh now** makes a new snapshot. Saved passwords and keys are encrypted with `ENCRYPTION_KEY` and never shown again.
+
+A sample MySQL database is there to try connections with: set `COMPOSE_PROFILES=sample` in `.env`, run `docker compose up -d` again, and connect to host `sample-mysql`, database `sample`, user `reader`, password `reader-sample-pw`.
+
+**Google Sheets.** Opsis reads a spreadsheet as a Google Cloud service account, with read-only access:
+
+1. In the Google Cloud console, pick or create a project and enable the **Google Sheets API** (APIs and services, Library).
+2. Under IAM and admin, **Service accounts**, create a service account. It needs no roles. Open it, then **Keys**, **Add key**, **JSON**: a key file downloads. (If your organisation's policy blocks key creation, an admin of the Google Cloud organisation has to allow it for this project.)
+3. Share the spreadsheet with the service account's email address (it ends in `iam.gserviceaccount.com`) as a **Viewer**.
+4. In Opsis, a new **Google Sheets** connection: the spreadsheet's URL, and the key file (choose the file, or paste its contents). Each tab becomes a table. Column types come from the cells: numbers, true or false, and cells formatted as dates or date-times. Sheets refresh in full.
+
+**Salesforce.** Opsis reads objects (Account, Opportunity, your custom objects) through the Salesforce API:
+
+1. In Setup, open the **External Client App Manager** and create an External Client App. In its OAuth settings, enable OAuth with the scope **Manage user data via APIs (api)** and any callback URL (it is not used), and enable the **Client Credentials Flow**. In its policies, choose the user it runs as: an integration user with the API Enabled permission who can read the objects you want.
+2. Copy the app's **Consumer Key** and **Consumer Secret**.
+3. In Opsis, a new **Salesforce** connection: your My Domain URL (Setup, My Domain, for example `https://acme.my.salesforce.com`), sign in with `client_credentials`, the key and the secret. Optionally list the objects to offer, such as `Account, Opportunity, Donation__c`. **Test** shows the org's name and edition. A username, password and security token also work (`password`).
+4. For a dataset, choose **Merge** as the refresh mode: each refresh then reads only the records changed since the last one (by `SystemModstamp`) and merges them by `Id`. Records deleted in Salesforce stay until a **Full rebuild** on the dataset page.
 
 ### Semantic models
 
@@ -61,18 +88,20 @@ More that a model can say:
 - **Conditional measures:** `online_amount: {agg: sum, column: amount, filter: "channel = 'online'"}` counts only matching rows. A segment can be used by name: `filter: "{large} AND region = 'VIC'"`.
 - **Timezones:** timestamps that carry an offset in the source are stored as instants and shown in `WORKSPACE_TIMEZONE`. A timestamp without one is taken as workspace-local time; if the source keeps it in another zone, say so on the dimension: `created: {column: created, type: time, timezone: UTC}`.
 - **Version history:** every save is a version, with who and when. The model page lists them and can restore any of them.
+- **Two joins away:** a model can use a dimension of a dataset its joined dataset joins to, for example gifts to donors to regions. Every join on the way must be many-to-one or one-to-one, and a path never goes through a restricted dataset.
+- **All models as files:** on **Semantic models**, **Export all** downloads a zip of `models/<dataset>.yml` for version control, and **Import** takes such a zip (or `.yml` files) back. Every file is checked first and nothing is saved unless all of them are valid; each model that changes gets a new version.
 
 ### Dashboards
 
 Open **Dashboards**, name a new one, and you are in the editor:
 
 - **Add** a visual from the toolbar: table, KPI card, bar, line, area, combo, pie or donut, scatter, or text. Drag a tile to move it and pull its corner to resize it. On a combo chart each measure can use the left or the right value axis (for example amount as bars on the left, number of gifts as a line on the right).
-- Click a tile to select it. The **Visual** tab picks its dataset, puts fields into the visual's roles (for example Category, Values, Split by), sets sort and row limit, and shows the visual's own options.
+- Click a tile to select it. The **Visual** tab picks its dataset, puts fields into the visual's roles (for example Category, Values, Split by), sets sort and row limit, and shows the visual's own options. Drag a field from the list into a role, or between roles; a role only takes fields that fit it. Each role also has an **Add a field** menu.
 - **Filters** adds controls above the dashboard: a dropdown, a multi-select, a date range (including "This financial year") or a text search.
 - **Dashboard** holds the title, grid and theme (auto, light or dark). **History** lists every saved version, shows what changed, and can restore one. **JSON** is the whole dashboard as text; Apply checks it first and reports each problem with its path.
 - **Undo** and **Redo** (Ctrl+Z, Ctrl+Y) cover everything since you opened the editor. **Save** makes a new version. **Publish** makes the saved version the one viewers see.
 
-When viewing, click a bar, slice, point or table value to filter the other visuals by it, change the time grain on a time chart (year to day), and switch any chart to a table of the same data. A tile shows "RLS bypassed" when row-level security rules exist on its data but do not apply to your role.
+When viewing, click a bar, slice, point or table value to filter the other visuals by it, change the time grain on a time chart (year to day), and switch any chart to a table of the same data. A tile shows "RLS bypassed" when row-level security rules exist on its data but do not apply to your role. With email on, **Email me** sends you the dashboard on a schedule (see Email below).
 
 The format is [spec/dashboard.schema.json](spec/dashboard.schema.json). Each visual declares its roles and options in `frontend/src/visuals/<id>/manifest.json`.
 
@@ -135,13 +164,13 @@ Then:
 docker compose up -d
 ```
 
-The stack refuses to start while a `CHANGE` value is still a placeholder. Server mode adds a worker container. The full walk-through for a Proxmox container, with Nginx and Caddy configurations, firewalling, backups and Google set-up, is in [deploy/proxmox/README.md](deploy/proxmox/README.md).
+The stack refuses to start while a `CHANGE` value is still a placeholder. Server mode adds a worker container, which runs refreshes, schedules, backups and emails. The full walk-through for a Proxmox container, with Nginx and Caddy configurations, firewalling, email, backups to NFS, restore, Google set-up and an install checklist, is in [deploy/proxmox/README.md](deploy/proxmox/README.md).
 
 ### Signing in and sharing
 
 With `AUTH_MODE=local` (email and password) or `AUTH_MODE=full` (also Sign in with Google), people sign in. On the first start `ADMIN_EMAIL` and `ADMIN_INITIAL_PASSWORD` create the first admin, who must choose a new password at the first sign-in.
 
-- **People:** admins invite people from **Users**. An invitation is a one-time link (valid 7 days) that the admin passes on; the person sets a password with it, or, with Google sign-in on, simply signs in with Google as that address. Admins can change roles, deactivate people, give them attributes for row-level security, put them in groups, and make password reset links. Locked out completely? `docker compose exec api python -m opsis reset-link <email>` prints a link.
+- **People:** admins invite people from **Users**. An invitation is a one-time link (valid 7 days): with email on it is emailed, otherwise the admin passes it on. The person sets a password with it, or, with Google sign-in on, simply signs in with Google as that address. Admins can change roles, deactivate people, give them attributes for row-level security, put them in groups, and send password reset links. With email on, the sign-in page also has **Forgotten your password?**. Locked out completely? `docker compose exec api python -m opsis reset-link <email>` prints a link.
 - **Roles:** viewers see published dashboards shared with them; editors build datasets, models and dashboards; admins can do everything.
 - **Sharing a dashboard:** **Share** on the dashboard page shares it with people, groups or everyone, as viewers (the published version) or editors (the draft too).
 - **Restricted datasets:** on a dataset's page an admin can restrict it to named people and groups. Dashboards built on it stay viewable by those they are shared with, with row-level security applied as the viewer.
@@ -151,6 +180,24 @@ With `AUTH_MODE=local` (email and password) or `AUTH_MODE=full` (also Sign in wi
 - **Access tokens** (**Account**, **Access tokens**) work for MCP clients and for scripts on the REST API, with the scopes read, edit, publish and admin; a token never does more than its owner may.
 
 Filter values, cross-filters and drill levels are kept in the address bar, so a filtered view can be bookmarked or sent.
+
+### Schedules and backups
+
+- **Refresh schedules** (`FEATURE_SCHEDULED_REFRESH=true`, on by default on a server): a dataset's page has a **Refresh schedule** card with presets (every hour, every day at 06:00, weekdays, Mondays, monthly) or a cron expression, and shows the next runs before you save. Times are in `WORKSPACE_TIMEZONE`, at most every 15 minutes. **Schedules** lists what runs on its own. A run missed while the stack was down is not made up; the next one runs as usual.
+- **Backups** (`FEATURE_BACKUPS=true`, on by default on a server): every night (`BACKUP_SCHEDULE`, 02:30) a backup file goes to the `backups` volume, holding the database, the uploaded files and each dataset's current data. The newest `BACKUP_RETENTION` (7) are kept. **Settings** lists them and has **Back up now**; so does `docker compose exec api python -m opsis backup`. Keep a copy of `.env` too: its `ENCRYPTION_KEY` is not in the backups, and without it saved connection passwords cannot be read.
+- **Restore** replaces everything with a backup. The previous data is moved aside, not deleted:
+
+```
+docker compose stop api worker
+docker compose run --rm api restore opsis-20261124-023000.tar --yes
+docker compose up -d
+```
+
+- A **clean-up job** runs every night and removes ended sessions, used password links, long-ended share links and old finished jobs. The audit log is kept.
+
+### Email
+
+Set `FEATURE_EMAIL=true` and the `SMTP_*` values in `.env` (with sign-in on). Opsis then emails invitations and password reset links, offers **Forgotten your password?** on the sign-in page, and lets people have a dashboard emailed to them: **Email me** on a dashboard, then a schedule. Each email shows the dashboard's numbers as that person sees them (their access and row-level security, the filters at their defaults), a KPI's value or a short table for each visual, and a link to the dashboard. Their emailed dashboards are listed under **Account**, where they can stop them. **Settings**, **Send me a test email** checks the mail server. Messages are sent straight away and never stored.
 
 ### Behind a reverse proxy at a sub-path
 
@@ -173,6 +220,9 @@ TRUSTED_PROXIES=172.16.0.0/12
 | `docker compose logs api` | Show the API log |
 | `docker compose down` | Stop the stack (data is kept in named volumes) |
 | `docker compose up -d --build` | Rebuild after pulling new code |
+| `docker compose exec api python -m opsis seed-demo` | Load the demo data |
+| `docker compose exec api python -m opsis backup` | Write a backup now (to the `backups` volume) |
+| `docker compose exec api python -m opsis reset-link <email>` | Print a one-time link to set someone's password |
 
 ### Compose profiles
 
@@ -198,15 +248,17 @@ Everything is set in `.env`. The two templates document each value. After a chan
 | `MCP_AUTH` | `none` (loopback only) or `token` | `none` | `token` |
 | `FEATURE_SCHEDULED_REFRESH` | Cron-based refresh schedules | `false` | `true` |
 | `FEATURE_PUBLIC_SHARE_LINKS` | Public read-only links | `false` | `true` |
-| `FEATURE_EMAIL` | SMTP invites, resets and snapshots | `false` | `false` |
+| `FEATURE_EMAIL` | Email: invitations, password resets, emailed dashboards | `false` | `false` |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY` | The mail server, and `starttls`, `ssl` or `none` | empty, `587`, `starttls` | your mail server |
+| `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` | Sign-in to the mail server (both empty: none), and the sender | empty | the sender is required with email on |
 | `FEATURE_ASSISTANT` | In-app AI panel | `true` | `true` |
 | `ASSISTANT_PROVIDER` | `anthropic` or `ollama` | `ollama` | `anthropic` |
 | `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX` | Where Ollama is, the model to use, and the context size asked for with each request | `http://host.docker.internal:11434`, `gemma4:12b`, `32768` | same, if used |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Claude for the assistant | empty, `claude-opus-5-5` | required for `anthropic` |
 | `ANTHROPIC_EFFORT`, `ANTHROPIC_FALLBACKS` | How much Claude thinks; re-run declined requests on another model | `medium`, `true` | same |
 | `ASSISTANT_MAX_STEPS`, `ASSISTANT_MAX_OUTPUT_TOKENS`, `ASSISTANT_TIMEOUT_SECONDS`, `ASSISTANT_MAX_ROWS` | Budgets for one request to the assistant | `25`, `100000`, `600`, `100` | same |
-| `FEATURE_SQL_LAB` | Admin-only read-only SQL | `true` | `false` |
 | `FEATURE_BACKUPS` | Nightly backup job | `false` | `true` |
+| `BACKUP_SCHEDULE`, `BACKUP_RETENTION` | When backups run (cron, workspace time), and how many are kept | `30 2 * * *`, `7` | same |
 | `BIND_ADDRESS`, `HTTP_PORT` | Where the api container is published on the host | `127.0.0.1`, `8080` | the server's LAN IP, `8080` |
 | `PUBLIC_BASE_URL` | The address users type. A path becomes the app's base path | `http://localhost:8080` | your https address |
 | `TRUSTED_PROXIES` | IPs or CIDR ranges allowed to set forwarded headers | empty | your proxy's IP |
@@ -251,7 +303,7 @@ The only tools needed on the host are Docker and Node.js (for the frontend tests
 | `npm run test:frontend` | TypeScript, ESLint and Vitest |
 | `npm run smoke` | Playwright browser tests at http://localhost:8080, then behind nginx at http://localhost:8088/opsis/, then against a throwaway server-mode stack with sign-in, a fake Google, share links and access tokens. Add `-- --no-build` to skip the image rebuild, or `-- --root`, `-- --subpath`, `-- --server` for one stage |
 | `npm run lock:backend` | Regenerate `backend/uv.lock` after editing `pyproject.toml` |
-| `node scripts/benchmark.mjs --rows 5000000` | Load a synthetic dataset into the running stack and time ingestion and queries |
+| `node scripts/benchmark.mjs --rows 10000000` | Load a synthetic dataset into the running stack, time ingestion, queries and a typical dashboard, then remove it |
 
 Run `npm install` inside `frontend/` once before the frontend commands. The smoke tests install their own dependencies and a Chromium browser the first time (in `e2e/`).
 

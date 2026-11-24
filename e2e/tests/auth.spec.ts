@@ -154,7 +154,7 @@ test("people sign in; viewers cannot edit; share links stop when revoked; Google
       await expect(someone.getByRole("heading", { name: "Choose a new password" })).toBeVisible();
       await someone.getByLabel("New password").fill(`${PASSWORD}-2`);
       await someone.getByLabel("Repeat the password").fill(`${PASSWORD}-2`);
-      await someone.getByRole("button", { name: "Set password and sign in" }).click();
+      await someone.getByRole("button", { name: "Save and sign in" }).click();
       await expect(someone.getByRole("navigation", { name: "Main" })).toBeVisible();
       expect((await api(someone, "GET", "api/me")).email).toBe(`vera-${stamp}@smoke.test`);
     });
