@@ -91,9 +91,9 @@ export function Home({ config, me }: { config: AppConfig; me: Me }) {
       </div>
 
       <p className="mt-6 text-sm text-zinc-600 dark:text-zinc-400">
-        Start by adding a connection, then create a dataset from one of its tables. Semantic models
-        and dashboards arrive in the next milestones. Features are switched in <code>.env</code>;
-        restart the stack to apply a change.
+        Start by adding a connection, then create a dataset from one of its tables. A semantic model
+        is generated on the dataset&apos;s first refresh; then build a dashboard from it. Features are
+        switched in <code>.env</code>; restart the stack to apply a change.
       </p>
     </div>
   );

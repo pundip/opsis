@@ -89,7 +89,7 @@ The **Dashboard** tab sets the **title**, **description**, **colour mode** (auto
 - **Save** creates a new version, with your note.
 - **Publish** makes the latest saved version the one viewers see. Until you publish again, viewers keep the previous published version.
 - If someone else saved while you were editing, your save is refused; **Reload the latest version** (your unsaved changes are lost, so note them first).
-- **Save before you leave the editor.** Closing or reloading the tab warns you about unsaved changes, but moving to another page inside Opsis (the menu or a link) drops them without asking.
+- **Leaving the editor** with unsaved changes asks first. After a click on the menu or a link, or the Back button, choose **Stay** or **Leave without saving**. Closing or reloading the tab shows the browser's own warning.
 - When someone else, or an AI agent, saves a version while the editor is open, a banner appears with **Undo** (or **Load version** if you have unsaved changes).
 
 The **History** tab lists every version, marks the latest and the published one, shows what changed between a version and what you see, and **restores** it (as a new version).
