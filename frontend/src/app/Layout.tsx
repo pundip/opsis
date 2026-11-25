@@ -50,6 +50,9 @@ export function Layout({ config, me, items, children }: Props) {
               </div>
             );
           })}
+          <NavLink to="/docs/guide" className={linkClass}>
+            Help
+          </NavLink>
         </nav>
         <div className="border-t border-zinc-200 px-2 pt-3 text-xs text-zinc-500 dark:border-zinc-800">
           <p className="truncate font-medium text-zinc-700 dark:text-zinc-300">{me.displayName}</p>

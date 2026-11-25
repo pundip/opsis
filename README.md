@@ -4,7 +4,7 @@ A self-hosted, AI-native business intelligence platform. Open source, Docker-bas
 
 **Status:** version 1 is feature-complete and in its final install checks. You can connect to CSV or Excel files, PostgreSQL, MySQL, Google Sheets and Salesforce, pull tables into local storage on demand or on a schedule, define a semantic model for each dataset (dimensions, measures, joins, row-level security), build dashboards with a drag-and-drop editor, let an AI agent do the same through the built-in MCP server or the assistant in the editor, and, on a server, sign in (local accounts and Google), share dashboards, publish read-only share links, have dashboards emailed, and take nightly backups. See [PROGRESS.md](PROGRESS.md).
 
-**How to use it:** the [user guide](docs/guide/README.md) walks through connections, datasets, joins, semantic models, dashboards, sharing, AI agents and running an install, with screenshots.
+**How to use it:** the [user guide](docs/guide/README.md) walks through connections, datasets, joins, semantic models, dashboards, sharing, AI agents and running an install, with screenshots. A running Opsis shows it too: **Help** in the menu, at `<your address>/docs/guide` (for example http://localhost:8080/docs/guide). It works offline, and with sign-in on only signed-in people can read it.
 
 ## Quick start
 
@@ -327,7 +327,7 @@ In the Claude desktop app, `.claude/launch.json` defines two launch configuratio
 
 ## Documentation
 
-- [docs/guide/](docs/guide/README.md): the user guide, with screenshots
+- [docs/guide/](docs/guide/README.md): the user guide, with screenshots. The only source of the guide in the app: the image carries a copy, so rebuild it to show changes (`docker compose up -d --build`; dev mode shows them at once)
 - [BUILD_BRIEF.md](BUILD_BRIEF.md): the product spec and milestones
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components, data flows, auth flows
 - [docs/DECISIONS.md](docs/DECISIONS.md): decision log

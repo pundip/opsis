@@ -51,6 +51,8 @@ COPY backend/opsis ./opsis
 COPY spec ./spec
 COPY plugins ./plugins
 COPY branding.json ./
+# The user guide, shown inside the app at {BASE_PATH}/docs/guide.
+COPY docs/guide ./guide
 COPY --from=frontend /out/visuals ./visuals
 COPY --from=frontend /src/frontend/dist ./static
 EXPOSE 8080

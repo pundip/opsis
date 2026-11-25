@@ -442,3 +442,24 @@ Short ADR entries. Newest at the bottom. "Brief" means `BUILD_BRIEF.md`. An entr
 **The report** is kept with the snapshot (`snapshots.report`, migration 0012) and is the refresh job's `dataQuality` result: per column the values stored as NULL, why, and samples; the invalid-dates setting; date columns read as text; the overrides applied; the suggestions; the source types. The dataset page shows it, job lists show the count, and MCP's `describe_dataset` and `get_job_status` return it. Samples are the source's data, so they are left out for people who may not use a restricted dataset (job lists are open to every editor) and where row-level security hides rows from the caller. Lists of datasets carry only the count.
 
 **Not done:** a CSV file is typed by DuckDB over the whole file, so a column with one value that is not a number or a date is text and gets a suggestion, rather than being typed with NULLs. An invalid UTF-8 byte in a CSV still fails the read with DuckDB's message (line and column).
+
+## ADR-029: The user guide inside the app
+- **Status:** accepted, after M8 (the guide could be read only in the source code)
+
+**Goal.** Read the guide in the running app, at `{BASE_PATH}/docs/guide`, at the root and under a sub-path, offline, and with sign-in only by signed-in people. `docs/guide` stays the only source.
+
+**Decision**
+- The Docker build copies `docs/guide` into the image (`/app/guide`); `.dockerignore` lets that one folder of `docs` through. Dev mode and the tests mount it.
+- The api renders a page when it is asked for: `GET /api/guide`, `/api/guide/{page}` and `/api/guide/images/{name}`, for anyone signed in (so simply open in local mode). Not under `/api/docs`: that is the API reference, which is served without the Content Security Policy.
+- Markdown becomes HTML with markdown-it-py (MIT, with mdurl, MIT): CommonMark plus tables, and HTML written in the Markdown stays text.
+- Links are rewritten with the base path as the page is rendered. Chapters and headings keep GitHub's anchor names (heading ids are prefixed `guide-`, so none can take an id the app uses). Screenshots carry their size, so a link to a heading below them lands on it.
+- A link that leaves the guide (the deployment guides, the schemas, the project README) is shown as its text followed by the file's path. The app does not ship those files, and no address of a source repository is hard-coded.
+- The app page puts that HTML into the document and follows links within the guide with its router. This is safe because the HTML comes only from files in the image, raw HTML is off, the parser refuses `javascript:` links, and the CSP allows no inline script.
+
+**Not chosen**
+- Extending `lib/markdown.tsx` (the renderer for text tiles): the guide also needs tables, code blocks, quotes, images and nested lists, which means writing a Markdown parser of our own and changing what text tiles accept.
+- Rendering in the browser (react-markdown with remark-gfm): dozens of packages in the bundle, and the api would still have to serve the files behind sign-in.
+- Putting the files in the frontend build: static files are served to anyone.
+- Shipping the deployment guides too, to link to them: they are for whoever installs Opsis, who has the source.
+
+**Consequences.** A change to the guide reaches the app with the next image build. A backend test renders every page and fails on a broken link, heading anchor or screenshot, so keep links relative, as GitHub reads them.

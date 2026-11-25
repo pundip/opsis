@@ -187,6 +187,7 @@ class Settings(BaseSettings):
     plugins_dir: Path = Path("/app/plugins")
     spec_dir: Path = Path("/app/spec")
     visuals_dir: Path = Path("/app/visuals")
+    guide_dir: Path = Path("/app/guide")  # the user guide: docs/guide in the source
 
     log_level: Literal["debug", "info", "warning", "error"] = "info"
 

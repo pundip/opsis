@@ -8,6 +8,7 @@ import { DashboardPage } from "../pages/DashboardPage";
 import { Dashboards } from "../pages/Dashboards";
 import { DatasetDetail } from "../pages/DatasetDetail";
 import { Datasets } from "../pages/Datasets";
+import { Guide } from "../pages/Guide";
 import { Home } from "../pages/Home";
 import { Jobs } from "../pages/Jobs";
 import { ModelDetail } from "../pages/ModelDetail";
@@ -117,6 +118,7 @@ export function App() {
         <Route path="/login" element={<Navigate to="/" replace />} />
         <Route path="/account" element={<Account config={appConfig} me={user} />} />
         <Route path="/tokens" element={<Tokens />} />
+        <Route path="/docs/guide/:page?" element={<Guide />} />
         {items.map((item) => (
           <Route
             key={item.path}

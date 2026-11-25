@@ -34,6 +34,7 @@ from opsis.api import (
     sharing,
     system,
     tokens,
+    user_guide,
 )
 from opsis.api.errors import ApiError, install_error_handlers
 from opsis.assistant.providers import build_provider
@@ -179,6 +180,7 @@ def register_feature_routers(api: APIRouter, settings: Settings) -> None:
     api.include_router(dashboards.router)
     api.include_router(tokens.router)
     api.include_router(admin.audit_router)
+    api.include_router(user_guide.router)
     if settings.sign_in:
         api.include_router(auth.router)
         api.include_router(admin.users_router)

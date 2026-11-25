@@ -35,6 +35,8 @@ dependencies = [
     "google-auth-oauthlib>=1.2",
     "simple-salesforce>=1.12",
     "croniter>=2.0",
+    # The user guide inside the app: Markdown to HTML.
+    "markdown-it-py>=3.0",
 ]
 
 [dependency-groups]

@@ -10,6 +10,8 @@
 **/.ruff_cache
 **/.venv
 docs
+# The user guide goes into the image, which shows it (backend/Dockerfile).
+!docs/guide
 deploy
 *.md
 compose*.yml

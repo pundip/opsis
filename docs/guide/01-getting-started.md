@@ -69,6 +69,7 @@ The menu on the left:
 | **Users** | People and groups (admins, with sign-in) |
 | **Audit log** | Who did what (admins) |
 | **Settings** | Backups, the test email, the demo data (admins) |
+| **Help** | This guide, inside the app |
 
 At the bottom: your name and role, **Account**, **Access tokens** and (with sign-in) **Sign out**. You only see the entries your role and the enabled features allow.
 
