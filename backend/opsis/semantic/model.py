@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -100,11 +100,15 @@ def humanize(name: str) -> str:
     return text[:1].upper() + text[1:]
 
 
-def reachable(models: Mapping[str, Model], base: str) -> dict[str, str | None]:
+def reachable(
+    models: Mapping[str, Model], base: str, restricted: Collection[str] = ()
+) -> dict[str, str | None]:
     """The datasets whose dimensions a query on `base` can use, each with the dataset
     it is reached through (None when `base` joins to it directly). Every join on
     the way is many_to_one or one_to_one. A dataset two joins away by two ways is
-    left out: the compiler asks for a direct join to say which."""
+    left out: the compiler asks for a direct join to say which. No path goes
+    through a dataset in `restricted` (restricted datasets, where the caller
+    knows them)."""
     origin = models.get(base)
     if origin is None:
         return {}
@@ -116,11 +120,45 @@ def reachable(models: Mapping[str, Model], base: str) -> dict[str, str | None]:
     }
     farther: dict[str, list[str]] = {}
     for middle in direct:
+        if middle in restricted:
+            continue
         for join in models[middle].joins:
             usable = join.relationship in SAFE_JOINS and join.to in models
             if usable and join.to != base and join.to not in joined:
                 farther.setdefault(join.to, []).append(middle)
     return {**direct, **{name: via[0] for name, via in farther.items() if len(via) == 1}}
+
+
+@dataclass(frozen=True)
+class JoinPath:
+    """One dataset that a model joins to, directly or through another dataset."""
+
+    index: int  # the model's own join that leads there: /joins/<index>
+    through: str | None  # the dataset in between, or None for a direct join
+    join: Join  # the join that reads the dataset, written in the model or in `through`'s
+
+
+def join_paths(
+    models: Mapping[str, Model], base: str, restricted: Collection[str] = ()
+) -> list[JoinPath]:
+    """The datasets in `models` that the model of `base` joins to: each of its own
+    joins, whatever the relationship, then those two joins away that queries can
+    reach (see `reachable`)."""
+    joins = models[base].joins
+    direct = [
+        JoinPath(index, None, join)
+        for index, join in enumerate(joins)
+        if join.to in models and join.to != base
+    ]
+    position = {join.to: index for index, join in enumerate(joins)}
+    farther = [
+        JoinPath(position[through], through, join)
+        for name, through in reachable(models, base, restricted).items()
+        if through is not None
+        for join in models[through].joins
+        if join.to == name
+    ]
+    return direct + sorted(farther, key=lambda path: (path.index, path.join.to))
 
 
 def parse_model(dataset: str, definition: Mapping[str, Any]) -> Model:

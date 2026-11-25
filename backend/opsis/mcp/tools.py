@@ -41,6 +41,7 @@ from opsis.services import (
     dashboards,
     datasets,
     links,
+    model_warnings,
     models,
 )
 from opsis.services import query as queries
@@ -443,14 +444,21 @@ def _first_time(dimensions: list[dict[str, Any]], dataset: str) -> str:
     return next((d["ref"] for d in dimensions if d["type"] == "time"), f"{dataset}.some_date")
 
 
+def _warnings(ctx: ToolContext, db: Session, dataset: str, definition: Any) -> Any:
+    """What a model saves with but may surprise: see services.model_warnings."""
+    return model_warnings.check(db, ctx.settings, ctx.runtime, ctx.principal, dataset, definition)
+
+
 def get_semantic_model(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     dataset = _dataset(ctx, db, args["dataset"])
+    name = dataset.name
     described = models.describe(db, dataset)
     return {
-        "dataset": dataset.name,
+        "dataset": name,
         "version": described["version"],
         "isGeneratedStarter": described["isStarter"],
         "definition": described["definition"],
+        "warnings": _warnings(ctx, db, name, described["definition"]),
         "note": (
             "To change it, call patch_semantic_model with base_version set to this `version` "
             "and JSON Patch paths into `definition`, for example "
@@ -760,9 +768,11 @@ def profile_column(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
 def validate_model(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     dataset = _dataset(ctx, db, args["dataset"])
+    name = dataset.name
     definition = ctx.lists("semantic-model.schema.json", args["definition"], "validate_model")
     found = models.problems(db, ctx.settings, dataset, definition)
-    return {"valid": not found, "problems": found[:50]}
+    warnings = [] if found else _warnings(ctx, db, name, definition)
+    return {"valid": not found, "problems": found[:50], "warnings": warnings}
 
 
 def patch_semantic_model(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
@@ -790,11 +800,20 @@ def patch_semantic_model(ctx: ToolContext, db: Session, args: dict[str, Any]) ->
         message=args.get("message"),
         author_type=ctx.author_type,
     )
+    name, version = dataset.name, record.version
+    warnings = _warnings(ctx, db, name, record.definition)
+    note = "Dashboards that use this dataset pick up the change on their next load."
+    if warnings:
+        note = (
+            "Saved, but tell the user what `warnings` says: numbers or access may not be "
+            f"what they expect. {note}"
+        )
     return {
-        "dataset": dataset.name,
-        "version": record.version,
+        "dataset": name,
+        "version": version,
         "saved": True,
-        "note": "Dashboards that use this dataset pick up the change on their next load.",
+        "warnings": warnings,
+        "note": note,
     }
 
 
@@ -1177,8 +1196,9 @@ TOOLS: tuple[Tool, ...] = (
         "get_semantic_model",
         "Get a semantic model",
         "Get the full definition of a dataset's semantic model (dimensions, measures, segments, "
-        "joins, row-level security) and its version number. Use it before patch_semantic_model. "
-        "To just see which fields exist, describe_dataset is shorter. "
+        "joins, row-level security), its version number and any `warnings` about its joins "
+        "(a join key on more than one row, rules that do not carry over a join). Use it before "
+        "patch_semantic_model. To just see which fields exist, describe_dataset is shorter. "
         'Example input: {"dataset": "gifts"}',
         _schema({"dataset": _DATASET}, ["dataset"]),
         get_semantic_model,
@@ -1253,7 +1273,9 @@ TOOLS: tuple[Tool, ...] = (
         "validate_model",
         "Validate a semantic model",
         "Check a complete semantic model definition for a dataset without saving it. Returns "
-        "`valid` and a list of problems, each with the JSON path of what to fix. "
+        "`valid`, a list of problems, each with the JSON path of what to fix, and `warnings` "
+        "to tell the user about: things that save but give surprising numbers or access, such "
+        "as a join key that is on more than one row (totals come out too high). "
         'Example input: {"dataset": "gifts", "definition": {"dimensions": {"fund": '
         '{"column": "fund", "type": "string"}}, "measures": {"total_amount": '
         '{"agg": "sum", "column": "amount"}}}}',
@@ -1268,8 +1290,9 @@ TOOLS: tuple[Tool, ...] = (
         "Change a dataset's semantic model with JSON Patch operations, for example to add a "
         "measure. First call get_semantic_model, then pass its `version` as `base_version`; "
         "paths point into its `definition`. The result is validated and saved as a new "
-        "version, or nothing is saved and the problems are listed. If the version has moved "
-        "on you get a version_conflict error: read the model again and retry. "
+        "version, or nothing is saved and the problems are listed. After a save, tell the user "
+        "about any `warnings` (for example a join key on more than one row). If the version "
+        "has moved on you get a version_conflict error: read the model again and retry. "
         'Example input: {"dataset": "gifts", "base_version": 3, "ops": [{"op": "add", '
         '"path": "/measures/avg_amount", "value": {"agg": "avg", "column": "amount", '
         '"label": "Average gift"}}], "message": "Add average gift"}',

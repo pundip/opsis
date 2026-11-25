@@ -75,6 +75,7 @@ Every dataset gets a generated model on its first refresh. Open **Semantic model
 - **Try a query:** tick measures and dimensions, choose a date field with a grain (including financial quarter and year) and a range such as "Last financial year", and run it. The generated SQL is shown under the result.
 - **Edit the model as YAML:** rename fields, add measures such as `avg_gift: {expr: "{total_amount} / NULLIF({gift_count}, 0)"}`, join to another dataset, or add row-level security. Check reports every problem with its location; Save stores it.
 - **Test row-level security:** as an admin, set "Run as" to a viewer and give that user's attributes as JSON.
+- **Read the warnings:** they never stop a save. A joined dataset that lists a key twice counts the matching rows twice, and security rules on a joined dataset do not limit the rows of this one ([user guide](docs/guide/05-joins.md#repeated-keys)).
 
 A model with a join and a security rule:
 

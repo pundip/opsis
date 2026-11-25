@@ -13,7 +13,7 @@ from opsis.api.deps import get_db, get_settings, require
 from opsis.api.errors import ApiError
 from opsis.auth.principal import Permission, Principal
 from opsis.db.models import Dataset
-from opsis.services import access, model_files, models, query
+from opsis.services import access, model_files, model_warnings, models, query
 from opsis.settings import Settings
 
 router = APIRouter(prefix="/api")
@@ -29,6 +29,22 @@ def _dataset(db: Session, name: str, principal: Principal) -> Dataset:
     target = models.dataset_by_name(db, name)
     access.require_datasets(db, principal, {target.name})
     return target
+
+
+def _described(
+    db: Session, settings: Settings, request: Request, principal: Principal, target: Dataset
+) -> dict[str, Any]:
+    """A dataset's model as the model page shows it, with its warnings."""
+    described = models.describe(db, target)
+    described["warnings"] = model_warnings.check(
+        db,
+        settings,
+        request.app.state.query_runtime,
+        principal,
+        target.name,
+        described["definition"],
+    )
+    return described
 
 
 class ModelIn(BaseModel):
@@ -88,15 +104,20 @@ def import_models(
 
 @router.get("/models/{dataset}")
 def get_model(
-    dataset: str, db: Session = Depends(get_db), principal: Principal = Depends(read)
+    dataset: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    principal: Principal = Depends(read),
 ) -> dict[str, Any]:
-    return models.describe(db, _dataset(db, dataset, principal))
+    return _described(db, settings, request, principal, _dataset(db, dataset, principal))
 
 
 @router.put("/models/{dataset}")
 def save_model(
     dataset: str,
     body: ModelIn,
+    request: Request,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     actor: Principal = Depends(write),
@@ -111,7 +132,7 @@ def save_model(
         base_version=body.baseVersion,
         message=body.message,
     )
-    return models.describe(db, target)
+    return _described(db, settings, request, actor, target)
 
 
 @router.get("/models/{dataset}/versions")
@@ -132,26 +153,38 @@ def get_model_version(
 def restore_model_version(
     dataset: str,
     version: int,
+    request: Request,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     actor: Principal = Depends(write),
 ) -> dict[str, Any]:
     target = _dataset(db, dataset, actor)
     models.restore(db, settings, actor, target, version)
-    return models.describe(db, target)
+    return _described(db, settings, request, actor, target)
 
 
 @router.post("/models/{dataset}/validate")
 def validate_model(
     dataset: str,
     body: ModelIn,
+    request: Request,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     principal: Principal = Depends(read_post),
 ) -> dict[str, Any]:
+    """Every problem that would stop a save, and for a model without any, the
+    warnings it would be saved with."""
     target = _dataset(db, dataset, principal)
-    found = models.problems(db, settings, target, models.resolve_input(body.definition, body.yaml))
-    return {"valid": not found, "problems": found}
+    definition = models.resolve_input(body.definition, body.yaml)
+    found = models.problems(db, settings, target, definition)
+    warnings = (
+        []
+        if found
+        else model_warnings.check(
+            db, settings, request.app.state.query_runtime, principal, target.name, definition
+        )
+    )
+    return {"valid": not found, "problems": found, "warnings": warnings}
 
 
 @router.get("/models/{dataset}/starter")

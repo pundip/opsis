@@ -40,6 +40,18 @@ Edit the text, then:
 
 If someone else saved the model while you were editing, your save is refused; reload the page and make your change again.
 
+### Warnings
+
+Some models save but can give numbers or access you do not expect. Opsis lists these warnings after **Check** and **Save model**, and at the top of the model page for as long as they apply. They never stop a save.
+
+| Warning | What it means | What to do |
+|---|---|---|
+| A join key is not unique | A dataset this model joins to has a key value on more than one row, so [rows are counted more than once](05-joins.md#repeated-keys) | Make the key unique there, or join on columns that pick out one row |
+| Row-level security does not carry over | A joined dataset has security rules and this one has none, so [its rows are not limited](05-joins.md#row-level-security-and-joins) | Add a rule to this model, on one of its own columns |
+| A join key could not be checked | The server was busy, or reading the data failed or took too long | Press **Check** again |
+
+AI agents get the same warnings when they read, check or change a model.
+
 ### Version history
 
 Every save is a version, with who and when. **Restore** makes an old version the current one (as a new version).

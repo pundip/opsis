@@ -141,7 +141,7 @@ ORDER BY "gifts.gift_date" ASC
 LIMIT 501
 ```
 
-Code map: `opsis/semantic/model.py` (parse, validate, starter), `expressions.py` (allow-list), `compiler.py`, `calendar.py`; `opsis/query/duckdb_engine.py` (engine and cache); `opsis/services/models.py` and `query.py`; `opsis/api/semantic.py`. Details and rules are in ADR-019.
+Code map: `opsis/semantic/model.py` (parse, validate, starter), `expressions.py` (allow-list), `compiler.py`, `calendar.py`; `opsis/query/duckdb_engine.py` (engine and cache); `opsis/services/models.py`, `query.py` and `model_warnings.py` (repeated join keys and rules that do not carry over a join, ADR-028); `opsis/api/semantic.py`. Details and rules are in ADR-019.
 
 ### Calendar and financial years
 

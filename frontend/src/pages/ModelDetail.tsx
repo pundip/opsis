@@ -10,6 +10,7 @@ import {
   GRAIN_LABELS,
   type Grain,
   type ModelDetail as Model,
+  type ModelWarning,
   type PreviewAs,
   type Problem,
   type QueryResult,
@@ -45,6 +46,23 @@ function ProblemList({ problems }: { problems: Problem[] }) {
       {problems.map((problem) => (
         <li key={problem.path + problem.message} className="text-red-800 dark:text-red-300">
           <code className="font-mono text-xs">{problem.path}</code> {problem.message}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** Things that save but may give surprising numbers or access: shown, never blocking. */
+function WarningList({ warnings, label }: { warnings: ModelWarning[]; label: string }) {
+  if (warnings.length === 0) return null;
+  return (
+    <ul
+      aria-label={label}
+      className="space-y-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm wrap-anywhere dark:border-amber-900 dark:bg-amber-950"
+    >
+      {warnings.map((warning) => (
+        <li key={warning.code + warning.path + warning.message} className="text-amber-900 dark:text-amber-200">
+          <code className="font-mono text-xs">{warning.path}</code> {warning.message}
         </li>
       ))}
     </ul>
@@ -107,6 +125,11 @@ function Editor({ model, canEdit }: { model: Model; canEdit: boolean }) {
     save.error instanceof ApiError && save.error.details.length
       ? (save.error.details as Problem[])
       : (validate.data?.problems ?? []);
+  // The warnings of what was just checked or saved, while the editor still shows that text.
+  const warnings =
+    (validate.variables === text ? validate.data?.warnings : undefined) ??
+    (save.data?.yaml === text ? save.data.warnings : undefined) ??
+    [];
 
   useEffect(() => setText(model.yaml), [model.yaml]);
 
@@ -155,6 +178,7 @@ function Editor({ model, canEdit }: { model: Model; canEdit: boolean }) {
             Saved.
           </p>
         )}
+        <WarningList warnings={warnings} label="Warnings from the check" />
         {canEdit && dirty && (
           <Input
             aria-label="Note for the version history (optional)"
@@ -170,7 +194,8 @@ function Editor({ model, canEdit }: { model: Model; canEdit: boolean }) {
               variant="primary"
               busy={save.isPending}
               disabled={!dirty}
-              onClick={() =>
+              onClick={() => {
+                validate.reset(); // the save checks the text again
                 save.mutate(
                   { yaml: text, baseVersion: model.version, message: message || undefined },
                   {
@@ -179,8 +204,8 @@ function Editor({ model, canEdit }: { model: Model; canEdit: boolean }) {
                       setMessage("");
                     },
                   },
-                )
-              }
+                );
+              }}
             >
               Save model
             </Button>
@@ -544,6 +569,17 @@ export function ModelDetail({ config, me }: { config: AppConfig; me: Me }) {
         </Card>
       ) : (
         <div className="space-y-5">
+          {data.warnings.length > 0 && (
+            <Card className="p-4">
+              <h2 className="mb-1 text-base font-semibold">
+                {data.warnings.length === 1 ? "1 warning" : `${data.warnings.length} warnings`}
+              </h2>
+              <p className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">
+                The model works, but some numbers or access may not be what you expect.
+              </p>
+              <WarningList warnings={data.warnings} label="Model warnings" />
+            </Card>
+          )}
           <QueryBuilder key={data.updatedAt ?? "new"} model={data} config={config} me={me} />
           <Editor model={data} canEdit={me.permissions.includes("models:edit")} />
           <Versions model={data} canEdit={me.permissions.includes("models:edit")} />

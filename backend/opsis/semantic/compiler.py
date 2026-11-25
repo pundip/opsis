@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
@@ -711,6 +711,17 @@ def _measure_type(source: Source, measure: Measure) -> ColumnType:
     return ColumnType.FLOAT
 
 
+def _snapshot_scan(source: Source) -> exp.Select:
+    """`SELECT * FROM <snapshot>`: every row, with no row-level security."""
+    scan = sqlglot.parse_one("SELECT * FROM read_parquet('x')", read=DIALECT)
+    literal, table = scan.find(exp.Literal), scan.find(exp.Table)
+    assert isinstance(scan, exp.Select) and literal is not None and table is not None
+    # The path is ours (a snapshot directory), and still goes in as a literal.
+    literal.replace(exp.Literal.string(f"{source.table.path}/part-*.parquet"))
+    table.set("alias", exp.TableAlias(this=exp.to_identifier(source.model.dataset, quoted=True)))
+    return scan
+
+
 def secured_scan(source: Source, user: UserContext) -> tuple[exp.Select, bool]:
     """`SELECT * FROM <snapshot> WHERE <row-level security>` for one dataset.
 
@@ -720,12 +731,7 @@ def secured_scan(source: Source, user: UserContext) -> tuple[exp.Select, bool]:
     rule exists but does not apply to this user's role.
     """
     alias = source.model.dataset
-    scan = sqlglot.parse_one("SELECT * FROM read_parquet('x')", read=DIALECT)
-    literal, table = scan.find(exp.Literal), scan.find(exp.Table)
-    assert isinstance(scan, exp.Select) and literal is not None and table is not None
-    # The path is ours (a snapshot directory), and still goes in as a literal.
-    literal.replace(exp.Literal.string(f"{source.table.path}/part-*.parquet"))
-    table.set("alias", exp.TableAlias(this=exp.to_identifier(alias, quoted=True)))
+    scan = _snapshot_scan(source)
     conditions = []
     bypassed = False
     for index, rule in enumerate(source.model.rls):
@@ -747,6 +753,40 @@ def secured_scan(source: Source, user: UserContext) -> tuple[exp.Select, bool]:
     if conditions:
         scan = scan.where(exp.and_(*[exp.Paren(this=c) for c in conditions]))
     return scan, bypassed
+
+
+def repeated_keys(source: Source, columns: Sequence[str], examples: int) -> exp.Select:
+    """The values of `columns` (a join's key on this dataset) that are on more than
+    one row, the most repeated first. Each result row holds the key's values, how
+    many rows have them, and how many such values there are in all. A row with an
+    empty key column matches nothing in a join, so it is left out.
+
+    It reads every row, whoever asks: the caller shows the values only to people
+    who may see all of the dataset (see services.model_warnings).
+    """
+    keys = [exp.column(name, quoted=True) for name in columns]
+    rows = exp.Count(this=exp.Star())
+    return (
+        exp.select(
+            *[key.copy() for key in keys],
+            exp.alias_(rows.copy(), "_opsis_rows", quoted=True),
+            # A window runs after HAVING, so this counts the repeated values.
+            exp.alias_(exp.Window(this=rows.copy()), "_opsis_values", quoted=True),
+        )
+        .from_(_snapshot_scan(source).subquery(exp.to_identifier("keys", quoted=True)))
+        .where(
+            exp.and_(
+                *[exp.Not(this=exp.Is(this=key.copy(), expression=exp.null())) for key in keys]
+            )
+        )
+        .group_by(*[key.copy() for key in keys])
+        .having(exp.GT(this=rows.copy(), expression=exp.Literal.number(1)))
+        .order_by(
+            exp.Ordered(this=exp.column("_opsis_rows", quoted=True), desc=True),
+            *[exp.Ordered(this=key.copy()) for key in keys],
+        )
+        .limit(examples)
+    )
 
 
 def compile_query(

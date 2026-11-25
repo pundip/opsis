@@ -41,22 +41,35 @@ async function body(response: APIResponse, what: string): Promise<any> {
   return response.status() === 204 ? null : response.json();
 }
 
-export async function api(page: Page, method: "GET" | "POST" | "PUT" | "DELETE", path: string, data?: unknown): Promise<any> {
+export async function api(page: Page, method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, data?: unknown): Promise<any> {
   const headers = method === "GET" ? {} : await csrf(page);
   const response = await page.request.fetch(path, { method, headers, data });
   return body(response, `${method} ${path}`);
 }
 
-/** Upload a CSV (the one above unless given), create a connection and a dataset, and wait for the first refresh. */
-export async function createDataset(page: Page, csv: string = CSV): Promise<Fixture> {
-  const stamp = Date.now().toString(36);
-  const uploaded = await body(
+/** Upload a CSV file. The answer's `file` goes in a file connection's settings. */
+export async function uploadCsv(page: Page, name: string, csv: string): Promise<{ file: string }> {
+  return body(
     await page.request.post("api/uploads", {
       headers: await csrf(page),
-      multipart: { file: { name: `smoke_${stamp}.csv`, mimeType: "text/csv", buffer: Buffer.from(csv) } },
+      multipart: { file: { name, mimeType: "text/csv", buffer: Buffer.from(csv) } },
     }),
     "upload",
   );
+}
+
+/** Queue a refresh of a dataset and wait until it has succeeded. */
+export async function refreshDataset(page: Page, datasetId: string): Promise<void> {
+  const job = await api(page, "POST", `api/datasets/${datasetId}/refresh`, {});
+  await expect
+    .poll(async () => (await api(page, "GET", `api/jobs/${job.id}`)).status, { timeout: 60_000 })
+    .toBe("succeeded");
+}
+
+/** Upload a CSV (the one above unless given), create a connection and a dataset, and wait for the first refresh. */
+export async function createDataset(page: Page, csv: string = CSV): Promise<Fixture> {
+  const stamp = Date.now().toString(36);
+  const uploaded = await uploadCsv(page, `smoke_${stamp}.csv`, csv);
   const connection = await api(page, "POST", "api/connections", {
     name: `Smoke test ${stamp}`,
     connectorId: "file",
