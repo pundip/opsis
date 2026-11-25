@@ -28,24 +28,68 @@ pct start 120 && pct enter 120
 
 `nesting=1` and `keyctl=1` are what Docker needs inside an unprivileged container.
 
+**Update the Proxmox host first.** Current Docker releases need `lxc-pve` 6.0.0-2 or newer
+on Proxmox VE 8, or 6.0.5-2 or newer on VE 9. With an older one every container fails with
+`open sysctl net.ipv4.ip_unprivileged_port_start file: reopen fd 8: permission denied`.
+On the Proxmox host check with `apt-cache policy lxc-pve`, upgrade if needed, then
+restart the LXC (`pct reboot 120`).
+
+Give the LXC a fixed address (static, or a DHCP reservation): `BIND_ADDRESS`, the proxy
+and the firewall all depend on it.
+
 ## 2. Install Docker Engine (inside the LXC)
+
+As root (or put `sudo` in front of each command, including `tee`):
 
 ```bash
 apt-get update && apt-get install -y ca-certificates curl git
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
-apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list
+apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 docker run --rm hello-world
 ```
 
+To run Docker as your own user, `usermod -aG docker <user>` and sign in again. Members of
+the `docker` group have the equivalent of root on the LXC.
+
 ## 3. Configure Opsis
 
+**Get the code.** For a private repository, give the server a read-only deploy key. As the
+user who will own `/opt/opsis`:
+
 ```bash
-git clone https://github.com/pundip/opsis.git /opt/opsis && cd /opt/opsis
-cp .env.server.example .env
-docker compose run --rm --no-deps api generate-key   # paste the output into ENCRYPTION_KEY
+sudo install -d -o "$USER" -g "$(id -gn)" /opt/opsis
+ssh-keygen -t ed25519 -N '' -C opsis-deploy -f ~/.ssh/opsis_deploy
+cat ~/.ssh/opsis_deploy.pub
 ```
+
+Add that public key in GitHub under the repository's **Settings**, **Deploy keys**, with
+write access off. Then clone over SSH. At the first connection, accept GitHub's host key
+only if its fingerprint matches the one GitHub publishes (ED25519:
+`SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`).
+
+```bash
+export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/opsis_deploy -o IdentitiesOnly=yes"
+git clone git@github.com:pundip/opsis.git /opt/opsis && cd /opt/opsis
+git config core.sshCommand "$GIT_SSH_COMMAND"   # so that git pull uses the key
+unset GIT_SSH_COMMAND
+```
+
+**Create `.env`**, readable by you only, and generate its encryption key without showing it:
+
+```bash
+cp .env.server.example .env
+chmod 600 .env
+docker compose build
+sed -i '/^ENCRYPTION_KEY=/d' .env
+printf 'ENCRYPTION_KEY=' >> .env
+docker compose run --rm --no-deps -T api generate-key >> .env
+```
+
+Run the last three lines on a new install only: a new key cannot read connection
+passwords saved with the old one.
 
 Edit `.env` and replace every value marked `CHANGE`:
 
@@ -54,7 +98,7 @@ Edit `.env` and replace every value marked `CHANGE`:
 | `PUBLIC_BASE_URL` | `https://urlloom.com/opsis` (the address people type; its path becomes the base path) |
 | `TRUSTED_PROXIES` | the address the api sees your proxy connect from (see the note below) |
 | `BIND_ADDRESS` | the LXC's LAN IP, for example `192.168.1.50` (or `0.0.0.0`) |
-| `POSTGRES_PASSWORD` | a long random value, before the first start |
+| `POSTGRES_PASSWORD` | a long random value (for example from `openssl rand -hex 32`), before the first start |
 | `ENCRYPTION_KEY` | from `generate-key`. **Keep a copy outside the server**: without it saved connection passwords cannot be read |
 | `ADMIN_EMAIL`, `ADMIN_INITIAL_PASSWORD` | the first admin; you choose a new password at the first sign-in |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | from Google Cloud, see below |
@@ -70,6 +114,18 @@ LXC it can be the forwarding host or the Docker gateway. To check, sign in once 
 open **Audit log**: the address shown next to your sign-in should be your own
 computer's. If it shows the proxy's or the gateway's address, add that address to
 `TRUSTED_PROXIES` and restart.
+
+The audit log proves the address, not `https`. To check that the proxy also sends
+`X-Forwarded-Proto: https`, run this on the LXC with the proxy's address in place of
+`192.168.1.10` (it requests the health page itself and prints only that header):
+
+```bash
+sudo -v
+(sleep 3; curl -s -o /dev/null https://urlloom.com/opsis/healthz) & sudo timeout 15 tcpdump -lni eth0 -A 'src host 192.168.1.10 and tcp dst port 8080' 2>/dev/null | grep -ai -m1 'x-forwarded-proto'
+```
+
+Opsis believes this header from the same addresses as `X-Forwarded-For`, so the right
+address in the audit log together with `https` here means the app sees both.
 
 **Google sign-in.** In Google Cloud Console, under APIs and services, Credentials,
 create an OAuth client ID of type *Web application* with:
@@ -87,8 +143,10 @@ again after any change to the proxy or the OAuth client. It is part of the insta
    in one Google Workspace; otherwise *External*, with your test accounts added while it
    is in testing), and the client's redirect URI and JavaScript origin are exactly as
    above: `https`, no trailing slash on the origin, `/opsis` in the redirect URI.
-2. `.env` has `AUTH_MODE=full`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and
-   `GOOGLE_ALLOWED_DOMAINS` (or `GOOGLE_ALLOWED_EMAILS`); `docker compose up -d` after a change.
+2. `.env` has `AUTH_MODE=full`, `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`;
+   `docker compose up -d` after a change. `GOOGLE_ALLOWED_DOMAINS` and
+   `GOOGLE_ALLOWED_EMAILS` are optional: with both empty, any invited Google account may
+   sign in (and the "not allowed" refusal in step 6 does not apply).
 3. The LXC can reach Google: `docker compose exec api python -c "import urllib.request; print(urllib.request.urlopen('https://accounts.google.com/.well-known/openid-configuration').status)"`
    prints `200`.
 4. As an admin, invite an allowed address (Users, Invite) as a viewer.
@@ -145,13 +203,29 @@ location /opsis/ {
     proxy_buffering off;
     proxy_read_timeout 3600s;
 
-    # Match MAX_UPLOAD_MB in .env.
-    client_max_body_size 200m;
+    # A little above MAX_UPLOAD_MB in .env: the upload's form encoding adds to the file.
+    client_max_body_size 210m;
 }
 ```
 
-This is the same block the `proxytest` profile uses on a laptop
+The `proxytest` profile uses a block like this on a laptop
 (`deploy/proxytest/nginx.conf`), where it is tested by `npm run smoke`.
+
+**A proxy on another network.** The hop from the proxy to Opsis is plain HTTP. Across the
+internet, passwords, session cookies, access tokens and data travel unencrypted, even
+though visitors use `https`; a firewall rule limits who can connect but encrypts nothing.
+Link the two with a VPN (such as WireGuard or Tailscale) instead. If you forward a router
+port, set up the firewall (section 5) first.
+
+**Cloudflare in front of Nginx.** Nginx then sees Cloudflare's addresses. So that Opsis
+records the visitor's own address, add to the `location /opsis/` block a
+`set_real_ip_from` line for each range published at <https://www.cloudflare.com/ips/>,
+and `real_ip_header CF-Connecting-IP;`. Cloudflare also limits the size of an upload
+(100 MB on the Free and Pro plans), whatever `client_max_body_size` says.
+
+**A proxy that reaches Opsis by host name.** If the name also has an IPv6 address that is
+not this server, make Nginx use IPv4 only: `resolver 1.1.1.1 ipv6=off;`,
+`set $opsis_upstream name.example.org;` and `proxy_pass http://$opsis_upstream:8080;`.
 
 ### Caddy (an existing Caddy in front of several apps)
 
@@ -195,12 +269,86 @@ headers if it were trusted, and bypasses the proxy's TLS. Allow only the proxy.
 Docker publishes ports through its own iptables rules, which **bypass ufw inside the
 container**, so use the Proxmox firewall (recommended) or Docker's `DOCKER-USER` chain:
 
-- **Proxmox firewall:** on the container, Firewall, Options: enable it with *Input
-  policy* `DROP`; add a rule *IN, ACCEPT, source = proxy IP, dest. port 8080, TCP*;
-  add rules for anything else you need (SSH from your admin network). Enable the
-  firewall on the container's network device too (`firewall=1` on `net0`).
-- **Inside the LXC:** `iptables -I DOCKER-USER -p tcp --dport 8080 ! -s 192.168.1.10 -j DROP`
-  (the proxy's address), saved with `apt-get install iptables-persistent`.
+- **Proxmox firewall:** guest rules work only while the firewall is also enabled at
+  **Datacenter**, Firewall, Options. That filters the Proxmox host too, so check that you
+  will still reach it. Then on the container, Firewall, Options: enable it with *Input
+  policy* `DROP` and *DHCP* on if the LXC uses DHCP; add a rule *IN, ACCEPT, source =
+  proxy IP, dest. port 8080, TCP*; add rules for anything else you need (SSH from your
+  admin network). Enable the firewall on the container's network device too
+  (`firewall=1` on `net0`).
+- **Inside the LXC:** the two steps below. Do not install `iptables-persistent`: on
+  Ubuntu 24.04 it removes `ufw`.
+
+**Port 8080, only from the proxy.** A small service adds the rule before Docker starts.
+It matches only connections arriving on `eth0` for the published port, so containers can
+still connect out to port 8080 elsewhere. Set `PROXY_IP`, then run:
+
+```bash
+sudo tee /usr/local/sbin/opsis-firewall >/dev/null <<'EOF'
+#!/bin/sh
+# Only the reverse proxy may reach the published Opsis port.
+set -eu
+PROXY_IP=192.168.1.10
+APP_PORT=8080
+IFACE=eth0
+iptables -w -N OPSIS 2>/dev/null || true
+iptables -w -F OPSIS
+iptables -w -A OPSIS -s "$PROXY_IP" -j RETURN
+iptables -w -A OPSIS -j DROP
+iptables -w -N DOCKER-USER 2>/dev/null || true
+set -- -i "$IFACE" -p tcp -m conntrack --ctorigdstport "$APP_PORT" --ctdir ORIGINAL -j OPSIS
+iptables -w -C DOCKER-USER "$@" 2>/dev/null || iptables -w -I DOCKER-USER 1 "$@"
+EOF
+sudo chmod 755 /usr/local/sbin/opsis-firewall
+sudo tee /etc/systemd/system/opsis-firewall.service >/dev/null <<'EOF'
+[Unit]
+Description=Opsis: only the reverse proxy may reach the app port
+Wants=network-pre.target
+After=network-pre.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/opsis-firewall
+
+[Install]
+RequiredBy=docker.service
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable opsis-firewall
+sudo systemctl restart opsis-firewall
+```
+
+After changing `PROXY_IP`, run `sudo systemctl restart opsis-firewall`.
+
+**SSH, with ufw.** Allow every address you connect from before enabling it. The
+`systemd-run` line switches ufw off again after 5 minutes in case you are locked out:
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow from 192.168.1.0/24 to any port 22 proto tcp
+# If you connect from outside the LAN, allow that address too:
+# sudo ufw allow from 203.0.113.7 to any port 22 proto tcp
+sudo systemd-run --unit=opsis-ufw-rollback --on-active=5min /usr/sbin/ufw disable
+sudo ufw --force enable
+```
+
+Open a **new** SSH connection. If it works, keep the firewall on and check it:
+
+```bash
+sudo systemctl stop opsis-ufw-rollback.timer
+sudo ufw status
+```
+
+**A router port forward** (when the proxy is on another network): forward any free
+external TCP port to the LXC's address, **internal port 8080**, limited to the proxy's
+address as the source, and use the external port in the proxy's configuration. If the
+proxy then times out, `sudo iptables -L OPSIS -v -n` shows whether its packets arrive
+(`RETURN` counts the proxy's, `DROP` everyone else's), and
+`sudo tcpdump -ni eth0 'host 192.168.1.10'` shows which port they are sent to.
 
 ## 6. AI clients (MCP)
 
@@ -391,6 +539,7 @@ check of a release.
 | Symptom | Likely cause |
 |---|---|
 | The stack does not start | `docker compose logs config-check` names the setting and how to fix it |
+| No container starts: `ip_unprivileged_port_start ... permission denied` | the Proxmox host's `lxc-pve` is too old (section 1) |
 | 404 for everything under `/opsis` | the proxy strips the prefix (`proxy_pass .../;` with a path, or Caddy `handle_path`) |
 | Signed out after every click | the proxy rewrites `Host` or the path; cookies are scoped to `/opsis` |
 | The editor does not update live, or MCP hangs | the proxy buffers: `proxy_buffering off` / `flush_interval -1` |
