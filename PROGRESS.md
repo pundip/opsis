@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-25 (after M8: join warnings, leaving the editor and the guide in the app, merged)
+Last updated: 2026-11-26 (join warnings, leaving the editor and the guide in the app merged into main)
 
 ## Milestone status
 
@@ -20,6 +20,12 @@ Last updated: 2026-11-25 (after M8: join warnings, leaving the editor and the gu
 | After M8: leaving the editor | Done, awaiting review |
 | After M8: join warnings | Done, awaiting review |
 | After M8: user guide in the app | Done, awaiting review |
+
+## After M8: the three changes merged into main
+
+Join warnings, asking before the editor is left, and the guide inside the app are merged into `main`, to be deployed. The only conflicts were in `PROGRESS.md` and `docs/DECISIONS.md`, where both sides are kept. There is no new database migration or setting, so an upgrade is a pull and `docker compose up -d --build`.
+
+Verified on the combined code: 337 backend tests, `ruff check`, `ruff format --check` and `mypy --strict`; frontend typecheck, lint and 52 unit tests; the smoke tests at the root (by hand on port 8093, as your stack holds 8080: 11 passed, 2 server-mode tests skipped), under the sub-path (the same) and in server mode (12 passed, 1 local-mode test skipped).
 
 ## After M8: the user guide inside the app
 
@@ -345,7 +351,7 @@ Not verified:
 - The MCP SDK is on 2.3, a new major version, used through its low-level API.
 - The live event hub lives in the single api process; several processes would need Postgres LISTEN/NOTIFY (R5).
 - A right-hand axis showing counts can have decimal tick labels.
-- Bundle size: main chunk 912 kB (279 kB gzipped), up from 855 kB with the data router (839 kB after M8); ECharts (562 kB) and Monaco (3.4 MB) are lazy.
+- Bundle size: main chunk 914 kB (about 280 kB gzipped): 839 kB after M8, 855 kB before the data router, which added 56 kB; ECharts (562 kB) and Monaco (3.4 MB) are lazy.
 - Joins reach two hops at most. The query builder has one filter row.
 - A repeated join key is found by comparing the values as stored: two that differ only after the join casts one side's type are not seen.
 - Merge refresh does not remove rows deleted in the source (Salesforce included) until a full rebuild. One job runs at a time, so a long refresh delays a scheduled backup or email. Datasets cannot be edited after creation.
