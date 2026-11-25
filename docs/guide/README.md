@@ -4,6 +4,8 @@ Opsis is a self-hosted business intelligence tool. It copies tables from your da
 
 This guide covers everything Opsis does today (version 1, as of 25 November 2026).
 
+A running Opsis shows it too: choose **Help** in the menu, or open `<your address>/docs/guide`. There, files outside the guide (such as the server install guide) are named by their path in the source code instead of linked.
+
 ## How the pieces fit
 
 ```

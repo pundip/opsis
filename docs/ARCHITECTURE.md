@@ -62,6 +62,7 @@ Rules that keep this simple:
 - **Postgres holds metadata only.** Analytical data lives as Parquet on the `opsisdata` volume and is queried by DuckDB in-process.
 - **Plugins are folders.** Connectors in `backend/opsis/connectors/<id>/` (or `plugins/connectors/<id>/`, or an entry point), visuals in `frontend/src/visuals/<id>/`. The Docker build copies visual manifests into the backend image so the API and MCP server can list and validate them.
 - **Flags are parsed once** by the settings module. Disabled features are not mounted (routes 404, MCP tools not registered); `GET /api/config` tells the frontend what to show.
+- **The user guide has one source,** `docs/guide`, copied into the image. The api renders a page when asked (`/api/guide`, signed-in people) and the app shows it at `/docs/guide` (ADR-029).
 
 ## 2. Data flow: refresh
 

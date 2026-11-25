@@ -83,6 +83,68 @@ body {
   @apply m-0 w-auto max-w-none p-0;
 }
 
+/* The user guide (pages/Guide.tsx): HTML rendered by the api from docs/guide. */
+.guide {
+  @apply text-sm leading-relaxed;
+  overflow-wrap: break-word;
+}
+.guide > * + *,
+.guide blockquote > * + * {
+  @apply mt-3;
+}
+.guide h1 {
+  @apply text-2xl font-semibold;
+}
+.guide h2 {
+  @apply mt-8 text-lg font-semibold;
+}
+.guide h3 {
+  @apply mt-6 text-base font-semibold;
+}
+.guide :is(h1, h2, h3, h4) {
+  scroll-margin-top: 1rem;
+}
+.guide a {
+  @apply text-brand underline;
+}
+.guide :is(ul, ol) {
+  @apply space-y-1 pl-6;
+}
+.guide ul {
+  @apply list-disc;
+}
+.guide ol {
+  @apply list-decimal;
+}
+.guide li > :is(ul, ol) {
+  @apply mt-1;
+}
+.guide blockquote {
+  @apply border-l-4 border-zinc-300 pl-3 text-zinc-700 dark:border-zinc-700 dark:text-zinc-300;
+}
+.guide code {
+  @apply rounded bg-zinc-500/15 px-1 font-mono text-[0.9em];
+}
+.guide pre {
+  @apply overflow-x-auto rounded-md border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-950;
+}
+.guide pre code {
+  @apply bg-transparent p-0 text-xs;
+}
+/* A wide table scrolls on its own instead of widening the page. */
+.guide table {
+  @apply block w-max max-w-full border-collapse overflow-x-auto;
+}
+.guide :is(th, td) {
+  @apply border border-zinc-200 px-3 py-1.5 text-left align-top dark:border-zinc-800;
+}
+.guide th {
+  @apply bg-zinc-100 font-medium dark:bg-zinc-800;
+}
+.guide img {
+  @apply rounded-md border border-zinc-200 dark:border-zinc-800;
+}
+
 /* Dashboard grid while editing. */
 .react-grid-item.react-grid-placeholder {
   background: var(--brand-active);

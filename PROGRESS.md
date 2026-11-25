@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-25 (join warnings, after M8)
+Last updated: 2026-11-25 (after M8: join warnings, leaving the editor and the guide in the app, merged)
 
 ## Milestone status
 
@@ -19,6 +19,24 @@ Last updated: 2026-11-25 (join warnings, after M8)
 | After M8: legacy data | Done, awaiting review |
 | After M8: leaving the editor | Done, awaiting review |
 | After M8: join warnings | Done, awaiting review |
+| After M8: user guide in the app | Done, awaiting review |
+
+## After M8: the user guide inside the app
+
+The guide could be read only in the source code. A running Opsis now shows it at `{BASE_PATH}/docs/guide`, under **Help** in the menu (details in ADR-029):
+
+- **One source.** The image carries a copy of `docs/guide`, and the api renders a page when it is asked for (`opsis/services/user_guide.py`, `GET /api/guide`, with markdown-it-py, MIT): tables, code blocks, screenshots, and links between chapters and to headings. The page is `frontend/src/pages/Guide.tsx`.
+- **Any base path, offline.** Every link and screenshot is written with the base path, nothing is loaded from elsewhere, and the Content Security Policy is unchanged.
+- **Who may read it.** Open in local mode. With sign-in, only signed-in people: others get the sign-in page (and the page they asked for after it), and the files answer 401.
+- **Links that leave the guide** (the deployment guides, the schemas, the project README) are shown as their text with the file's path, not as links: the app does not ship those files.
+- The guide says where to find itself (contents page, and the menu table in chapter 1). Its screenshots predate the Help link.
+
+### How it was verified
+
+- **Backend:** 329 pytest tests pass (12 new, `tests/test_user_guide.py`); `ruff check`, `ruff format --check` and `mypy --strict` pass. The new tests render the real guide at the root and under /opsis and follow every link, heading anchor and screenshot. They also check how links and images are rewritten, that HTML and `javascript:` links stay text, that nothing outside the guide can be read, that local mode is open, and that with sign-in only signed-in people (an admin and a viewer) get anything.
+- **Frontend:** typecheck, lint and 52 unit tests pass (4 new).
+- **Browser:** the new `e2e/tests/guide.spec.ts` passes with the others at the root and under the sub-path (9 passed, 2 server-mode tests skipped, each) and in server mode (10 passed, 1 local-mode test skipped). It opens **Help**, follows every page, link and screenshot, moves around inside the app (to a heading in another chapter, within a page, Back to the same place, a deep link and a reload), and checks that nothing is requested outside the base path and the page reports no Content Security Policy violation. In server mode a signed-out visitor gets the sign-in page and 401s, then the page they asked for.
+- The root stage was run by hand at http://localhost:8093 in a Compose project of its own, because your stack holds port 8080; `npm run smoke -- --subpath --server` ran unchanged. The pages were also looked at in a browser: light and dark, and 768 px wide.
 
 ## After M8: warnings for two join traps
 
