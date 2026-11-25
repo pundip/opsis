@@ -106,6 +106,7 @@ Database changes are applied when the api starts.
 | The stack does not start | `docker compose logs config-check` |
 | A refresh fails | The dataset page shows why: see [When a refresh fails](03-datasets.md#when-a-refresh-fails) |
 | A dashboard tile shows an error | See [When a visual shows a problem](06-dashboards.md#when-a-visual-shows-a-problem) |
+| Totals or counts are too high when grouped or filtered by a joined field | Open the base dataset's model and look for a [warning about a repeated key](05-joins.md#repeated-keys) |
 | Scheduled refreshes do not run on a server | Is the `worker` running? |
 | The assistant cannot reach a local model | Is Ollama running, and is `OLLAMA_MODEL` pulled? |
 | Large uploads fail behind a proxy | Raise the proxy's body limit to at least `MAX_UPLOAD_MB` |
@@ -116,8 +117,9 @@ Server-specific problems (proxy, sub-path, Google sign-in, NFS) are in the [Prox
 
 - No raw SQL page. Queries go through semantic models.
 - A dataset cannot be edited after creation; recreate it with the same name.
-- Joins reach at most two datasets away, only many-to-one or one-to-one; measures come from the base dataset; uniqueness of the joined key is not checked.
-- Row-level security on a joined dataset does not hide rows of the dataset that joins to it.
+- Joins reach at most two datasets away, only many-to-one or one-to-one; measures come from the base dataset.
+- A repeated key in a joined dataset is a [warning on the model](05-joins.md#repeated-keys), not an error: dashboards still show the numbers, too high.
+- Row-level security on a joined dataset does not hide rows of the dataset that joins to it. The model [warns](05-joins.md#row-level-security-and-joins) when that dataset has no rules of its own.
 - YAML comments in models are not kept.
 - Append and merge refreshes do not remove rows deleted in the source until a full rebuild.
 - Background jobs run one at a time, so a long refresh delays other jobs.

@@ -31,7 +31,7 @@ joins:
 - A join is only part of a query when that query uses a field from it.
 - Several columns can form the key: `on: {region: region, year: year}` (up to 8).
 
-> **Check that the other side is unique.** Opsis trusts the `relationship` you write and does not check it. If `fund_details` had two rows for "Library", every Library gift would be counted twice: totals and counts would silently double. Make sure each key value appears once in the dataset you join to.
+> **Make sure the other side is unique.** Opsis trusts the `relationship` you write. If `fund_details` had two rows for "Library", every Library gift would be counted twice: totals and counts would double. Opsis [warns you](#repeated-keys) but does not stop the save or the query, so each key value must appear once in the dataset you join to.
 
 > **Match the types.** Joining a number column to a text column saves, but queries fail with "Conversion Error: Could not convert string ...". Set the types on the datasets' [column types](03-datasets.md#column-types) so both sides match. Text keys also have to match exactly, including capitals and spaces.
 
@@ -128,6 +128,19 @@ Rules:
 
 For "gifts per donor", query from the gifts dataset (grouped by donor). For measures that need the one-to-many direction, such as "donors with their total giving, including donors who gave nothing", use a database view.
 
+## Repeated keys
+
+Opsis checks every `many_to_one` and `one_to_one` join that queries can use, [two joins away](#two-joins-away) included, against the joined dataset's current data. When a key value is on more than one row, the model page shows a warning that names the key, says how many values repeat, and gives up to five of them. For example, with Library listed twice:
+
+> The join to 'fund_details' is declared many_to_one, but its key 'fund' is not unique in 'fund_details': 1 value is on more than one row, for example 'Library' (2 rows). A row of 'sample_gifts' that matches a repeated value is counted once for every row that holds it, so totals and counts are too high in queries that use fields from 'fund_details'.
+
+- **It is a warning, not an error.** The model saves and queries run, with the numbers too high, until the data or the join is fixed.
+- **It follows the data.** After the joined dataset refreshes, the next look at the base dataset's model checks the new data. Dashboards do not show the warning, so look at the model after a lookup changes.
+- Rows with an empty key are ignored, because they never match.
+- The example values are hidden from people who may not see all of that dataset (it is restricted to others, or row-level security applies to them). The count is still shown.
+
+To fix it, remove the duplicates at the source (or make a view with one row per key), or add columns to `on:` until each combination appears once.
+
 ## Database views
 
 If the data comes from one database, a view can do joins Opsis does not, including filtering and totals:
@@ -149,6 +162,8 @@ A security rule protects the dataset it is written on, **not datasets that join 
 - A query on `sample_gifts` that uses no donor field is not affected at all, even with `type: inner`.
 
 **To limit which gifts someone sees, put the rule on `sample_gifts`** (on one of its own columns), or build a view that includes the column and write the rule on that dataset. Test it with **Run as** on the model page.
+
+When a model with no rules of its own joins to a dataset that has them (directly or two joins away), Opsis [warns](04-semantic-models.md#warnings) on that model. The warning goes once the model has a rule of its own; it does not check that the rule hides the right rows.
 
 ## Changing or removing joined datasets
 

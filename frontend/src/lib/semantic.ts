@@ -30,6 +30,13 @@ export interface Field {
   format?: string | null;
 }
 
+/** Something a model saves with, but that may give surprising numbers or access. */
+export interface ModelWarning {
+  code: "duplicate_join_key" | "join_key_not_checked" | "joined_rules_not_applied";
+  path: string;
+  message: string;
+}
+
 export interface ModelDetail {
   dataset: { id: string; name: string; label: string; hasData: boolean; columns: Column[] };
   definition: Record<string, unknown>;
@@ -39,6 +46,7 @@ export interface ModelDetail {
   saved: boolean;
   version: number;
   updatedAt: string | null;
+  warnings: ModelWarning[];
 }
 
 export interface ModelVersion {
@@ -138,7 +146,10 @@ export function useRestoreModelVersion(dataset: string) {
 export function useValidateModel(dataset: string) {
   return useMutation({
     mutationFn: (yaml: string) =>
-      apiPost<{ valid: boolean; problems: Problem[] }>(`/api/models/${dataset}/validate`, { yaml }),
+      apiPost<{ valid: boolean; problems: Problem[]; warnings: ModelWarning[] }>(
+        `/api/models/${dataset}/validate`,
+        { yaml },
+      ),
   });
 }
 

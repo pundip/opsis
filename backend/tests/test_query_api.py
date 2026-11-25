@@ -351,7 +351,7 @@ def test_model_yaml_round_trip_and_validation(
     load(client, source)
 
     checked = ok(client.post("/api/models/gifts/validate", json={"yaml": MODEL_YAML}))
-    assert checked == {"valid": True, "problems": []}
+    assert checked == {"valid": True, "problems": [], "warnings": []}
     ok(client.put("/api/models/gifts", json={"yaml": MODEL_YAML}))
     exported = client.get("/api/models/gifts/export")
     assert exported.headers["content-type"].startswith("application/yaml")

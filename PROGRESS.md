@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-24 (legacy data, after M8)
+Last updated: 2026-11-25 (join warnings, after M8)
 
 ## Milestone status
 
@@ -17,6 +17,24 @@ Last updated: 2026-11-24 (legacy data, after M8)
 | M7 In-app assistant | Done, reviewed |
 | M8 More connectors and hardening | Done, awaiting review. Still to do: your part of the install check (Proxmox, real Google sign-in), and real Salesforce and Google Sheets runs with your credentials |
 | After M8: legacy data | Done, awaiting review |
+| After M8: join warnings | Done, awaiting review (branch `claude/unruffled-northcutt-320a28`) |
+
+## After M8: warnings for two join traps
+
+Both were found while writing the user guide: a lookup that lists a key twice silently doubled totals, and a row-level security rule on a joined dataset did not restrict the base dataset's rows. Query results are unchanged; the model now says so (details in ADR-028).
+
+- **Repeated join keys:** for every `many_to_one` and `one_to_one` join a query can use, two joins away included, the key columns of the joined dataset's current data are checked. A warning names the key, how many values repeat and up to 5 examples. It is checked again after a refresh (the result is cached by snapshot; nothing is stored, and the refresh job is unchanged). Examples are hidden from people who may not use that dataset or whom its row-level security applies to.
+- **Rules across joins:** a model with no rules of its own that joins to a dataset with rules gets a warning.
+- **Never an error:** Check and Save go through. Warnings show on the model page (at the top, and after Check and Save), in the model API (get, save, restore, validate) and in MCP `get_semantic_model`, `validate_model` and `patch_semantic_model`.
+- **Guide:** chapters 4, 5 and 9. The guide commit (`d92767f`) was fast-forwarded into this branch first.
+
+### How it was verified
+
+- **Backend:** 325 pytest tests pass (8 new, in `tests/test_model_warnings.py`: the doubled totals and the check after a refresh; composite keys, the 5 examples, empty keys and which relationships are checked; two joins away and restricted datasets; rules across joins; examples hidden from an editor on the page, Check, Save and over MCP; the MCP tools; a check that cannot run). `ruff check`, `ruff format --check` and `mypy --strict` pass.
+- **Frontend:** typecheck, lint and the 48 unit tests pass.
+- **Browser:** the smoke tests, with the new `e2e/tests/model-warnings.spec.ts`, pass at the root, under the sub-path and in server mode. Your stack was running on port 8080, so nothing of it was touched: the root run used this branch's own stack (project `opsis-joinwarn`, port 8091) with the same commands as `npm run smoke`, and the other two ran as `npm run smoke -- --subpath --server`. The test stacks, their volumes and image, and the test `.env` were removed afterwards.
+
+Not done: dashboards, the models list, the model file import and `describe_dataset` show no warnings.
 
 ## After M8: legacy data that does not fit its column
 
@@ -301,6 +319,7 @@ Not verified:
 - A right-hand axis showing counts can have decimal tick labels.
 - Bundle size: main chunk 839 kB (257 kB gzipped), up from 804 kB with the M8 pages; ECharts (562 kB) and Monaco (3.4 MB) are lazy.
 - Joins reach two hops at most. The query builder has one filter row.
+- A repeated join key is found by comparing the values as stored: two that differ only after the join casts one side's type are not seen.
 - Merge refresh does not remove rows deleted in the source (Salesforce included) until a full rebuild. One job runs at a time, so a long refresh delays a scheduled backup or email. Datasets cannot be edited after creation.
 - Google Sheets refresh in full only (a sheet has no change marker). Dates in sheets must be formatted as dates to be read as dates. With an OAuth app in Testing status, Google ends the sign-in after 7 days (reconnect, or publish the app). Picking a spreadsheet from the list needs the Google Drive API enabled in the OAuth client's project.
 - Emailed dashboards show numbers and short tables, not chart pictures, and use each filter's default.
