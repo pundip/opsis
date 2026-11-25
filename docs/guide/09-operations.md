@@ -126,4 +126,3 @@ Server-specific problems (proxy, sub-path, Google sign-in, NFS) are in the [Prox
 - The model page's query tool takes one filter.
 - A dashboard's owner cannot be changed in the app.
 - No second sign-in factor.
-- Leaving the dashboard editor from the menu drops unsaved changes without asking.

@@ -7,6 +7,7 @@ import { AssistantPanel } from "../components/dashboard/AssistantPanel";
 import { Canvas } from "../components/dashboard/Canvas";
 import { FiltersPanel, HistoryPanel, ItemPanel, SettingsPanel } from "../components/dashboard/EditorPanels";
 import { FiltersBar } from "../components/dashboard/FiltersBar";
+import { LeaveGuard } from "../components/LeaveGuard";
 import { Badge, Button, ErrorNote, Input } from "../components/ui";
 import { ApiError, apiGet } from "../lib/api";
 import type { AppConfig } from "../lib/config";
@@ -202,11 +203,13 @@ function Editor({ dashboard, config }: { dashboard: DashboardDetail; config: App
     return Object.values(fieldsByDataset).flat().filter((f) => !seen.has(f.ref) && seen.add(f.ref));
   }, [fieldsByDataset]);
 
-  // Keyboard: Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z, except while typing in a field.
+  // Keyboard: Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z, except while typing in a field or
+  // answering a dialog.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
       if (target.closest("input, textarea, select, .monaco-editor")) return;
+      if (document.querySelector("dialog[open]")) return;
       if (!(event.ctrlKey || event.metaKey)) return;
       const key = event.key.toLowerCase();
       if (key === "z" && !event.shiftKey) history.undo();
@@ -217,13 +220,6 @@ function Editor({ dashboard, config }: { dashboard: DashboardDetail; config: App
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [history]);
-
-  useEffect(() => {
-    if (!dirty) return;
-    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
 
   const updateItem = (next: Item) => history.set({ ...spec, items: spec.items.map((i) => (i.id === next.id ? next : i)) });
   const addVisual = (manifest: Manifest) => {
@@ -258,6 +254,7 @@ function Editor({ dashboard, config }: { dashboard: DashboardDetail; config: App
 
   return (
     <div>
+      <LeaveGuard when={dirty} />
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="mr-auto min-w-0">
           <p className="text-sm">

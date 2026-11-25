@@ -17,6 +17,16 @@ Last updated: 2026-11-24 (legacy data, after M8)
 | M7 In-app assistant | Done, reviewed |
 | M8 More connectors and hardening | Done, awaiting review. Still to do: your part of the install check (Proxmox, real Google sign-in), and real Salesforce and Google Sheets runs with your credentials |
 | After M8: legacy data | Done, awaiting review |
+| After M8: leaving the editor | Done, awaiting review |
+
+## After M8: leaving the editor
+
+- Leaving the dashboard editor with unsaved changes now asks, **Stay** or **Leave without saving**, for the menu, the breadcrumb links and the Back button. Reloading and closing the tab still get the browser's own warning. A save that finishes while the question is open lets you go (`components/LeaveGuard.tsx`).
+- The question needs `useBlocker`, which needs React Router's data router: `main.tsx` uses `createBrowserRouter` with one catch-all route and the same runtime `basename`, and `App` keeps its own `<Routes>`. The main chunk grew by 56 kB (17 kB gzipped).
+- The Home page no longer says that semantic models and dashboards are still to come.
+- Not covered: **Sign out**, and edits in the JSON tab that were never applied.
+- The user guide (chapters 6 and 9) no longer says that the editor drops changes without asking.
+- Verified: `npm run test:frontend`, and the smoke tests at the root, under /opsis and in server mode, with a new spec (`e2e/tests/unsaved-changes.spec.ts`). They ran in a Compose project of their own with the root on port 8090, because the laptop's stack held 8080. The first root run found a race (a way out taken just as the question was answered got no question); it is fixed, and a step in the spec reproduces it.
 
 ## After M8: legacy data that does not fit its column
 
@@ -299,7 +309,7 @@ Not verified:
 - The MCP SDK is on 2.3, a new major version, used through its low-level API.
 - The live event hub lives in the single api process; several processes would need Postgres LISTEN/NOTIFY (R5).
 - A right-hand axis showing counts can have decimal tick labels.
-- Bundle size: main chunk 839 kB (257 kB gzipped), up from 804 kB with the M8 pages; ECharts (562 kB) and Monaco (3.4 MB) are lazy.
+- Bundle size: main chunk 912 kB (279 kB gzipped), up from 855 kB with the data router (839 kB after M8); ECharts (562 kB) and Monaco (3.4 MB) are lazy.
 - Joins reach two hops at most. The query builder has one filter row.
 - Merge refresh does not remove rows deleted in the source (Salesforce included) until a full rebuild. One job runs at a time, so a long refresh delays a scheduled backup or email. Datasets cannot be edited after creation.
 - Google Sheets refresh in full only (a sheet has no change marker). Dates in sheets must be formatted as dates to be read as dates. With an OAuth app in Testing status, Google ends the sign-in after 7 days (reconnect, or publish the app). Picking a spreadsheet from the list needs the Google Drive API enabled in the OAuth client's project.
