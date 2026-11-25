@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opsis.invalid/spec/transform.schema.json",
+  "title": "Opsis transform",
+  "description": "DRAFT for v2 (BUILD_BRIEF_V2 section 4.2; promoted in V3, ADR-032). A dataset defined in SQL over other datasets and transforms, built into Parquet snapshots like any dataset, and read by a table of the workspace model of the same name. Either an ordered list of steps, each one SELECT that may read the step before it as `prev` (like Power Query's Applied steps), or one query. SQL may name only Opsis datasets and transforms, `prev`, and its own WITH names; it is checked twice (sqlglot, then DuckDB's own parser) and runs on a locked DuckDB connection that can read nothing but its inputs' snapshot files. Inputs are worked out from the SQL; they are not listed here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "mode"],
+  "properties": {
+    "name": {
+      "$ref": "semantic-query.schema.json#/$defs/identifier",
+      "description": "Shares one namespace with datasets. Fixed once created."
+    },
+    "label": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "description": { "type": "string", "maxLength": 2000 },
+    "mode": { "enum": ["steps", "query"] },
+    "steps": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/step" },
+      "minItems": 1,
+      "maxItems": 100
+    },
+    "query": { "$ref": "#/$defs/sql" },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Limits for one build. The server caps both (TRANSFORM_TIMEOUT_SECONDS, TRANSFORM_MEMORY_LIMIT_MB).",
+      "properties": {
+        "timeoutSeconds": { "type": "integer", "minimum": 10, "maximum": 3600 },
+        "memoryLimitMb": { "type": "integer", "minimum": 64, "maximum": 65536 }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "steps" } } },
+      "then": { "required": ["steps"], "not": { "required": ["query"] } }
+    },
+    {
+      "if": { "properties": { "mode": { "const": "query" } } },
+      "then": { "required": ["query"], "not": { "required": ["steps"] } }
+    }
+  ],
+  "$defs": {
+    "sql": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20000,
+      "description": "One SELECT (WITH ... SELECT allowed). No other statement, no table functions (read_csv, query, glob ...), no file paths or URLs, and only allow-listed functions."
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "sql"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,39}$",
+          "description": "Stable when steps are renamed or reordered, so versions diff by step."
+        },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "sql": { "$ref": "#/$defs/sql" },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "A disabled step is skipped: the next step's prev is the step before it."
+        },
+        "action": {
+          "type": "object",
+          "description": "Set when a quick action of the Table view wrote this step, so it can be shown as that action. The sql is still what runs, and may be edited (the action is then dropped).",
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "enum": ["rename", "change_type", "hide", "remove", "split", "trim", "replace_values", "fill_nulls"]
+            }
+          }
+        }
+      }
+    }
+  }
+}

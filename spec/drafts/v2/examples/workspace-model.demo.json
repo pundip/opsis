@@ -1,0 +1,177 @@
+{
+  "modelVersion": 2,
+  "label": "Workspace model",
+  "tables": {
+    "demo_regions": {
+      "source": {
+        "dataset": "demo_regions"
+      },
+      "label": "Demo regions",
+      "dimensions": {
+        "code": {
+          "column": "code",
+          "type": "string",
+          "label": "State code"
+        },
+        "state": {
+          "column": "state",
+          "type": "string",
+          "label": "State"
+        }
+      },
+      "measures": {
+        "regions": {
+          "agg": "count",
+          "label": "Regions"
+        }
+      }
+    },
+    "demo_donors": {
+      "source": {
+        "dataset": "demo_donors"
+      },
+      "label": "Demo donors",
+      "dimensions": {
+        "donor_name": {
+          "column": "donor_name",
+          "type": "string",
+          "label": "Donor"
+        },
+        "tier": {
+          "column": "tier",
+          "type": "string",
+          "label": "Tier"
+        },
+        "state_code": {
+          "column": "state_code",
+          "type": "string",
+          "label": "State code"
+        },
+        "joined": {
+          "column": "joined",
+          "type": "time",
+          "label": "Joined"
+        }
+      },
+      "measures": {
+        "donor_count": {
+          "agg": "count",
+          "label": "Donors"
+        }
+      }
+    },
+    "demo_gifts": {
+      "source": {
+        "dataset": "demo_gifts"
+      },
+      "label": "Demo gifts",
+      "dimensions": {
+        "gift_date": {
+          "column": "gift_date",
+          "type": "time",
+          "label": "Gift date"
+        },
+        "fund": {
+          "column": "fund",
+          "type": "string",
+          "label": "Fund"
+        },
+        "channel": {
+          "column": "channel",
+          "type": "string",
+          "label": "Channel"
+        },
+        "amount": {
+          "column": "amount",
+          "type": "number",
+          "label": "Amount"
+        }
+      },
+      "measures": {
+        "total_given": {
+          "agg": "sum",
+          "column": "amount",
+          "format": "currency_aud",
+          "label": "Total given"
+        },
+        "gifts": {
+          "agg": "count",
+          "label": "Gifts"
+        },
+        "donors": {
+          "agg": "count_distinct",
+          "column": "donor_id",
+          "label": "Donors"
+        },
+        "average_gift": {
+          "expr": "{total_given} / NULLIF({gifts}, 0)",
+          "format": "currency_aud",
+          "label": "Average gift"
+        }
+      },
+      "segments": {
+        "major_gifts": {
+          "filter": "amount >= 1000",
+          "label": "Gifts of $1,000 or more"
+        }
+      }
+    }
+  },
+  "relationships": {
+    "demo_donors__demo_regions": {
+      "from": {
+        "table": "demo_donors",
+        "columns": [
+          "state_code"
+        ]
+      },
+      "to": {
+        "table": "demo_regions",
+        "columns": [
+          "code"
+        ]
+      },
+      "cardinality": "many_to_one",
+      "crossFilter": "single",
+      "securityFilter": "single",
+      "active": true,
+      "joinType": "left"
+    },
+    "demo_gifts__demo_donors": {
+      "from": {
+        "table": "demo_gifts",
+        "columns": [
+          "donor_id"
+        ]
+      },
+      "to": {
+        "table": "demo_donors",
+        "columns": [
+          "donor_id"
+        ]
+      },
+      "cardinality": "many_to_one",
+      "crossFilter": "single",
+      "securityFilter": "single",
+      "active": true,
+      "joinType": "left"
+    }
+  },
+  "layout": {
+    "tables": {
+      "demo_gifts": {
+        "x": 40,
+        "y": 60
+      },
+      "demo_donors": {
+        "x": 380,
+        "y": 60
+      },
+      "demo_regions": {
+        "x": 720,
+        "y": 60
+      }
+    },
+    "zoom": 1
+  }
+}

@@ -1,0 +1,212 @@
+{
+  "specVersion": 2,
+  "title": "Giving overview (demo)",
+  "description": "Made-up gifts over the last three years, from the demo data. Delete it, and the three demo datasets, any time.",
+  "layout": {
+    "columns": 12,
+    "rowHeight": 40
+  },
+  "filters": [
+    {
+      "id": "period",
+      "type": "dateRange",
+      "field": "demo_gifts.gift_date",
+      "label": "Period",
+      "default": {
+        "relative": "last_12_months"
+      }
+    },
+    {
+      "id": "fund",
+      "type": "multiSelect",
+      "field": "demo_gifts.fund",
+      "label": "Fund"
+    }
+  ],
+  "items": [
+    {
+      "id": "total",
+      "visual": "kpi",
+      "title": "Total given",
+      "position": {
+        "x": 0,
+        "y": 0,
+        "w": 3,
+        "h": 3
+      },
+      "dataset": "demo_gifts",
+      "bindings": {
+        "value": [
+          "demo_gifts.total_given"
+        ]
+      },
+      "config": {
+        "comparison": "previous_year"
+      }
+    },
+    {
+      "id": "gift_count",
+      "visual": "kpi",
+      "title": "Gifts",
+      "position": {
+        "x": 3,
+        "y": 0,
+        "w": 3,
+        "h": 3
+      },
+      "dataset": "demo_gifts",
+      "bindings": {
+        "value": [
+          "demo_gifts.gifts"
+        ]
+      },
+      "config": {
+        "comparison": "previous_year"
+      }
+    },
+    {
+      "id": "donor_count",
+      "visual": "kpi",
+      "title": "Donors",
+      "position": {
+        "x": 6,
+        "y": 0,
+        "w": 3,
+        "h": 3
+      },
+      "dataset": "demo_gifts",
+      "bindings": {
+        "value": [
+          "demo_gifts.donors"
+        ]
+      },
+      "config": {
+        "comparison": "none"
+      }
+    },
+    {
+      "id": "average",
+      "visual": "kpi",
+      "title": "Average gift",
+      "position": {
+        "x": 9,
+        "y": 0,
+        "w": 3,
+        "h": 3
+      },
+      "dataset": "demo_gifts",
+      "bindings": {
+        "value": [
+          "demo_gifts.average_gift"
+        ]
+      },
+      "config": {
+        "comparison": "none"
+      }
+    },
+    {
+      "id": "by_month",
+      "visual": "line",
+      "title": "Given each month",
+      "position": {
+        "x": 0,
+        "y": 3,
+        "w": 8,
+        "h": 7
+      },
+      "dataset": "demo_gifts",
+      "bindings": {
+        "x": [
+          {
+            "field": "demo_gifts.gift_date",
+            "grain": "month"
+          }
+        ],
+        "y": [
+          "demo_gifts.total_given"
+        ]
+      }
+    },
+    {
+      "id": "by_channel",
+      "visual": "pie",
+      "title": "By channel",
+      "position": {
+        "x": 8,
+        "y": 3,
+        "w": 4,
+        "h": 7
+      },
+      "dataset": "demo_gifts",
+      "bindings": {
+        "category": [
+          "demo_gifts.channel"
+        ],
+        "value": [
+          "demo_gifts.total_given"
+        ]
+      },
+      "config": {
+        "donut": true
+      }
+    },
+    {
+      "id": "by_fund",
+      "visual": "bar",
+      "title": "By fund",
+      "position": {
+        "x": 0,
+        "y": 10,
+        "w": 6,
+        "h": 7
+      },
+      "dataset": "demo_gifts",
+      "bindings": {
+        "category": [
+          "demo_gifts.fund"
+        ],
+        "value": [
+          "demo_gifts.total_given"
+        ]
+      },
+      "sort": [
+        {
+          "field": "demo_gifts.total_given",
+          "dir": "desc"
+        }
+      ],
+      "config": {
+        "orientation": "horizontal"
+      }
+    },
+    {
+      "id": "by_state",
+      "visual": "table",
+      "title": "By state",
+      "position": {
+        "x": 6,
+        "y": 10,
+        "w": 6,
+        "h": 7
+      },
+      "dataset": "demo_gifts",
+      "bindings": {
+        "columns": [
+          "demo_regions.state",
+          "demo_gifts.total_given",
+          "demo_gifts.gifts",
+          "demo_gifts.donors"
+        ]
+      },
+      "sort": [
+        {
+          "field": "demo_gifts.total_given",
+          "dir": "desc"
+        }
+      ]
+    }
+  ],
+  "interactions": {
+    "crossFilter": true
+  }
+}

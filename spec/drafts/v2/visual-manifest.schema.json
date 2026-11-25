@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opsis.invalid/spec/visual-manifest.schema.json",
+  "title": "Opsis visual manifest",
+  "description": "DRAFT for v2 (promoted in V5, ADR-034). One manifest format for built-in visuals (frontend/src/visuals/<id>/manifest.json) and imported visual packages (manifest.json in an .opsisviz file, which must also pass visual-package.schema.json). The editor builds field wells from roles and the config panel from configSchema; the backend and the agent use the same file to list visuals and check dashboard items. Changes from v1: `capabilities` is a list (v1 had an object of two flags), `author` is new, and the package fields are defined here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "version", "description", "roles", "configSchema"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$",
+      "description": "Built-ins: equals the folder name. Packages: must not be a built-in id (or slicer), and should start with a short prefix of the author, for example acme_candlestick."
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 60 },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Semantic version. Dashboards record the version of a package they use."
+    },
+    "author": { "type": "string", "minLength": 1, "maxLength": 100, "description": "Built-ins say Opsis." },
+    "description": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "roles": {
+      "type": "object",
+      "description": "Field wells. Keys are role names used in items[].bindings. Use an empty object for visuals with no data (text).",
+      "propertyNames": { "pattern": "^[a-z][a-zA-Z0-9]{0,31}$" },
+      "additionalProperties": { "$ref": "#/$defs/role" }
+    },
+    "configSchema": {
+      "type": "object",
+      "description": "A JSON Schema (type object) for items[].config. Rendered with rjsf, so keep it flat and give every property a default.",
+      "required": ["type"],
+      "properties": { "type": { "const": "object" } }
+    },
+    "aiHints": {
+      "type": "string",
+      "maxLength": 600,
+      "description": "Guidance passed to the agent: when to pick this visual and its sensible limits."
+    },
+    "defaultSize": { "$ref": "#/$defs/size" },
+    "minSize": { "$ref": "#/$defs/size" },
+    "capabilities": {
+      "type": "array",
+      "description": "What the visual supports. crossFilter: clicking a mark selects values that filter other items. highlight: it can show a selection made elsewhere as highlighted marks (Edit interactions offers Highlight for it). drill: drilling through time grains on a time dimension. resize: it adapts its own height (host.requestResize).",
+      "items": { "enum": ["crossFilter", "highlight", "drill", "resize"] },
+      "uniqueItems": true
+    },
+    "sdkVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Packages: the SDK contract the bundle was written for, for example 1.0 (sdk/visuals/)."
+    },
+    "entry": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}\\.m?js$",
+      "description": "Packages: the bundle, one self-contained ES module that exports create(host)."
+    },
+    "style": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}\\.css$",
+      "description": "Packages: an optional stylesheet, applied inside the visual's frame only."
+    },
+    "icon": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}\\.(svg|png)$",
+      "description": "Packages: an optional icon for the visual picker, at most 50 kB."
+    },
+    "licence": {
+      "type": "string",
+      "maxLength": 100,
+      "description": "Packages: an SPDX identifier such as MIT, or the name of a licence file in the package."
+    },
+    "sampleData": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}\\.json$",
+      "description": "Packages: a file of sample data in the SDK's data shape, shown in the playground before any dataset is chosen."
+    },
+    "libraries": {
+      "type": "array",
+      "description": "Packages: libraries the SDK provides inside the frame instead of the bundle carrying them, so packages stay small.",
+      "items": { "enum": ["echarts@6", "d3@7"] },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "min", "max"],
+      "properties": {
+        "kind": {
+          "enum": ["dimension", "measure", "any"],
+          "description": "What may be bound. A time dimension counts as a dimension."
+        },
+        "min": { "type": "integer", "minimum": 0 },
+        "max": { "type": "integer", "minimum": 1 },
+        "label": { "type": "string", "maxLength": 40 },
+        "description": { "type": "string", "maxLength": 200 },
+        "types": {
+          "type": "array",
+          "description": "Optional restriction on the dimension type, for example [\"time\"] for a line chart x axis.",
+          "items": { "enum": ["string", "number", "boolean", "time"] },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "axis": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, each measure bound to this role may choose a value axis with {\"field\": ..., \"axis\": \"left\" | \"right\"}."
+        }
+      }
+    },
+    "size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["w", "h"],
+      "properties": {
+        "w": { "type": "integer", "minimum": 1, "maximum": 24 },
+        "h": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    }
+  }
+}

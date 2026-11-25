@@ -1,0 +1,332 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opsis.invalid/spec/dashboard.schema.json",
+  "title": "Opsis dashboard spec",
+  "description": "DRAFT for v2 (specVersion 2; promoted in V4, ADR-033). The single source of truth for a dashboard. Edited by the UI (full save) and by the agent (JSON Patch). New in v2: pages, slicer items, the Edit interactions matrix, a phone layout per item and the version of an imported visual. Items stay in one flat list (a page is a property of the item), so v1 JSON Patch paths such as /items/3/bindings keep their meaning. A specVersion 1 spec is migrated when it is read (see spec/drafts/v2/README.md). This schema checks structure only; the backend then checks ids, pages, visuals and versions, bindings against roles, config against configSchema, fields against the workspace model, slicer fields against their type, and positions against the grid of each page.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["specVersion", "title", "layout", "items"],
+  "properties": {
+    "specVersion": { "const": 2 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "description": { "type": "string", "maxLength": 2000 },
+    "theme": { "$ref": "#/$defs/theme" },
+    "pages": {
+      "type": "array",
+      "description": "Tabs at the bottom, in this order. Omit for a dashboard of one page; then items have no `page`. When present, every item names one of these pages.",
+      "items": { "$ref": "#/$defs/page" },
+      "minItems": 1,
+      "maxItems": 30
+    },
+    "filters": {
+      "type": "array",
+      "description": "The filter bar: dashboard-wide filters above every page, as in v1.",
+      "items": { "$ref": "#/$defs/filterControl" },
+      "maxItems": 30
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns", "rowHeight"],
+      "description": "The grid of every page.",
+      "properties": {
+        "columns": { "type": "integer", "minimum": 1, "maximum": 24, "default": 12 },
+        "rowHeight": { "type": "integer", "minimum": 10, "maximum": 200, "default": 40 }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/item" },
+      "maxItems": 200
+    },
+    "interactions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "crossFilter": { "type": "boolean", "default": false },
+        "matrix": {
+          "type": "object",
+          "description": "Edit interactions. For a source item (a slicer, or a visual that cross-filters), how each other item reacts to it: filter (the default for a missing pair), highlight (only where the target visual has the highlight capability) or none.",
+          "propertyNames": { "$ref": "#/$defs/id" },
+          "additionalProperties": {
+            "type": "object",
+            "propertyNames": { "$ref": "#/$defs/id" },
+            "additionalProperties": { "enum": ["filter", "highlight", "none"] }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+      "description": "Unique within the dashboard across pages, filters and items."
+    },
+    "theme": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preset": {
+          "type": "string",
+          "default": "default",
+          "description": "A named theme. \"default\" comes from branding.json."
+        },
+        "mode": { "enum": ["auto", "light", "dark"], "default": "auto" },
+        "palette": {
+          "type": "array",
+          "description": "Overrides the categorical palette of the preset.",
+          "items": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+          "minItems": 2,
+          "maxItems": 20
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 }
+      }
+    },
+    "filterControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "field"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "type": { "enum": ["select", "multiSelect", "dateRange", "search"] },
+        "field": { "$ref": "semantic-query.schema.json#/$defs/fieldRef" },
+        "label": { "type": "string", "maxLength": 80 },
+        "default": {},
+        "targets": {
+          "type": "array",
+          "description": "Item ids this filter applies to. When omitted it applies to every item the model relates to the field. The migration from specVersion 1 writes this list where the v1 rule (at most two joins) and the v2 rule would reach different items.",
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "dateRange" } } },
+          "then": { "properties": { "default": { "$ref": "semantic-query.schema.json#/$defs/range" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "multiSelect" } } },
+          "then": {
+            "properties": {
+              "default": {
+                "type": "array",
+                "items": { "$ref": "semantic-query.schema.json#/$defs/scalar" },
+                "maxItems": 1000
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "select" } } },
+          "then": { "properties": { "default": { "$ref": "semantic-query.schema.json#/$defs/scalar" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "search" } } },
+          "then": { "properties": { "default": { "type": "string", "maxLength": 200 } } }
+        }
+      ]
+    },
+    "binding": {
+      "description": "A field reference, or an object when a time dimension needs a grain or a measure needs the right-hand value axis (combo chart).",
+      "oneOf": [
+        { "$ref": "semantic-query.schema.json#/$defs/fieldRef" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["field"],
+          "properties": {
+            "field": { "$ref": "semantic-query.schema.json#/$defs/fieldRef" },
+            "grain": { "$ref": "semantic-query.schema.json#/$defs/grain" },
+            "axis": {
+              "enum": ["left", "right"],
+              "default": "left",
+              "description": "Which value axis a measure is drawn against. Only for roles that allow it (the combo chart's bars and lines)."
+            }
+          }
+        }
+      ]
+    },
+    "phone": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The phone layout (V6). Without it, tiles stack at full width in reading order (by y, then x) at their own height. Tiles with an order come first, in that order.",
+      "properties": {
+        "hidden": { "type": "boolean", "default": false },
+        "order": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "h": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Height in grid rows on a phone." }
+      }
+    },
+    "slicer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "description": "A slicer's options (V4). Its field (several for a hierarchy, top level first) is bound to the role `field`.",
+      "properties": {
+        "type": { "enum": ["list", "dropdown", "tiles", "between", "date", "hierarchy"] },
+        "dateMode": {
+          "enum": ["between", "relative", "before", "after"],
+          "default": "between",
+          "description": "Date slicers only: a range with a calendar, last N days to financial years and this financial year, or before or after a date."
+        },
+        "multi": { "type": "boolean", "default": true, "description": "list, dropdown, tiles and hierarchy: more than one value." },
+        "selectAll": { "type": "boolean", "default": true, "description": "list and hierarchy: offer Select all." },
+        "search": { "type": "boolean", "default": false },
+        "showClear": { "type": "boolean", "default": true },
+        "orientation": { "enum": ["horizontal", "vertical"], "default": "horizontal", "description": "tiles only." },
+        "sort": { "enum": ["asc", "desc", "none"], "default": "asc" },
+        "default": { "description": "The selection when the dashboard opens. Its shape depends on the type." },
+        "scope": {
+          "description": "Which items it may filter: those on its own page (the default), every page, or the pages listed. Among them, an item is filtered when the model relates it to the slicer's field and the interactions matrix does not say none.",
+          "oneOf": [
+            { "enum": ["page", "dashboard"] },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["pages"],
+              "properties": {
+                "pages": { "type": "array", "items": { "$ref": "#/$defs/id" }, "minItems": 1, "uniqueItems": true }
+              }
+            }
+          ]
+        },
+        "syncGroup": {
+          "$ref": "#/$defs/id",
+          "description": "Slicers in the same group share one selection, so one slicer can be shown on several pages."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "enum": ["list", "dropdown", "tiles"] } } },
+          "then": {
+            "properties": {
+              "default": { "type": "array", "items": { "$ref": "semantic-query.schema.json#/$defs/scalar" }, "maxItems": 1000 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "between" } } },
+          "then": {
+            "properties": {
+              "default": {
+                "type": "object",
+                "additionalProperties": false,
+                "minProperties": 1,
+                "properties": { "min": { "type": "number" }, "max": { "type": "number" } }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "date" } } },
+          "then": { "properties": { "default": { "$ref": "semantic-query.schema.json#/$defs/range" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "hierarchy" } } },
+          "then": {
+            "properties": {
+              "default": {
+                "type": "array",
+                "description": "Paths from the top level: [[\"VIC\", \"Melbourne\"], [\"NSW\"]] is Melbourne and all of NSW.",
+                "items": {
+                  "type": "array",
+                  "items": { "$ref": "semantic-query.schema.json#/$defs/scalar" },
+                  "minItems": 1,
+                  "maxItems": 6
+                },
+                "maxItems": 1000
+              }
+            }
+          }
+        }
+      ]
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "visual", "position"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "visual": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,31}$",
+          "description": "A visual id: a built-in (bar, kpi, ...), slicer, or an installed visual package."
+        },
+        "visualVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "description": "Imported visual packages only (V5): the package version this item uses. Set when the item is added; changed only by upgrading the item."
+        },
+        "title": { "type": "string", "maxLength": 200 },
+        "page": { "$ref": "#/$defs/id", "description": "The page the item is on. Required when the dashboard has pages." },
+        "position": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y", "w", "h"],
+          "properties": {
+            "x": { "type": "integer", "minimum": 0 },
+            "y": { "type": "integer", "minimum": 0 },
+            "w": { "type": "integer", "minimum": 1 },
+            "h": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "phone": { "$ref": "#/$defs/phone" },
+        "dataset": {
+          "$ref": "semantic-query.schema.json#/$defs/identifier",
+          "description": "The base table. Optional in v2: when omitted it is the table of the bound measures. Migrated items keep theirs. Slicers have none (their field names the table)."
+        },
+        "bindings": {
+          "type": "object",
+          "description": "Role name to bound fields. The backend derives the semantic query from these plus the filters and slicers.",
+          "propertyNames": { "pattern": "^[a-z][a-zA-Z0-9]{0,31}$" },
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/binding" },
+            "maxItems": 20
+          }
+        },
+        "filters": {
+          "type": "array",
+          "description": "Fixed filters for this item only.",
+          "items": {
+            "oneOf": [
+              { "$ref": "semantic-query.schema.json#/$defs/filter" },
+              { "$ref": "semantic-query.schema.json#/$defs/filterGroup" }
+            ]
+          },
+          "maxItems": 20
+        },
+        "segments": {
+          "type": "array",
+          "items": { "$ref": "semantic-query.schema.json#/$defs/fieldRef" },
+          "uniqueItems": true
+        },
+        "sort": {
+          "type": "array",
+          "items": { "$ref": "semantic-query.schema.json#/$defs/sort" },
+          "maxItems": 10
+        },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "config": {
+          "type": "object",
+          "description": "Validated against the configSchema of the visual's manifest. Slicers keep their options in `slicer` instead."
+        },
+        "slicer": { "$ref": "#/$defs/slicer" }
+      },
+      "if": { "properties": { "visual": { "const": "slicer" } } },
+      "then": {
+        "required": ["slicer", "bindings"],
+        "not": { "anyOf": [{ "required": ["config"] }, { "required": ["dataset"] }, { "required": ["visualVersion"] }] }
+      },
+      "else": { "not": { "required": ["slicer"] } }
+    }
+  }
+}

@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opsis.invalid/spec/workspace-model.schema.json",
+  "title": "Opsis workspace model",
+  "description": "DRAFT for v2 (BUILD_BRIEF_V2 section 3; promoted in V2, ADR-031). One model for the workspace: tables, the relationships between them, and where the Model view draws them. It replaces the v1 model per dataset (semantic-model.schema.json, still read to import old files). A table is named after the dataset or transform it reads, so field references (<table>.<field>) are the v1 ones. A dataset with data but no entry in `tables` is still a table: its starter definition is generated from its columns, as in v1, until someone edits it. Everything is a map keyed by name or id, never a list, so a JSON Patch path means the same thing in the whole model and in the part one person may see. YAML: models/<table>.yml holds one table (with a `table` key) and models/workspace-model.yml the rest. This schema checks structure; the backend then checks columns, expressions, paths, key types and the rules in ADR-032.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["modelVersion"],
+  "properties": {
+    "modelVersion": { "const": 2, "description": "The format of this document. v1 models have none." },
+    "label": { "type": "string", "maxLength": 200 },
+    "description": { "type": "string", "maxLength": 2000 },
+    "tables": {
+      "type": "object",
+      "propertyNames": { "$ref": "semantic-query.schema.json#/$defs/identifier" },
+      "additionalProperties": { "$ref": "#/$defs/table" },
+      "maxProperties": 500
+    },
+    "relationships": {
+      "type": "object",
+      "description": "Keyed by a stable id. A query follows the shortest path of active relationships between two tables; two shortest paths of the same length are ambiguous, and the query is refused until one of them is made inactive (ADR-031).",
+      "propertyNames": { "$ref": "#/$defs/relationshipId" },
+      "additionalProperties": { "$ref": "#/$defs/relationship" },
+      "maxProperties": 1000
+    },
+    "layout": { "$ref": "#/$defs/layout" }
+  },
+  "$defs": {
+    "relationshipId": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]{0,99}$",
+      "description": "Migrated and new relationships are named <from table>__<to table>, with _2, _3 for a second one between the same tables."
+    },
+    "columnName": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "expression": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "description": "A single SQL expression over this table's columns. Columns of a table this one reaches through many-to-one relationships may be named as table.column (quote names with spaces). Only literals, operators, CASE, CAST and a fixed list of scalar functions are allowed, as in v1."
+    },
+    "table": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "table": {
+          "$ref": "semantic-query.schema.json#/$defs/identifier",
+          "description": "Only in models/<table>.yml files, where it names the table (as `dataset` did in v1 files). Inside `tables` it must be absent or equal the key."
+        },
+        "source": {
+          "description": "What the table reads. Fixed: a table is renamed only by its label.",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["dataset"],
+              "properties": { "dataset": { "$ref": "semantic-query.schema.json#/$defs/identifier" } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["transform"],
+              "properties": { "transform": { "$ref": "semantic-query.schema.json#/$defs/identifier" } }
+            }
+          ]
+        },
+        "label": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "hidden": { "type": "boolean", "default": false, "description": "Hidden from field lists and the agent's field lists; still usable through relationships." },
+        "dateTable": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["column"],
+          "description": "Marks this table as the date table: one row per day, no gaps, the column unique. Opsis can generate one (a built-in date connector) with financial-year columns from the workspace calendar.",
+          "properties": { "column": { "$ref": "#/$defs/columnName" } }
+        },
+        "dimensions": {
+          "type": "object",
+          "propertyNames": { "$ref": "semantic-query.schema.json#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/dimension" },
+          "maxProperties": 500
+        },
+        "measures": {
+          "type": "object",
+          "propertyNames": { "$ref": "semantic-query.schema.json#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/measure" },
+          "maxProperties": 500
+        },
+        "segments": {
+          "type": "object",
+          "description": "Named filters, usable in a query's `segments` list.",
+          "propertyNames": { "$ref": "semantic-query.schema.json#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/segment" },
+          "maxProperties": 200
+        },
+        "rls": {
+          "type": "array",
+          "description": "Row-level security on this table. Every rule that applies to the user's role is ANDed. A rule also filters the tables this one filters through active relationships (ADR-032). On a transform's table, the rules of its inputs are inherited automatically; rules written here add to them.",
+          "items": { "$ref": "#/$defs/rlsRule" },
+          "maxItems": 50
+        }
+      }
+    },
+    "dimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "oneOf": [{ "required": ["column"] }, { "required": ["expr"] }],
+      "properties": {
+        "column": { "$ref": "#/$defs/columnName", "description": "A column of the table." },
+        "expr": { "$ref": "#/$defs/expression" },
+        "type": { "enum": ["string", "number", "boolean", "time"] },
+        "grains": {
+          "type": "array",
+          "description": "Time dimensions only. Defaults to every grain.",
+          "items": { "$ref": "semantic-query.schema.json#/$defs/grain" },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "timezone": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Time dimensions only, as in v1: the IANA timezone a timestamp without an offset was written in."
+        },
+        "label": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "hidden": { "type": "boolean", "default": false },
+        "format": { "type": "string", "maxLength": 40, "description": "A format name for display, for example number, percent or currency_aud." },
+        "dataCategory": {
+          "enum": ["date", "currency", "postcode", "country", "state", "city", "address", "latitude", "longitude", "url", "email"],
+          "description": "What the values are, for visuals and the agent (maps, links, formats)."
+        }
+      }
+    },
+    "measure": {
+      "type": "object",
+      "additionalProperties": false,
+      "oneOf": [
+        { "required": ["agg"], "not": { "required": ["expr"] } },
+        {
+          "required": ["expr"],
+          "not": { "anyOf": [{ "required": ["agg"] }, { "required": ["column"] }, { "required": ["filter"] }] }
+        }
+      ],
+      "properties": {
+        "agg": { "enum": ["sum", "count", "count_distinct", "avg", "min", "max"] },
+        "column": {
+          "$ref": "#/$defs/columnName",
+          "description": "A column of this table. Required for every aggregation except count, where omitting it counts rows."
+        },
+        "expr": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "description": "Arithmetic over other measures in braces. A measure of another table is written {table.measure}: {total_amount} / NULLIF({targets.target_amount}, 0)."
+        },
+        "filter": {
+          "$ref": "#/$defs/expression",
+          "description": "Makes an aggregation conditional. May use columns of tables reached many-to-one, for example donors.tier = 'Major', and segments by name in braces."
+        },
+        "relationship": {
+          "$ref": "#/$defs/relationshipId",
+          "description": "Use this relationship (usually an inactive one) instead of the active path when the query groups or filters by the table at its other end. The equivalent of Power BI's USERELATIONSHIP."
+        },
+        "format": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "A format name for display, for example number, percent or currency_aud."
+        },
+        "label": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "hidden": { "type": "boolean", "default": false }
+      }
+    },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filter"],
+      "properties": {
+        "filter": { "$ref": "#/$defs/expression" },
+        "label": { "type": "string", "maxLength": 200 }
+      }
+    },
+    "rlsRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filter"],
+      "properties": {
+        "filter": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "description": "A boolean expression over this table's columns. May reference {{ user.attributes.<name> }}, {{ user.email }} and {{ user.role }}. Example: region IN {{ user.attributes.regions }}"
+        },
+        "applies_to_roles": {
+          "type": "array",
+          "items": { "enum": ["viewer", "editor", "admin"] },
+          "uniqueItems": true,
+          "minItems": 1,
+          "default": ["viewer", "editor"]
+        },
+        "replaces": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["table"],
+          "description": "Transform tables only: this rule takes the place of the rules inherited from the input `table`, which could not be carried over automatically (ADR-032). Only someone who may edit that table's rules may write it, and it is audited. `rulesHash` is written by Opsis on save: when the input's rules change, the replacement stops counting and the table denies again until someone confirms it.",
+          "properties": {
+            "table": { "$ref": "semantic-query.schema.json#/$defs/identifier" },
+            "rulesHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          }
+        }
+      }
+    },
+    "relationshipEnd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["table", "columns"],
+      "properties": {
+        "table": { "$ref": "semantic-query.schema.json#/$defs/identifier" },
+        "columns": {
+          "type": "array",
+          "description": "Key columns; the nth column here matches the nth column at the other end.",
+          "items": { "$ref": "#/$defs/columnName" },
+          "minItems": 1,
+          "maxItems": 8
+        }
+      }
+    },
+    "relationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "$ref": "#/$defs/relationshipEnd", "description": "The many side (either side of a one-to-one): drawn with *." },
+        "to": { "$ref": "#/$defs/relationshipEnd", "description": "The one side: its key should be unique, and a warning says how many values repeat. Drawn with 1." },
+        "cardinality": {
+          "enum": ["many_to_one", "one_to_one"],
+          "default": "many_to_one",
+          "description": "Many-to-many is on the backlog (ADR-031)."
+        },
+        "crossFilter": {
+          "enum": ["single", "both"],
+          "default": "single",
+          "description": "single: filters on the one side filter the many side. both: filters on the many side also filter the one side."
+        },
+        "securityFilter": {
+          "enum": ["single", "both"],
+          "default": "single",
+          "description": "Which way row-level security travels. both needs crossFilter both (Power BI's Apply security filter in both directions)."
+        },
+        "active": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inactive relationships are drawn dashed and are used only by measures that name them."
+        },
+        "joinType": {
+          "enum": ["left", "inner"],
+          "default": "left",
+          "description": "left keeps rows of the many side with no match (their fields from the one side are empty). inner drops them, like v1 inner joins and Power BI's Assume referential integrity."
+        },
+        "description": { "type": "string", "maxLength": 1000 }
+      },
+      "if": { "required": ["securityFilter"], "properties": { "securityFilter": { "const": "both" } } },
+      "then": { "required": ["crossFilter"], "properties": { "crossFilter": { "const": "both" } } }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Where the Model view draws the tables. Stored beside the model and exported with it, but not part of its history: moving a card makes no new version.",
+      "properties": {
+        "tables": {
+          "type": "object",
+          "propertyNames": { "$ref": "semantic-query.schema.json#/$defs/identifier" },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["x", "y"],
+            "properties": {
+              "x": { "type": "number" },
+              "y": { "type": "number" },
+              "collapsed": { "type": "boolean", "default": false }
+            }
+          }
+        },
+        "zoom": { "type": "number", "minimum": 0.1, "maximum": 4, "default": 1 }
+      }
+    }
+  }
+}

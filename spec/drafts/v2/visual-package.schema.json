@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opsis.invalid/spec/visual-package.schema.json",
+  "title": "Opsis visual package manifest",
+  "description": "DRAFT for v2 (promoted in V5, ADR-034). The manifest.json of an imported visual package (.opsisviz): a visual manifest that also names its author, the SDK version and its bundle. The import checks this schema, then the package rules in ADR-034 (one entry file, sizes, flat file names, the files the manifest names exist, the id is free).",
+  "allOf": [{ "$ref": "visual-manifest.schema.json" }],
+  "required": ["sdkVersion", "entry", "author"]
+}

@@ -1,8 +1,54 @@
 # Progress
 
-Last updated: 2026-11-26 (join warnings, leaving the editor and the guide in the app merged into main)
+Last updated: 2026-11-26 (v2, milestone V0: the plan)
 
-## Milestone status
+Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2.md` (v2, milestones V0 to V7). A fresh session resumes v2 from this file, `BUILD_BRIEF_V2.md` and `docs/V2_DESIGN.md`.
+
+## v2 milestone status
+
+| Milestone | Status |
+|---|---|
+| V0 Plan | Done, awaiting review |
+| V1 BYO agent | Not started (waits for the V0 review) |
+| V2 Workspace model and Model view | Not started |
+| V3 Data prep | Not started |
+| V4 Slicers | Not started |
+| V5 Visual SDK | Not started |
+| V6 Mobile | Not started |
+| V7 Export | Not started |
+
+## v2, V0: the plan
+
+No feature code: the app behaves exactly as before. Built:
+
+- **ADR-030 to ADR-035** in `docs/DECISIONS.md` (proposed until your review): the plan and shared choices; one workspace model and its migration; row-level security through relationships and transforms, and the four gates for SQL people write; pages (yes, in V4), slicers and Edit interactions; visual packages and their sandbox; export as data per tile with a renderer service for PDF and PNG.
+- **`docs/V2_DESIGN.md`:** the detail behind each ADR (query plans and their SQL, the exact rules with examples, the tests each milestone must pass, the frame page and its policy, the export file), the MCP tools per milestone, risks and questions. Its first lines say how to review it in 30 minutes.
+- **Draft schemas in `spec/drafts/v2`:** `workspace-model` (new), `semantic-query`, `dashboard` (specVersion 2), `visual-manifest`, `visual-package` (new) and `transform` (new), with a README that lists what changes in each, the milestone that promotes it, and the migrations planned, plus six examples. They sit in a subfolder because the app loads `spec/*.schema.json` only, so editing the live schemas in place would have changed the running app.
+- **`backend/tests/test_spec_drafts.py`** (30 checks): every draft is a valid JSON Schema whose references resolve; every example validates; the queries the v1 demo dashboard makes are valid v2 queries; the demo dashboard migrates by changing only its version; the demo's three models migrate to the workspace model example under the planned rules (written out in the test, with three more cases); the nine built-in manifests fit the draft after their planned change; and 14 documents the drafts must refuse.
+- **A DuckDB check for the transform design** (throwaway, not committed), run offline in the test image against DuckDB 1.5.6: with exact allowed paths, external access off and the configuration locked, only the input files can be read, and other files, globs, URLs, extensions, `ATTACH`, `COPY` and settings changes are refused. It found two things the design now handles: `allowed_directories` would still let `COPY` write into a snapshot folder (so exact paths), and the `query()` table function runs SQL from a string (so two parsers check every query). Results are in ADR-032.
+- `BUILD_BRIEF_V2.md` is committed, next to `BUILD_BRIEF.md`.
+
+### How V0 was checked
+
+- **Backend:** 367 pytest tests pass (the 337 from before and the 30 new ones); `ruff check`, `ruff format --check` and `mypy --strict` pass. Run on the final files.
+- **Frontend:** typecheck, lint and the 52 unit tests pass (no frontend file changed).
+- **Smoke tests:** not run. V0 changes nothing the app runs: no code outside the tests, and the drafts are not loaded (the Docker image copies `spec/drafts` but nothing reads it).
+- Your stack on port 8080 was not touched: the backend checks ran in a Compose project of their own (`opsis-v0`, its own Postgres and MySQL), removed afterwards.
+
+### Docs to update
+
+The in-app guide (`docs/guide`) is not edited in v2 runs (brief v2, rule 7). What each milestone will make out of date:
+
+- **V0:** nothing (no behaviour changed).
+- **V1:** chapter 8 (the assistant: providers, your own keys, the picker); chapter 7 (admins: may use the workspace key); chapter 9 (settings).
+- **V2:** chapter 4 (one workspace model, the Model view, measures, date tables, YAML); chapter 5 (relationships instead of joins: direction, active, paths; row-level security through relationships, which removes the warning section); chapters 7 and 8 (security, MCP tools); chapter 9 (current limits).
+- **V3:** chapter 3 (the Table view, transforms), a new chapter on data prep and SQL Lab, chapter 7 (inherited rules and restrictions), chapter 8 (MCP tools).
+- **V4:** chapter 6 (pages, slicers, Edit interactions, links with slicer state).
+- **V5:** a new chapter on imported visuals and the playground; chapter 6 (the visual picker).
+- **V6:** chapter 6 (phone layout), chapter 1 (using Opsis on a phone).
+- **V7:** chapters 6 and 7 (export, its permission and audit), chapter 9 (the renderer service).
+
+## v1 milestone status
 
 | Milestone | Status |
 |---|---|
@@ -197,6 +243,9 @@ M3.5 benchmark, in one line: 5 million rows on this laptop, typical queries 77 t
 
 Run: `copy .env.local.example .env`, `docker compose up -d`, open http://localhost:8080, then Settings, Load demo data. Add `COMPOSE_PROFILES=sample` for a sample MySQL source (see README).
 
+**v2 plan (V0)**
+- `docs/V2_DESIGN.md`, ADR-030 to ADR-035, and the draft schemas with examples in `spec/drafts/v2` (not read by the app), checked by `backend/tests/test_spec_drafts.py`.
+
 **Platform (M1 and catch-up)**
 - `compose.yml` profiles: `server` (worker), `caddy`, `tunnel`, `ollama`, `proxytest`, `sample`. A one-shot `config-check` service gates `api` and `worker`.
 - `opsis/settings.py`: all flags, fail-fast rules (ADR-014), `base_path` derived from `PUBLIC_BASE_URL`, `TRUSTED_PROXIES`.
@@ -340,6 +389,7 @@ Not verified:
 - ADR-025 (new, M7): the assistant uses 17 of the 23 MCP tools (no creating, publishing or sharing from the panel); only people in the editor can use it, not access tokens; Ollama through its own chat API (`/api/chat`, with `num_ctx` on every request) rather than the OpenAI-compatible endpoint the brief names (decided at the M7 review); our own tool loop rather than the SDK's beta tool runner, so one loop serves both providers.
 - ADR-026 (new, M8): Google Sheets signs in with your own OAuth client (installed-app style, with a pasted address where Google cannot come back) or a service account, through its REST API with `google-auth` for the token, not the Google API client library; emailed dashboards carry numbers and tables, not pictures of charts; SQL Lab is not in v1 (your decision); unknown non-GET `/api` paths answer 404.
 - ADR-015: the task runner is npm scripts, not `tasks.py`; `httpx2` for the test client (approved), and now also for Ollama.
+- **v2, proposed in V0:** the draft schemas are in `spec/drafts/v2`, not edited in place in `spec/` (the app reads `spec/`, and V0 changes no behaviour); ADR-035: PDF and PNG from an optional renderer container rather than the worker container (local mode has no worker).
 
 ## Open issues and notes
 
@@ -372,11 +422,27 @@ Not verified:
 
 ## Questions for review
 
-- **Q1. Emailed dashboards carry numbers, not pictures of charts** (ADR-026): a KPI's value and its comparison, the first 10 rows of each other visual with a bar beside a chart's first measure, and a link to the dashboard. Pictures would need a headless browser in the image (a few hundred MB more, and a browser to keep patched), while tables show reliably in every mail client. Is that enough for v1?
+**v2, from V0** (details and recommendations in `docs/V2_DESIGN.md`, section 10):
+
+- **V0-Q1. Row-level security through relationships changes some results.** The brief's rule makes a rule on a joined table filter the tables that join to it, so people that rule applies to will see fewer rows on some existing dashboards (ADR-032, R2). Apply it on migration (recommended), or keep v1's behaviour per relationship until you switch it on?
+- **V0-Q2.** Measures from several tables in one visual, and USERELATIONSHIP measures, in V2 (recommended), or on the backlog?
+- **V0-Q3.** Many-to-many relationships on the backlog (recommended), or in V2 for filtering only?
+- **V0-Q4.** Who may re-declare an inherited rule on a transform: anyone who may edit the input's rules, as v1 lets editors edit rules (recommended), or admins only? And should editing row-level security become admin-only in v2?
+- **V0-Q5.** PDF and PNG from an optional renderer container (recommended) rather than Chromium in the worker image?
+- **V0-Q6.** "Propose the exact rule in V0 and test it": V0 states the rules and lists the tests; the tests come with the features (V2, V3), since nothing exists to test yet. Is that what you meant?
+- **V0-Q7.** Pages in V4: agreed? **V0-Q8.** An export cap of 25 MB by default?
+
+**v1:**
+
+- **Q1. Emailed dashboards carry numbers, not pictures of charts** (ADR-026): a KPI's value and its comparison, the first 10 rows of each other visual with a bar beside a chart's first measure, and a link to the dashboard. Pictures would need a headless browser in the image (a few hundred MB more, and a browser to keep patched), while tables show reliably in every mail client. Is that enough for v1? (V7's renderer service, if you approve it, could later add them.)
 
 ## Exact next step
 
-Your part, then the M8 review:
+1. **Review V0** (about 30 minutes; the reading order is at the top of `docs/V2_DESIGN.md`) and answer V0-Q1 to V0-Q8. Then give the go-ahead for V1.
+2. **V1, bring your own agent**, starts after that: per-person keys, the admin toggles, the OpenAI provider, the picker, usage logging, and the tests the brief lists (V2_DESIGN section 7).
+3. **Still yours from M8**, unchanged: the three steps below.
+
+Your part of M8, then the M8 review:
 
 1. **Salesforce, Developer Edition only.** In your Developer Edition org, create an External Client App as the README's Salesforce section describes (OAuth with the `api` scope, the Client Credentials Flow, running as a user who can read Account, Contact and Opportunity). Then add a **Salesforce** connection yourself in Opsis at http://localhost:8080 with the My Domain URL, the consumer key and the consumer secret, press **Test** (it should name a Developer Edition org), save it, and tell me its name. I will confirm the edition before reading anything, then test discovery, a full refresh and a merge refresh. I will not type the key or the secret myself.
 2. **Google Sheets with your own Google account.** No service account is needed. In the Google Cloud project of the OAuth client your Python scripts use, enable the Google Sheets API and the Google Drive API. Then add a **Google Sheets** connection in Opsis at http://localhost:8080: sign in with **My Google account (OAuth)**, load your `credentials.json`, save, and choose **Connect**. Google comes straight back to Opsis on the laptop. Pick a spreadsheet (a few tabs, with numbers, dates and text is best) and tell me the connection's name. I will then test discovery, the column types, a refresh and a reconnect. If your OAuth app is in Testing status, its sign-in will last 7 days.

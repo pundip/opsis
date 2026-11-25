@@ -1,0 +1,18 @@
+{
+  "dimensions": ["demo_regions.state"],
+  "measures": ["demo_gifts.total_given", "demo_gifts.donors"],
+  "filters": [
+    {
+      "or": [
+        [
+          { "field": "demo_regions.state", "op": "eq", "values": ["Victoria"] },
+          { "field": "demo_donors.tier", "op": "eq", "values": ["Major"] }
+        ],
+        [{ "field": "demo_regions.state", "op": "eq", "values": ["New South Wales"] }]
+      ]
+    },
+    { "field": "demo_gifts.gift_date", "op": "in_range", "range": { "relative": "last_fiscal_year" } }
+  ],
+  "sort": [{ "field": "demo_gifts.total_given", "dir": "desc" }],
+  "limit": 100
+}

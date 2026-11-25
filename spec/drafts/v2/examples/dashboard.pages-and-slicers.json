@@ -1,0 +1,129 @@
+{
+  "specVersion": 2,
+  "title": "Giving by state (v2 example)",
+  "description": "Shows the v2 additions on the demo data: two pages, slicers that share a selection across pages, Edit interactions, a phone layout and an imported visual.",
+  "pages": [
+    { "id": "overview", "title": "Overview" },
+    { "id": "donors", "title": "Donors" },
+    { "id": "markets", "title": "Markets" }
+  ],
+  "filters": [
+    {
+      "id": "period",
+      "type": "dateRange",
+      "field": "demo_gifts.gift_date",
+      "label": "Period",
+      "default": { "relative": "this_fiscal_year" }
+    }
+  ],
+  "layout": { "columns": 12, "rowHeight": 40 },
+  "items": [
+    {
+      "id": "s_state",
+      "visual": "slicer",
+      "page": "overview",
+      "title": "State",
+      "position": { "x": 0, "y": 0, "w": 3, "h": 8 },
+      "phone": { "order": 0, "h": 2 },
+      "bindings": { "field": ["demo_regions.state"] },
+      "slicer": { "type": "list", "multi": true, "search": true, "syncGroup": "state" }
+    },
+    {
+      "id": "s_tier",
+      "visual": "slicer",
+      "page": "overview",
+      "title": "Donor tier",
+      "position": { "x": 3, "y": 0, "w": 9, "h": 2 },
+      "bindings": { "field": ["demo_donors.tier"] },
+      "slicer": { "type": "tiles", "multi": false, "default": ["Major"], "scope": "dashboard" }
+    },
+    {
+      "id": "kpi_total",
+      "visual": "kpi",
+      "page": "overview",
+      "title": "Total given",
+      "position": { "x": 3, "y": 2, "w": 3, "h": 3 },
+      "phone": { "order": 1 },
+      "dataset": "demo_gifts",
+      "bindings": { "value": ["demo_gifts.total_given"] },
+      "config": { "comparison": "previous_year" }
+    },
+    {
+      "id": "by_month",
+      "visual": "line",
+      "page": "overview",
+      "title": "Given each month",
+      "position": { "x": 6, "y": 2, "w": 6, "h": 6 },
+      "bindings": {
+        "x": [{ "field": "demo_gifts.gift_date", "grain": "month" }],
+        "y": ["demo_gifts.total_given"]
+      }
+    },
+    {
+      "id": "by_fund",
+      "visual": "bar",
+      "page": "overview",
+      "title": "By fund",
+      "position": { "x": 3, "y": 5, "w": 3, "h": 3 },
+      "phone": { "hidden": true },
+      "bindings": { "category": ["demo_gifts.fund"], "value": ["demo_gifts.total_given"] },
+      "sort": [{ "field": "demo_gifts.total_given", "dir": "desc" }]
+    },
+    {
+      "id": "s_state_donors",
+      "visual": "slicer",
+      "page": "donors",
+      "title": "State",
+      "position": { "x": 0, "y": 0, "w": 3, "h": 8 },
+      "bindings": { "field": ["demo_regions.state"] },
+      "slicer": { "type": "dropdown", "multi": true, "syncGroup": "state" }
+    },
+    {
+      "id": "s_joined",
+      "visual": "slicer",
+      "page": "donors",
+      "title": "Joined",
+      "position": { "x": 3, "y": 0, "w": 9, "h": 2 },
+      "bindings": {
+        "field": [
+          { "field": "demo_donors.joined", "grain": "fiscal_year" },
+          { "field": "demo_donors.joined", "grain": "fiscal_quarter" }
+        ]
+      },
+      "slicer": { "type": "hierarchy", "default": [["2024-07-01"]] }
+    },
+    {
+      "id": "donor_table",
+      "visual": "table",
+      "page": "donors",
+      "title": "Donors",
+      "position": { "x": 3, "y": 2, "w": 9, "h": 8 },
+      "dataset": "demo_donors",
+      "bindings": { "columns": ["demo_donors.donor_name", "demo_donors.tier", "demo_regions.state", "demo_donors.donor_count"] }
+    },
+    {
+      "id": "prices",
+      "visual": "opsis_candlestick",
+      "visualVersion": "1.0.0",
+      "page": "markets",
+      "title": "Share price",
+      "position": { "x": 0, "y": 0, "w": 12, "h": 9 },
+      "bindings": {
+        "date": [{ "field": "stock_prices.trade_date", "grain": "day" }],
+        "open": ["stock_prices.open"],
+        "high": ["stock_prices.high"],
+        "low": ["stock_prices.low"],
+        "close": ["stock_prices.close"],
+        "volume": ["stock_prices.volume"]
+      },
+      "config": { "movingAverages": [20, 50], "showVolume": true }
+    }
+  ],
+  "interactions": {
+    "crossFilter": true,
+    "matrix": {
+      "s_tier": { "kpi_total": "none" },
+      "by_fund": { "by_month": "highlight" }
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "id": "opsis_candlestick",
+  "name": "Candlestick",
+  "version": "1.0.0",
+  "author": "Opsis",
+  "description": "Open, high, low and close for each day, with moving-average lines and an optional volume chart underneath.",
+  "sdkVersion": "1.0",
+  "entry": "candlestick.js",
+  "style": "candlestick.css",
+  "icon": "icon.svg",
+  "licence": "Apache-2.0",
+  "sampleData": "sample-data.json",
+  "libraries": ["echarts@6"],
+  "roles": {
+    "date": { "kind": "dimension", "min": 1, "max": 1, "types": ["time"], "label": "Date" },
+    "open": { "kind": "measure", "min": 1, "max": 1, "label": "Open" },
+    "high": { "kind": "measure", "min": 1, "max": 1, "label": "High" },
+    "low": { "kind": "measure", "min": 1, "max": 1, "label": "Low" },
+    "close": { "kind": "measure", "min": 1, "max": 1, "label": "Close" },
+    "volume": { "kind": "measure", "min": 0, "max": 1, "label": "Volume" }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "movingAverages": {
+        "title": "Moving averages (periods)",
+        "type": "array",
+        "items": { "type": "integer", "minimum": 2, "maximum": 400 },
+        "maxItems": 4,
+        "default": [20, 50]
+      },
+      "upColour": { "title": "Rising colour", "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$", "default": "#1a7f4b" },
+      "downColour": { "title": "Falling colour", "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$", "default": "#c0392b" },
+      "showVolume": { "title": "Volume chart", "type": "boolean", "default": true }
+    }
+  },
+  "aiHints": "For prices over time: one row per day with open, high, low and close measures (use min, max or first and last values per day). Add volume for a bar chart underneath. Bind the date with grain day; a few hundred days reads best.",
+  "defaultSize": { "w": 8, "h": 8 },
+  "minSize": { "w": 4, "h": 5 },
+  "capabilities": ["crossFilter", "highlight", "resize"]
+}

@@ -1,0 +1,39 @@
+{
+  "name": "a_codes_clean",
+  "label": "A codes, cleaned",
+  "description": "Illustrative (the column names are made up): the V3 acceptance case, a_codes joined to another table, a column cleaned and a column added.",
+  "mode": "steps",
+  "steps": [
+    { "id": "source", "name": "Source", "sql": "SELECT * FROM a_codes" },
+    {
+      "id": "trim_code",
+      "name": "Trim code",
+      "sql": "SELECT * REPLACE (trim(code) AS code) FROM prev",
+      "action": { "type": "trim", "column": "code" }
+    },
+    {
+      "id": "blank_descriptions",
+      "name": "Empty descriptions to nothing",
+      "sql": "SELECT * REPLACE (nullif(description, '') AS description) FROM prev",
+      "action": { "type": "replace_values", "column": "description", "from": "", "to": null }
+    },
+    {
+      "id": "categories",
+      "name": "Add the category",
+      "sql": "SELECT p.*, c.category FROM prev AS p LEFT JOIN code_categories AS c ON c.code = p.code"
+    },
+    {
+      "id": "prefix",
+      "name": "Code prefix",
+      "sql": "SELECT *, upper(left(code, 2)) AS code_prefix FROM prev"
+    },
+    {
+      "id": "drop_internal",
+      "name": "Remove internal columns",
+      "sql": "SELECT * EXCLUDE (internal_note) FROM prev",
+      "enabled": false,
+      "action": { "type": "remove", "columns": ["internal_note"] }
+    }
+  ],
+  "build": { "timeoutSeconds": 300 }
+}
