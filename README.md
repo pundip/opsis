@@ -4,6 +4,8 @@ A self-hosted, AI-native business intelligence platform. Open source, Docker-bas
 
 **Status:** version 1 is feature-complete and in its final install checks. You can connect to CSV or Excel files, PostgreSQL, MySQL, Google Sheets and Salesforce, pull tables into local storage on demand or on a schedule, define a semantic model for each dataset (dimensions, measures, joins, row-level security), build dashboards with a drag-and-drop editor, let an AI agent do the same through the built-in MCP server or the assistant in the editor, and, on a server, sign in (local accounts and Google), share dashboards, publish read-only share links, have dashboards emailed, and take nightly backups. See [PROGRESS.md](PROGRESS.md).
 
+**How to use it:** the [user guide](docs/guide/README.md) walks through connections, datasets, joins, semantic models, dashboards, sharing, AI agents and running an install, with screenshots.
+
 ## Quick start
 
 You need Docker (Docker Desktop on Windows, Docker Engine on Linux) and Git.
@@ -110,7 +112,7 @@ Open **Dashboards**, name a new one, and you are in the editor:
 - **Add** a visual from the toolbar: table, KPI card, bar, line, area, combo, pie or donut, scatter, or text. Drag a tile to move it and pull its corner to resize it. On a combo chart each measure can use the left or the right value axis (for example amount as bars on the left, number of gifts as a line on the right).
 - Click a tile to select it. The **Visual** tab picks its dataset, puts fields into the visual's roles (for example Category, Values, Split by), sets sort and row limit, and shows the visual's own options. Drag a field from the list into a role, or between roles; a role only takes fields that fit it. Each role also has an **Add a field** menu.
 - **Filters** adds controls above the dashboard: a dropdown, a multi-select, a date range (including "This financial year") or a text search.
-- **Dashboard** holds the title, grid and theme (auto, light or dark). **History** lists every saved version, shows what changed, and can restore one. **JSON** is the whole dashboard as text; Apply checks it first and reports each problem with its path.
+- **Dashboard** holds the title, description, colour mode (auto, light or dark) and whether clicking a value filters the other visuals. **History** lists every saved version, shows what changed, and can restore one. **JSON** is the whole dashboard as text (the grid size is set there); Apply checks it first and reports each problem with its path.
 - **Undo** and **Redo** (Ctrl+Z, Ctrl+Y) cover everything since you opened the editor. **Save** makes a new version. **Publish** makes the saved version the one viewers see.
 
 When viewing, click a bar, slice, point or table value to filter the other visuals by it, change the time grain on a time chart (year to day), and switch any chart to a table of the same data. A tile shows "RLS bypassed" when row-level security rules exist on its data but do not apply to your role. With email on, **Email me** sends you the dashboard on a schedule (see Email below).
@@ -325,6 +327,7 @@ In the Claude desktop app, `.claude/launch.json` defines two launch configuratio
 
 ## Documentation
 
+- [docs/guide/](docs/guide/README.md): the user guide, with screenshots
 - [BUILD_BRIEF.md](BUILD_BRIEF.md): the product spec and milestones
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components, data flows, auth flows
 - [docs/DECISIONS.md](docs/DECISIONS.md): decision log
