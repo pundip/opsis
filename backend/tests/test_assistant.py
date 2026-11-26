@@ -206,6 +206,28 @@ def models_answer(request: httpx2.Request) -> httpx2.Response:
     return httpx2.Response(200, json={"object": "list", "data": data})
 
 
+def short_answer(request: httpx2.Request, body: dict[str, Any]) -> httpx2.Response:
+    """A request that is not streamed (the Account page's test message), answered as
+    each API answers it."""
+    if request.url.path.endswith("/v1/messages"):
+        return httpx2.Response(200, json={
+            "id": "msg_short", "type": "message", "role": "assistant", "model": body["model"],
+            "content": [{"type": "text", "text": "OK"}], "stop_reason": "max_tokens",
+            "stop_sequence": None, "usage": {"input_tokens": 12, "output_tokens": 1},
+        })  # fmt: skip
+    return httpx2.Response(200, json={
+        "id": "resp_short", "object": "response", "created_at": 1767225600,
+        "model": body["model"], "status": "completed", "parallel_tool_calls": True,
+        "tool_choice": "auto", "tools": [],
+        "output": [{"type": "message", "id": "msg_short", "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "OK", "annotations": []}]}],
+        "usage": {"input_tokens": 11, "input_tokens_details": {"cached_tokens": 0},
+                  "output_tokens": 2, "output_tokens_details": {"reasoning_tokens": 0},
+                  "total_tokens": 13},
+    })  # fmt: skip
+
+
 def ollama_lines(
     parts: list[tuple[Any, ...]], stop: str = "stop", *, prompt_tokens: int = 900
 ) -> bytes:
@@ -255,6 +277,8 @@ class FakeModel:
         self.headers.append(dict(request.headers))
         if self.fail is not None:
             return httpx2.Response(self.fail[0], json=self.fail[1])
+        if body.get("stream") is not True:  # a test message: one short answer
+            return short_answer(request, body)
         assert self.turns, "the model was called more often than scripted"
         parts, stop = self.turns.pop(0)(body)
         # A model call goes where its provider sends it, whatever this fake was made for.

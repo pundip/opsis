@@ -70,7 +70,9 @@ def byo_on(db: Session) -> bool:
     return bool(workspace_settings.get(db, workspace_settings.BYO_KEYS))
 
 
-def _require_byo(db: Session) -> None:
+def require_byo(db: Session) -> None:
+    """Personal keys switched off: kept, but neither added nor sent anywhere (tests
+    included). Their owners may still rename and delete them."""
     if not byo_on(db):
         raise ApiError(
             409,
@@ -128,7 +130,7 @@ def add(
     key: str,
     default_model: str | None,
 ) -> UserApiKey:
-    _require_byo(db)
+    require_byo(db)
     if provider not in PROVIDERS:
         raise ApiError(422, "invalid_request", "The provider must be anthropic or openai.")
     secret = key.strip()
@@ -242,6 +244,57 @@ def record_test(db: Session, row: UserApiKey, ok: bool, message: str) -> None:
     row.last_test_ok = ok
     row.last_test_message = message[:1000]
     row.last_tested_at = datetime.now(UTC)
+    db.commit()
+
+
+def record_test_message(
+    db: Session,
+    actor: Principal,
+    row: UserApiKey,
+    model: str,
+    *,
+    ok: bool,
+    message: str,
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    """A test message's result. It is billed, so its tokens count as use of the key,
+    and it is audited."""
+    now = datetime.now(UTC)
+    row.last_test_ok = ok
+    row.last_test_message = message[:1000]
+    row.last_tested_at = now
+    if ok:
+        row.last_used_at = now
+        db.add(
+            AssistantUsage(
+                user_id=row.user_id,
+                key_id=row.id,
+                key_label=row.label,
+                source="own",
+                provider=row.provider,
+                model=model[:200],
+                input_tokens=input_tokens,
+                cached_tokens=0,
+                output_tokens=output_tokens,
+            )
+        )
+    audit.record(
+        db,
+        action="assistant.key_test_message",
+        actor=actor,
+        target_type="api_key",
+        target_id=str(row.id),
+        detail={
+            "provider": row.provider,
+            "label": row.label,
+            "last4": row.last4,
+            "model": model,
+            "ok": ok,
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+        },
+    )
     db.commit()
 
 

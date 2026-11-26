@@ -321,14 +321,23 @@ The only tools needed on the host are Docker and Node.js (for the frontend tests
 | Command | What it does |
 |---|---|
 | `npm run dev` | Hot reload: API with auto-restart, Vite dev server on http://localhost:5173 |
-| `npm run test:backend` | pytest in the dev image, against a throwaway `opsis_test` database and the sample MySQL |
+| `npm test` | The three below, then `npm run test:scripts` |
+| `npm run test:backend` | pytest in the dev image, in a test stack of its own with its own Postgres and the sample MySQL. Arguments after `--` go to pytest |
 | `npm run lint:backend` | ruff and mypy (strict) |
 | `npm run test:frontend` | TypeScript, ESLint and Vitest |
-| `npm run smoke` | Playwright browser tests at http://localhost:8080, then behind nginx at http://localhost:8088/opsis/, then against a throwaway server-mode stack with sign-in, a fake Google, share links and access tokens. Add `-- --no-build` to skip the image rebuild, or `-- --root`, `-- --subpath`, `-- --server` for one stage |
+| `npm run test:scripts` | The guard that keeps tests off your stack (see below) |
+| `npm run smoke` | Playwright browser tests at http://localhost:18080, then behind nginx at http://localhost:18088/opsis/, then in server mode at http://localhost:18089/opsis/ with sign-in, a fake Google, share links and access tokens. Add `-- --no-build` to skip the image rebuild, `-- --root`, `-- --subpath` or `-- --server` for one stage, or `-- --dry-run` to check the test stacks' settings and start nothing |
 | `npm run lock:backend` | Regenerate `backend/uv.lock` after editing `pyproject.toml` |
-| `node scripts/benchmark.mjs --rows 10000000` | Load a synthetic dataset into the running stack, time ingestion, queries and a typical dashboard, then remove it |
+| `node scripts/benchmark.mjs --rows 10000000` | Start a test stack of its own (http://localhost:18083), load a synthetic dataset, time ingestion, queries and a typical dashboard, then remove the stack. `--keep` leaves it running; `--remove` removes it later |
 
 Run `npm install` inside `frontend/` once before the frontend commands. The smoke tests install their own dependencies and a Chromium browser the first time (in `e2e/`).
+
+**The tests never touch your own stack** (Compose project `opsis` on port 8080) **and never read your `.env`.** Each command above that needs containers starts a test stack of its own (`scripts/test-stack.mjs`): its own Compose project (`opsis-test`, `opsis-test-server`, `opsis-test-backend`, `opsis-test-bench`), an env file written for it from `.env.local.example` or `.env.server.example` with fresh random secrets, its own ports (the usual ones plus 10000) and its own image tag. It starts from nothing and is removed afterwards, data and all. A test stack that would use the project `opsis`, port 8080 or your `.env`, or that Compose would set up so it could reach your stack, is refused before anything starts, with the reason. Two settings change the defaults, for example in a second checkout whose tests must keep off this one's:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `OPSIS_TEST_PROJECT` | `opsis-test` | The test projects' name (`-server`, `-backend` and `-bench` are added) |
+| `OPSIS_TEST_PORT_OFFSET` | `10000` | Added to each usual port: 18080 for the root, 18088 for the sub-path, 18089 for server mode |
 
 On Windows, hot reload uses file polling. It is noticeably faster when the repository lives inside the WSL filesystem.
 

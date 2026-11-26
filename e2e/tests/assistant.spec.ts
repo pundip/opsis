@@ -87,6 +87,7 @@ test("people's own Anthropic and OpenAI keys build dashboards, and are never sho
   const claude = `Smoke Claude ${stamp}`;
   const openai = `Smoke OpenAI ${stamp}`;
   const wrong = `Smoke wrong ${stamp}`;
+  const broke = `Smoke no credit ${stamp}`;
   let fixture: Fixture | undefined;
   const dashboards: string[] = [];
   const addKey = async (provider: string, name: string, key: string, model = "") => {
@@ -117,6 +118,19 @@ test("people's own Anthropic and OpenAI keys build dashboards, and are never sho
     await keys.getByLabel("Default model").fill("claude-opus-5-5");
     await keys.getByRole("button", { name: "Save", exact: true }).click();
     await expect(keys.getByRole("row", { name: new RegExp(claude) })).toContainText("claude-opus-5-5");
+    // "Send a test message": one short billed request, which shows the account can pay.
+    await page.getByRole("button", { name: `Send a test message with ${claude}` }).click();
+    await expect(
+      page.getByRole("status").filter({ hasText: `${claude}: The key works, and its account paid for a test message: claude-opus-5-5 answered (12 tokens in, 1 out).` }),
+    ).toBeVisible();
+    // A key whose account has no credit passes the free Test, but not the test message.
+    await addKey("anthropic", broke, `sk-ant-api03-broke-${stamp}-${"E".repeat(24)}`);
+    await expect(page.getByRole("status").filter({ hasText: `${broke}: The key works: it may use 2 models.` })).toBeVisible();
+    await page.getByRole("button", { name: `Send a test message with ${broke}` }).click();
+    await expect(page.getByRole("status").filter({ hasText: `${broke}: Anthropic answered with an error (400): Your credit balance is too low` })).toBeVisible();
+    await expect(keys.getByRole("row", { name: new RegExp(broke) })).toContainText("Refused");
+    await page.getByRole("button", { name: `Delete ${broke}` }).click();
+    await expect(keys.getByRole("row", { name: new RegExp(broke) })).toHaveCount(0);
     const listing = await page.request.get("api/account/api-keys");
     const shown = await listing.text();
     expect(shown).not.toContain(claudeKey);

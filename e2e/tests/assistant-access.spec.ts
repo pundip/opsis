@@ -83,5 +83,25 @@ test("own keys answer for their owners; the workspace key is granted and taken a
     expect(await askToBuild(bob.page, fixture.dataset)).toContain(`key ending ${bobKey.slice(-4)}`);
   });
 
+  await test.step("personal keys switched off: Ann's key is kept, not used, and she can delete it", async () => {
+    await page.goto("users");
+    await page.getByRole("tab", { name: "AI assistant" }).click();
+    await page.getByLabel("People may use their own Anthropic and OpenAI API keys in the assistant").uncheck();
+    try {
+      await ann.page.goto("account");
+      await expect(ann.page.getByRole("note").filter({ hasText: "An admin has switched off personal API keys" })).toContainText("You can still delete them.");
+      const keys = ann.page.getByRole("table", { name: "Your API keys" });
+      await expect(keys.getByRole("row", { name: /Ann's Claude/ })).toContainText(`ending ${annKey.slice(-4)}`);
+      // Nothing sends it anywhere, tests included, and no new key can be added.
+      await expect(ann.page.getByRole("button", { name: "Test Ann's Claude" })).toHaveCount(0);
+      await expect(ann.page.getByRole("button", { name: "Send a test message with Ann's Claude" })).toHaveCount(0);
+      await expect(ann.page.getByRole("button", { name: "Add key", exact: true })).toHaveCount(0);
+      await ann.page.getByRole("button", { name: "Delete Ann's Claude" }).click();
+      await expect(keys).toHaveCount(0);
+    } finally {
+      await api(page, "PUT", "api/assistant-access/settings", { byoKeys: true });
+    }
+  });
+
   for (const found of problems) expect(found).toEqual([]);
 });

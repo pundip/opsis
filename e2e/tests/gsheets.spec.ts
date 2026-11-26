@@ -1,13 +1,14 @@
 // Google Sheets through your own Google account (OAuth), against a fake Google
-// (e2e/fake-google.mjs on port 9700). At the root, local mode: Google comes straight
-// back to Opsis. Under /opsis and in server mode: you paste the address Google sent
-// the browser to. Then a spreadsheet is picked and refreshed; Google stops accepting
-// the sign-in (invalid_grant), the connection asks to be reconnected, and is.
+// (e2e/fake-google.mjs, published by the test stack: OPSIS_FAKE_GOOGLE_URL). At the
+// root, local mode: Google comes straight back to Opsis. Under /opsis and in server
+// mode: you paste the address Google sent the browser to. Then a spreadsheet is
+// picked and refreshed; Google stops accepting the sign-in (invalid_grant), the
+// connection asks to be reconnected, and is.
 import { expect, request, test, type BrowserContext, type Locator, type Page } from "@playwright/test";
-import { baseURL, serverMode } from "../playwright.config";
+import { baseURL, fakeGoogleURL, fakeMailURL, serverMode } from "../playwright.config";
 import { api, watchPage } from "./helpers";
 
-const FAKE = "http://localhost:9700";
+const FAKE = fakeGoogleURL;
 const CREDENTIALS = JSON.stringify({
   installed: {
     client_id: "smoke-client.apps.googleusercontent.com",
@@ -25,7 +26,7 @@ const direct = !new URL(baseURL).pathname.startsWith("/opsis");
 async function connectGoogle(page: Page, context: BrowserContext, panel: Locator, button: string): Promise<void> {
   if (direct) {
     await panel.getByRole("button", { name: button }).click();
-    await page.waitForURL(/localhost:9700\/o\/oauth2\/auth/);
+    await page.waitForURL((url) => url.href.startsWith(`${FAKE}/o/oauth2/auth`));
     await page.getByRole("button", { name: "Allow" }).click();
     await page.waitForURL(/connections\?google=/);
     return;
@@ -106,7 +107,7 @@ test("a Google Sheets connection signs in with my own Google account", async ({ 
         const mailbox = await request.newContext();
         await expect
           .poll(async () => {
-            const messages = (await (await mailbox.get("http://localhost:9600/messages")).json()) as { subject: string }[];
+            const messages = (await (await mailbox.get(`${fakeMailURL}/messages`)).json()) as { subject: string }[];
             return messages.some((m) => m.subject === `Reconnect ${name} in Opsis`);
           })
           .toBe(true);

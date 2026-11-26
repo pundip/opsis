@@ -1,14 +1,26 @@
-// Smoke tests against a running stack. OPSIS_URL chooses where:
-//   http://localhost:8080/         the root
-//   http://localhost:8088/opsis/   behind the proxytest profile
-// `npm run smoke` at the repository root runs them at the root and the sub-path,
-// then against a server-mode stack with sign-in (OPSIS_MODE=server).
+// Smoke tests against a test stack. `npm run smoke` at the repository root starts
+// each one (scripts/test-stack.mjs) and sets OPSIS_URL:
+//   http://localhost:18080/         the root
+//   http://localhost:18088/opsis/   behind the proxytest nginx
+//   http://localhost:18089/opsis/   server mode, with sign-in (OPSIS_MODE=server)
+// They never run against your own stack: port 8080 is refused.
 import { defineConfig } from "@playwright/test";
 import { STATE } from "./global-setup";
 
-const raw = process.env.OPSIS_URL ?? "http://localhost:8080/";
+const raw = process.env.OPSIS_URL ?? "http://localhost:18080/";
+if (new URL(raw).port === "8080") {
+  throw new Error(
+    `Refusing to run the smoke tests against ${raw}: port 8080 is your own stack's. Run npm run smoke, which starts a test stack of its own.`,
+  );
+}
 // A trailing slash matters: the tests navigate with relative paths.
 export const baseURL = raw.endsWith("/") ? raw : `${raw}/`;
+/** The fake Google (e2e/fake-google.mjs) and the fake mail server's messages, as the
+ * browser reaches them on the test stack. */
+export const fakeGoogleURL = process.env.OPSIS_FAKE_GOOGLE_URL ?? "http://localhost:19700";
+export const fakeMailURL = process.env.OPSIS_FAKE_MAIL_URL ?? "http://localhost:19600";
+/** A set-password link in an email: the stack's own address, then the token. */
+export const SET_PASSWORD_LINK = new RegExp(`${baseURL.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}set-password/[A-Za-z0-9_-]+`);
 /** "server" when the stack under test has sign-in, share links and tokens. */
 export const serverMode = process.env.OPSIS_MODE === "server";
 

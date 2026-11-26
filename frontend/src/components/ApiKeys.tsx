@@ -12,6 +12,7 @@ import {
   useChangeKey,
   useDeleteKey,
   useKeyModels,
+  useSendTestMessage,
   useTestKey,
 } from "../lib/assistant";
 import { timeAgo } from "../lib/format";
@@ -176,6 +177,7 @@ function Usage({ rows }: { rows: UsageRow[] }) {
 export function ApiKeys() {
   const keys = useApiKeys();
   const test = useTestKey();
+  const message = useSendTestMessage();
   const remove = useDeleteKey();
   const [editing, setEditing] = useState<string | null>(null);
   const [result, setResult] = useState<KeyTest | null>(null);
@@ -187,12 +189,15 @@ export function ApiKeys() {
         Your own Anthropic or OpenAI API keys, for the assistant in the dashboard editor. A key is used only for your requests, and
         its use is counted below.
         {data?.workspaceKey && " You may also use the workspace's Claude key."}
-        {data?.ollama && " Ollama is available too."}
+        {data?.ollama && " Ollama is available too."} <strong>Test</strong> checks that the provider accepts a key, for free.{" "}
+        <strong>Send a test message</strong> also checks that its account can pay, with one short request to its default model,
+        which costs a fraction of a cent.
       </p>
-      <ErrorNote error={keys.error ?? test.error ?? remove.error} />
+      <ErrorNote error={keys.error ?? test.error ?? message.error ?? remove.error} />
       {data && !data.enabled && (
         <p role="note" className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm dark:border-amber-900 dark:bg-amber-950/40">
-          An admin has switched off personal API keys in this workspace. Your keys are kept, but not used, and new ones cannot be added.
+          An admin has switched off personal API keys in this workspace. Your keys are kept, but not used, and new ones cannot be added. You
+          can still delete them.
         </p>
       )}
       {result && <TestResult result={result} />}
@@ -233,14 +238,27 @@ export function ApiKeys() {
                   </td>
                   <td className={TD}>{apiKey.lastUsedAt ? timeAgo(apiKey.lastUsedAt) : "Never"}</td>
                   <td className={`${TD} whitespace-nowrap text-right`}>
-                    <Button
-                      variant="ghost"
-                      aria-label={`Test ${apiKey.label}`}
-                      busy={test.isPending && test.variables === apiKey.id}
-                      onClick={() => test.mutate(apiKey.id, { onSuccess: setResult })}
-                    >
-                      Test
-                    </Button>
+                    {data.enabled && (
+                      <>
+                        <Button
+                          variant="ghost"
+                          aria-label={`Test ${apiKey.label}`}
+                          busy={test.isPending && test.variables === apiKey.id}
+                          onClick={() => test.mutate(apiKey.id, { onSuccess: setResult })}
+                        >
+                          Test
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          aria-label={`Send a test message with ${apiKey.label}`}
+                          title="One short request to the key's default model, to check that its account can pay. It costs a fraction of a cent."
+                          busy={message.isPending && message.variables === apiKey.id}
+                          onClick={() => message.mutate(apiKey.id, { onSuccess: setResult })}
+                        >
+                          Send a test message
+                        </Button>
+                      </>
+                    )}
                     <Button variant="ghost" aria-label={`Edit ${apiKey.label}`} onClick={() => setEditing(editing === apiKey.id ? null : apiKey.id)}>
                       Edit
                     </Button>

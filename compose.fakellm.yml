@@ -1,5 +1,5 @@
 # The smoke tests' settings at the root and the sub-path (scripts/smoke.mjs adds
-# this file, then brings your stack back without it): the assistant answers from
+# this file to a test stack of its own; never to yours): the assistant answers from
 # e2e/fake-llm.mjs, a scripted model, instead of Ollama, Anthropic and OpenAI; refresh schedules and
 # backups are on, so their pages are checked too; and Google Sheets talks to
 # e2e/fake-google.mjs, a stand-in for Google's sign-in, Sheets and Drive.
@@ -34,4 +34,4 @@ services:
     volumes:
       - ./e2e/fake-google.mjs:/fake/fake-google.mjs:ro
     ports:
-      - "127.0.0.1:9700:9700"
+      - "127.0.0.1:${FAKE_GOOGLE_PORT:-9700}:9700"

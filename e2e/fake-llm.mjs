@@ -12,6 +12,11 @@
 // "no key" for Ollama), so a test can see whose key answered. Anything else gets
 // a one-line answer. A key with "bad" in it is refused, as a provider would.
 //
+// A request that is not streamed is the Account page's "Send a test message": one
+// short request, answered "OK" with its usage. A key with "broke" in it is accepted
+// (its models list works) but its account cannot pay, so the test message gets the
+// provider's no-credit error: Anthropic's 400, OpenAI's 429 insufficient_quota.
+//
 // It also refuses what the real Claude API refuses for current models, so a
 // regression in the request shows up here: forced tool use, thinking turned
 // off or given a budget, and sampling parameters. For OpenAI it insists on
@@ -37,10 +42,47 @@ function parse(text) {
   }
 }
 
-/** The key a call carried (both SDKs send it as a bearer token), or null. */
+/** The key a call carried (x-api-key, or a bearer token), or null. */
 function keyOf(req) {
+  if (req.headers["x-api-key"]) return req.headers["x-api-key"];
   const value = req.headers.authorization ?? "";
   return value.startsWith("Bearer ") ? value.slice(7) : null;
+}
+
+function refusedKey(key, anthropic) {
+  return anthropic
+    ? { type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }
+    : { error: { message: `Incorrect API key provided: ${key.slice(0, 3)}****${key.slice(-4)}.`, type: "invalid_request_error", code: "invalid_api_key" } };
+}
+
+/** "Send a test message": one short request, not streamed, which the provider bills. */
+function testMessage(req, res, body, anthropic) {
+  const key = keyOf(req) ?? "";
+  const send = (status, data) => {
+    res.writeHead(status, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(data));
+  };
+  const invalid = (message) =>
+    send(400, anthropic ? { type: "error", error: { type: "invalid_request_error", message } } : { error: { message, type: "invalid_request_error" } });
+  if (key.includes("bad")) return send(401, refusedKey(key, anthropic));
+  if (key.includes("broke")) {
+    return anthropic
+      ? invalid("Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.")
+      : send(429, { error: { message: "You exceeded your current quota, please check your plan and billing details.", type: "insufficient_quota", code: "insufficient_quota" } });
+  }
+  if (anthropic) {
+    if (!Number.isInteger(body.max_tokens) || body.max_tokens < 1) return invalid("max_tokens: Field required");
+    const usage = { input_tokens: 12, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+    return send(200, { id: `msg_${++counter}`, type: "message", role: "assistant", model: body.model, content: [{ type: "text", text: "OK" }], stop_reason: "max_tokens", stop_sequence: null, usage });
+  }
+  if (body.store !== false) return invalid("the fake model expects store: false (nothing kept at OpenAI)");
+  // The Responses API takes no limit below 16.
+  if (!Number.isInteger(body.max_output_tokens) || body.max_output_tokens < 16) {
+    return invalid(`Invalid 'max_output_tokens': integer below minimum value. Expected a value >= 16, but got ${body.max_output_tokens} instead.`);
+  }
+  const message = { type: "message", id: `msg_${++counter}`, role: "assistant", status: "completed", content: [{ type: "output_text", text: "OK", annotations: [] }] };
+  const usage = { input_tokens: 11, input_tokens_details: { cached_tokens: 0 }, output_tokens: 2, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 13 };
+  return send(200, { id: `resp_${++counter}`, object: "response", created_at: Math.floor(Date.now() / 1000), model: body.model, status: "completed", output: [message], parallel_tool_calls: true, tool_choice: "auto", tools: [], usage });
 }
 
 /** OpenAI's history: the newest user message and the function call outputs after it. */
@@ -232,12 +274,7 @@ function models(req, res) {
   const anthropic = "anthropic-version" in req.headers;
   const key = keyOf(req) ?? "";
   res.writeHead(key.includes("bad") ? 401 : 200, { "Content-Type": "application/json" });
-  if (key.includes("bad")) {
-    const error = anthropic
-      ? { type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }
-      : { error: { message: `Incorrect API key provided: ${key.slice(0, 3)}****${key.slice(-4)}.`, type: "invalid_request_error", code: "invalid_api_key" } };
-    return res.end(JSON.stringify(error));
-  }
+  if (key.includes("bad")) return res.end(JSON.stringify(refusedKey(key, anthropic)));
   if (anthropic) {
     const data = [
       { type: "model", id: "claude-opus-5-5", display_name: "Claude Opus 5.5", created_at: "2026-09-01T00:00:00Z" },
@@ -260,6 +297,9 @@ createServer(async (req, res) => {
     const body = await json(req);
     const anthropic = path === "/v1/messages";
     const openai = path === "/v1/responses";
+    // A test message has no tools; a streamed request that lost its stream flag still
+    // gets the checks below.
+    if ((anthropic || openai) && body.stream !== true && !body.tools) return testMessage(req, res, body, anthropic);
     const problem = anthropic ? claudeProblem(body) : openai ? openaiProblem(body) : ollamaProblem(body);
     if (problem) {
       res.writeHead(400, { "Content-Type": "application/json" });

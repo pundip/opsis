@@ -1,6 +1,7 @@
 // Shared set-up for the smoke tests: a small CSV dataset created through the
 // REST API, and removal of everything a test made.
 import { expect, request, type APIResponse, type Browser, type Page } from "@playwright/test";
+import { SET_PASSWORD_LINK, fakeMailURL } from "../playwright.config";
 
 export const CSV = [
   "id,fund,channel,amount,gift_date",
@@ -153,8 +154,8 @@ export async function invitePerson(
       await expect
         .poll(
           async () => {
-            const messages = (await (await mailbox.get(`http://localhost:9600/messages?to=${encodeURIComponent(email)}`)).json()) as Email[];
-            link = /http:\/\/localhost:8088\/opsis\/set-password\/[A-Za-z0-9_-]+/.exec(messages.at(-1)?.text ?? "")?.[0] ?? null;
+            const messages = (await (await mailbox.get(`${fakeMailURL}/messages?to=${encodeURIComponent(email)}`)).json()) as Email[];
+            link = SET_PASSWORD_LINK.exec(messages.at(-1)?.text ?? "")?.[0] ?? null;
             return link !== null;
           },
           { timeout: 30_000 },

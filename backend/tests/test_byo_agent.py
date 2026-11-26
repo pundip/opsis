@@ -362,6 +362,93 @@ def test_keys_are_added_tested_renamed_and_deleted_but_never_shown(
     assert {"assistant.key_added", "assistant.key_changed", "assistant.key_deleted"} <= set(actions)
 
 
+def test_a_test_message_shows_whether_the_account_can_pay(
+    client_for: ClientFor,
+    db: Session,  # noqa: F811
+) -> None:
+    client = client_for()
+    fake = FakeModel("openai", [])
+    use(client, fake)
+    claude = add_key(client, "anthropic", KEY_A)
+    gpt = add_key(client, "openai", KEY_O, label="Lab")
+
+    # Claude: one token, not streamed and without tools, to the workspace's Claude model
+    # as the key has no default. Any answer, even one cut off, shows the account paid.
+    sent = ok(client.post(f"/api/account/api-keys/{claude['id']}/test-message"))
+    assert sent["ok"] is True and sent["message"] == (
+        "The key works, and its account paid for a test message: claude-opus-5-5 answered"
+        " (12 tokens in, 1 out)."
+    )
+    assert fake.paths[-1] == "/v1/messages" and said(fake) == KEY_A
+    assert fake.requests[-1] == {
+        "model": "claude-opus-5-5",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "Reply with OK."}],
+    }
+    assert sent["key"]["lastTestOk"] is True and sent["key"]["lastUsedAt"] is not None
+
+    # OpenAI: a model to send to, the key's default or one named. Its least is 16
+    # tokens, and nothing is stored there.
+    none = client.post(f"/api/account/api-keys/{gpt['id']}/test-message", json={})
+    assert none.status_code == 409 and none.json()["error"]["code"] == "no_model"
+    sent = ok(
+        client.post(
+            f"/api/account/api-keys/{gpt['id']}/test-message", json={"model": "gpt-5.5-mini"}
+        )
+    )
+    assert sent["ok"] is True and "gpt-5.5-mini answered (11 tokens in, 2 out)" in sent["message"]
+    assert fake.paths[-1] == "/v1/responses" and said(fake) == KEY_O
+    assert fake.requests[-1] == {
+        "model": "gpt-5.5-mini",
+        "input": "Reply with OK.",
+        "max_output_tokens": 16,
+        "store": False,
+    }
+
+    # An account that cannot pay: the free Test still passes, the test message does not,
+    # in the provider's own words.
+    no_credit = "Your credit balance is too low to access the Anthropic API."
+    fake.fail = (400, {"type": "error", "error": {"type": "invalid_request_error",
+                                                  "message": no_credit}})  # fmt: skip
+    assert ok(client.post(f"/api/account/api-keys/{claude['id']}/test"))["ok"] is True
+    broke = ok(client.post(f"/api/account/api-keys/{claude['id']}/test-message"))
+    assert broke["ok"] is False
+    assert broke["message"] == f"Anthropic answered with an error (400): {no_credit}"
+    assert broke["key"]["lastTestOk"] is False
+    quota = "You exceeded your current quota, please check your plan and billing details."
+    fake.fail = (429, {"error": {"message": quota, "type": "insufficient_quota",
+                                 "code": "insufficient_quota"}})  # fmt: skip
+    broke = ok(
+        client.post(f"/api/account/api-keys/{gpt['id']}/test-message", json={"model": "gpt-5.5"})
+    )
+    assert broke["ok"] is False and broke["message"] == (
+        f"OpenAI is rate limiting this key, or its account has no credit: {quota}"
+    )
+
+    # It is billed, so a test message that was answered counts as use of its key, and
+    # each one is audited, never with the key.
+    used = sorted(
+        (row.provider, row.model, row.input_tokens, row.output_tokens, row.source, row.key_label)
+        for row in db.scalars(select(AssistantUsage))
+    )
+    assert used == [
+        ("anthropic", "claude-opus-5-5", 12, 1, "own", "Work"),
+        ("openai", "gpt-5.5-mini", 11, 2, "own", "Lab"),
+    ]
+    details = db.scalars(
+        select(AuditLog.detail)
+        .where(AuditLog.action == "assistant.key_test_message")
+        .order_by(AuditLog.id)
+    ).all()
+    assert [(d["provider"], d["model"], d["ok"]) for d in details] == [
+        ("anthropic", "claude-opus-5-5", True),
+        ("openai", "gpt-5.5-mini", True),
+        ("anthropic", "claude-opus-5-5", False),
+        ("openai", "gpt-5.5", False),
+    ]
+    assert KEY_A not in json.dumps(details) and KEY_O not in json.dumps(details)
+
+
 # ---- the workspace key, grants, and personal keys switched off --------------------------
 
 
@@ -463,16 +550,26 @@ def test_the_workspace_key_needs_a_grant_and_a_revoke_takes_effect_at_once(
         db.scalars(select(AuditLog.action).where(AuditLog.action == "grant.changed")).all()
     )
 
-    # Personal keys switched off: kept, but not offered, and no new ones.
+    # Personal keys switched off: kept, but not offered, not sent anywhere (tests
+    # included), and no new ones. People may still delete theirs.
     add_key(editor, "anthropic", KEY_A)
     assert [o["source"] for o in state(editor, dashboard)["options"]] == ["own", "workspace"]
+    spare = add_key(editor, "openai", KEY_O, label="Spare", model="gpt-5.5")
     ok(admin.put("/api/assistant-access/settings", json={"byoKeys": False}))
     assert [o["source"] for o in state(editor, dashboard)["options"]] == ["workspace"]
     off = editor.post(
         "/api/account/api-keys", json={"provider": "openai", "label": "x", "key": KEY_O}
     )
     assert off.status_code == 409 and off.json()["error"]["code"] == "byo_keys_off"
-    assert ok(editor.get("/api/account/api-keys"))["enabled"] is False
+    calls = len(fake.headers)
+    for method, path in (("POST", "test"), ("POST", "test-message"), ("GET", "models")):
+        refused = editor.request(method, f"/api/account/api-keys/{spare['id']}/{path}")
+        assert refused.status_code == 409 and refused.json()["error"]["code"] == "byo_keys_off"
+    assert len(fake.headers) == calls  # nothing reached the provider
+    kept = ok(editor.get("/api/account/api-keys"))
+    assert kept["enabled"] is False and len(kept["keys"]) == 2
+    assert editor.delete(f"/api/account/api-keys/{spare['id']}").status_code == 204
+    assert [k["label"] for k in ok(editor.get("/api/account/api-keys"))["keys"]] == ["Work"]
     ok(admin.put("/api/assistant-access/settings", json={"byoKeys": True}))
     # Admins see who has keys of which provider, never the keys.
     listing = admin.get("/api/assistant-access")
@@ -607,6 +704,7 @@ def test_no_key_ever_appears_in_a_response_a_log_or_an_audit_row(
     )
     for key in (anthropic, openai):
         call("POST", f"/api/account/api-keys/{key['id']}/test")
+        call("POST", f"/api/account/api-keys/{key['id']}/test-message", json={})
         call("GET", f"/api/account/api-keys/{key['id']}/models")
         call("PATCH", f"/api/account/api-keys/{key['id']}", json={"label": key["label"] + "2"})
     for key, kind in ((anthropic, "/v1/messages"), (openai, "/responses")):

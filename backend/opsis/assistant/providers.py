@@ -951,3 +951,90 @@ def check_key(
     if model and model not in {m["id"] for m in models}:
         message += f" {model} is not one of them, so choose another default model."
     return KeyCheck(True, message, models)
+
+
+# The optional "Send a test message" button (V1 review): one short request, which the
+# provider bills, so it shows whether the key's account can pay. The free Test above
+# proves only that the key is accepted. OpenAI's Responses API takes no limit below 16
+# output tokens; Claude takes 1.
+TEST_MESSAGE = "Reply with OK."
+TEST_MAX_TOKENS = {"anthropic": 1, "openai": 16}
+
+
+@dataclass
+class MessageCheck:
+    ok: bool
+    message: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+def _claude_test_message(
+    settings: Settings, api_key: str, model: str, transport: httpx2.BaseTransport | None
+) -> tuple[int, int]:
+    """Tokens in and out of one short request to Claude (not streamed, no tools)."""
+    client = anthropic.Anthropic(
+        api_key=api_key,
+        base_url=settings.anthropic_base_url or None,
+        max_retries=1,
+        timeout=60.0,
+        http_client=anthropic.DefaultHttpxClient(transport=transport) if transport else None,
+    )
+    try:
+        reply = client.messages.create(
+            model=model,
+            max_tokens=TEST_MAX_TOKENS["anthropic"],
+            messages=[{"role": "user", "content": TEST_MESSAGE}],
+        )
+    finally:
+        client.close()
+    return reply.usage.input_tokens, reply.usage.output_tokens
+
+
+def _openai_test_message(
+    settings: Settings, api_key: str, model: str, transport: httpx2.BaseTransport | None
+) -> tuple[int, int]:
+    """Tokens in and out of one short request to OpenAI (not streamed, nothing stored)."""
+    client = openai.OpenAI(
+        api_key=api_key,
+        base_url=settings.openai_base_url or None,
+        max_retries=1,
+        timeout=60.0,
+        http_client=openai.DefaultHttpx2Client(transport=transport) if transport else None,
+    )
+    try:
+        response = client.responses.create(
+            model=model,
+            input=TEST_MESSAGE,
+            max_output_tokens=TEST_MAX_TOKENS["openai"],
+            store=False,
+        )
+    finally:
+        client.close()
+    usage = response.usage
+    return (usage.input_tokens, usage.output_tokens) if usage else (0, 0)
+
+
+def send_test_message(
+    settings: Settings,
+    provider: str,
+    api_key: str,
+    model: str,
+    transport: httpx2.BaseTransport | None = None,
+) -> MessageCheck:
+    """One short billed request to a model. Any answer proves the account can pay, even
+    one cut off at its limit (a model that thinks first spends its one token on that);
+    otherwise the provider's own words."""
+    try:
+        if provider == "anthropic":
+            used = _claude_test_message(settings, api_key, model, transport)
+        else:
+            used = _openai_test_message(settings, api_key, model, transport)
+    except (anthropic.APIError, openai.APIError) as error:
+        return MessageCheck(False, _key_error(provider, error, api_key))
+    return MessageCheck(
+        True,
+        f"The key works, and its account paid for a test message: {model} answered "
+        f"({used[0]} tokens in, {used[1]} out).",
+        *used,
+    )

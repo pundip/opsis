@@ -1,9 +1,13 @@
-// Query benchmark for a running Opsis stack. Needs only Node and Docker on the host.
+// Query benchmark, in a test stack of its own (scripts/test-stack.mjs): the project
+// opsis-test-bench at http://localhost:18083, never your own stack (Compose project
+// "opsis", port 8080). Needs only Node and Docker on the host.
 //
-//   node scripts/benchmark.mjs [--rows 5000000] [--base http://localhost:8080] [--keep]
+//   node scripts/benchmark.mjs [--rows 5000000] [--no-build] [--keep]
+//   node scripts/benchmark.mjs --remove     remove a stack that --keep left running
 //
 // What it does:
-//   1. Creates a synthetic `bench.gifts` table (and `bench.donors`) in the Compose Postgres.
+//   0. Starts the test stack from nothing, building the test image first.
+//   1. Creates a synthetic `bench.gifts` table (and `bench.donors`) in its Postgres.
 //   2. Connects Opsis to it, creates datasets and times the first refresh (ingestion).
 //   3. Runs five typical dashboard queries cold (first run) and warm (cached).
 //   3b. Opens a typical dashboard the way a browser does (every item's data, six
@@ -12,8 +16,9 @@
 //   4. Fires 10 different queries at once, twice, and measures how long /healthz takes
 //      to answer meanwhile (it must stay fast: queries run off the event loop).
 //   5. Samples `docker stats` throughout and reports the api container's peak memory.
-//   6. Removes what it created, unless --keep is given.
+//   6. Removes the test stack, data and all, unless --keep is given.
 import { execFileSync, spawn } from "node:child_process";
+import { ROOT, TestStack, refuse } from "./test-stack.mjs";
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => {
@@ -21,11 +26,25 @@ const option = (name, fallback) => {
   return index >= 0 ? args[index + 1] : fallback;
 };
 const ROWS = Number(option("rows", "5000000"));
-const BASE = option("base", "http://localhost:8080").replace(/\/$/, "");
 const KEEP = args.includes("--keep");
-const PG_USER = option("pg-user", "opsis");
-const PG_DB = option("pg-db", "opsis");
-const PG_PASSWORD = option("pg-password", process.env.POSTGRES_PASSWORD ?? "opsis-local-only");
+const STACK = { files: ["compose.yml"] };
+let stack;
+try {
+  stack = new TestStack("bench");
+  stack.write();
+  stack.check(STACK);
+} catch (error) {
+  stack?.forget();
+  refuse(error);
+}
+if (args.includes("--remove")) {
+  stack.remove(STACK);
+  process.exit(0);
+}
+const BASE = stack.url("HTTP_PORT", "");
+const PG_USER = stack.values.POSTGRES_USER;
+const PG_DB = stack.values.POSTGRES_DB;
+const PG_PASSWORD = stack.values.POSTGRES_PASSWORD;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const ms = (start) => Math.round(performance.now() - start);
@@ -33,8 +52,8 @@ const ms = (start) => Math.round(performance.now() - start);
 function psql(sql) {
   return execFileSync(
     "docker",
-    ["compose", "exec", "-T", "postgres", "psql", "-U", PG_USER, "-d", PG_DB, "-v", "ON_ERROR_STOP=1", "-At", "-c", sql],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    stack.args(STACK, ["exec", "-T", "postgres", "psql", "-U", PG_USER, "-d", PG_DB, "-v", "ON_ERROR_STOP=1", "-At", "-c", sql]),
+    { cwd: ROOT, env: stack.env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   ).trim();
 }
 
@@ -56,8 +75,9 @@ async function sampleMemory() {
       child.on("close", () => {
         for (const line of out.split("\n")) {
           const [name, usage] = line.split("\t");
-          if (!usage || !/opsis-(api|worker|postgres)-/.test(name)) continue;
-          const key = name.replace(/^opsis-|-\d+$/g, "");
+          if (!usage || !name.startsWith(`${stack.project}-`)) continue;
+          const key = name.slice(stack.project.length + 1).replace(/-\d+$/, "");
+          if (!["api", "worker", "postgres"].includes(key)) continue;
           peak[key] = Math.max(peak[key] ?? 0, toMb(usage));
         }
         resolve();
@@ -219,24 +239,13 @@ async function loadDashboard(id, state) {
   return { total: ms(start), slowest: Math.max(...timings.map((t) => t.wall)), hits: timings.filter((t) => t.cacheHit).length, items: timings.length };
 }
 
-async function cleanup() {
-  for (const dashboard of await api("GET", "/api/dashboards")) {
-    if (dashboard.title === DASHBOARD_TITLE) await api("DELETE", `/api/dashboards/${dashboard.id}`);
-  }
-  for (const dataset of await api("GET", "/api/datasets")) {
-    if (dataset.name.startsWith("bench_")) await api("DELETE", `/api/datasets/${dataset.id}`);
-  }
-  for (const connection of await api("GET", "/api/connections")) {
-    if (connection.name === "Benchmark source") await api("DELETE", `/api/connections/${connection.id}`);
-  }
-  psql("DROP SCHEMA IF EXISTS bench CASCADE");
-}
-
 async function main() {
+  // 0. The test stack, from nothing.
+  stack.compose(STACK, ["down", "-v", "--remove-orphans"]);
+  stack.must(STACK, ["up", "-d", ...(args.includes("--no-build") ? [] : ["--build"]), "--wait"]);
   const config = await api("GET", "/api/config");
   console.log(`Opsis ${config.version} at ${BASE}, job runner: ${config.jobRunner}, rows: ${ROWS.toLocaleString()}`);
   const sampler = sampleMemory();
-  await cleanup();
 
   // 1. Source data. Dates span three years; the timestamp column is timezone-aware.
   let start = performance.now();
@@ -339,14 +348,19 @@ async function main() {
 
   sampling = false;
   await sampler;
-  if (!KEEP) {
-    await cleanup();
-    console.log("Benchmark data removed.");
-  }
 }
 
-main().catch((error) => {
-  sampling = false;
-  console.error(error);
-  process.exitCode = 1;
-});
+main()
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    sampling = false;
+    if (KEEP) {
+      console.log(`\nThe test stack is still running at ${BASE} (project ${stack.project}). Remove it with: node scripts/benchmark.mjs --remove`);
+    } else {
+      stack.remove(STACK);
+      console.log("The test stack was removed, data and all.");
+    }
+  });

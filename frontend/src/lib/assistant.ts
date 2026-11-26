@@ -189,6 +189,9 @@ export const useChangeKey = () =>
   );
 export const useDeleteKey = () => useKeyMutation((id: string) => apiDelete(`/api/account/api-keys/${id}`));
 export const useTestKey = () => useKeyMutation((id: string) => apiPost<KeyTest>(`/api/account/api-keys/${id}/test`));
+/** One short request to the key's default model: billed, so it shows the account can pay. */
+export const useSendTestMessage = () =>
+  useKeyMutation((id: string) => apiPost<KeyTest>(`/api/account/api-keys/${id}/test-message`, {}));
 
 /** The models a key may use, asked of its provider when needed. */
 export const useKeyModels = (keyId: string | null) =>

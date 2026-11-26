@@ -5,7 +5,7 @@
 // Runs only against the disposable server-mode stack (OPSIS_MODE=server), which is
 // removed afterwards, so it does not tidy up after itself.
 import { expect, request, test, type Browser, type Page } from "@playwright/test";
-import { baseURL, serverMode } from "../playwright.config";
+import { SET_PASSWORD_LINK, baseURL, fakeMailURL, serverMode } from "../playwright.config";
 import { api, createDataset } from "./helpers";
 
 test.skip(!serverMode, "Needs the server-mode stack: npm run smoke runs it.");
@@ -33,7 +33,7 @@ async function emailTo(address: string, subject: string): Promise<Email> {
     await expect
       .poll(
         async () => {
-          const response = await mailbox.get(`http://localhost:9600/messages?to=${encodeURIComponent(address)}`);
+          const response = await mailbox.get(`${fakeMailURL}/messages?to=${encodeURIComponent(address)}`);
           const messages = (await response.json()) as Email[];
           found = messages.filter((m) => m.subject === subject).at(-1);
           return found !== undefined;
@@ -48,7 +48,7 @@ async function emailTo(address: string, subject: string): Promise<Email> {
 }
 
 function linkIn(email: Email): string {
-  const link = /http:\/\/localhost:8088\/opsis\/set-password\/[A-Za-z0-9_-]+/.exec(email.text)?.[0];
+  const link = SET_PASSWORD_LINK.exec(email.text)?.[0];
   if (!link) throw new Error(`No set-password link in: ${email.text}`);
   expect(email.html).toContain(`href="${link}"`);
   return link;

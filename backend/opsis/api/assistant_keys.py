@@ -3,7 +3,8 @@ assistant (Users page). v2 V1, ADR-036.
 
 Keys go in once and never come back out: every answer carries the provider, the
 label and the last four characters, never the key. The Test button and the model
-list ask the provider's models endpoint, which costs nothing.
+list ask the provider's models endpoint, which costs nothing; "Send a test message"
+sends one short billed request, to show whether the key's account can pay.
 """
 
 from __future__ import annotations
@@ -127,6 +128,7 @@ def test_key(
 ) -> dict[str, Any]:
     """Ask the provider which models the key may use: free, and proof that it works."""
     row = api_keys.own(db, principal, key_id)
+    api_keys.require_byo(db)
     secret = api_keys.secret(settings, row)
     db.rollback()  # hold nothing open during the call
     result = providers.check_key(
@@ -142,6 +144,53 @@ def test_key(
     }
 
 
+class TestMessageIn(BaseModel):
+    model: str | None = Field(default=None, max_length=200)
+
+
+@router.post("/account/api-keys/{key_id}/test-message")
+def test_message(
+    key_id: uuid.UUID,
+    request: Request,
+    body: TestMessageIn | None = None,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    principal: Principal = Depends(person),
+) -> dict[str, Any]:
+    """Send one short request to a model (billed: a fraction of a cent), which shows
+    whether the key's account can pay. The free Test cannot tell that."""
+    row = api_keys.own(db, principal, key_id)
+    api_keys.require_byo(db)
+    fallback = settings.anthropic_model.strip() if row.provider == "anthropic" else None
+    model = api_keys.clean_model(body.model if body else None) or row.default_model or fallback
+    if not model:
+        raise ApiError(
+            409,
+            "no_model",
+            "Give the key a default model first (Edit), so the test message has a model to go to.",
+        )
+    secret = api_keys.secret(settings, row)
+    db.rollback()  # hold nothing open during the call
+    check = providers.send_test_message(settings, row.provider, secret, model, _transport(request))
+    row = api_keys.own(db, principal, key_id)
+    api_keys.record_test_message(
+        db,
+        principal,
+        row,
+        model,
+        ok=check.ok,
+        message=check.message,
+        input_tokens=check.input_tokens,
+        output_tokens=check.output_tokens,
+    )
+    return {
+        "ok": check.ok,
+        "message": check.message,
+        "models": [],
+        "key": api_keys.describe(row),
+    }
+
+
 @router.get("/account/api-keys/{key_id}/models")
 def key_models(
     key_id: uuid.UUID,
@@ -151,6 +200,7 @@ def key_models(
     principal: Principal = Depends(person),
 ) -> dict[str, Any]:
     row = api_keys.own(db, principal, key_id)
+    api_keys.require_byo(db)
     secret = api_keys.secret(settings, row)
     provider = row.provider
     db.rollback()

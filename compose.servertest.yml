@@ -2,19 +2,18 @@
 # local accounts and a fake Google, share links, access tokens for MCP, the
 # worker container, refresh schedules, backups, email (to a fake mail server whose
 # messages the tests read), and the assistant on Claude's API (answered by a
-# scripted fake model), behind the proxytest nginx at http://localhost:8088/opsis/.
+# scripted fake model), behind the proxytest nginx at http://localhost:18089/opsis/.
 #
-# Run it under its own project name so it gets its own database and volumes:
-#   docker compose -p opsis-servertest --env-file .env.servertest \
-#     -f compose.yml -f compose.servertest.yml --profile server --profile proxytest up -d --wait
-# smoke.mjs writes .env.servertest with fresh random secrets and removes it again.
+# smoke.mjs runs it as a test stack of its own (project opsis-test-server), with an
+# env file it writes from .env.server.example and fresh random secrets, and removes
+# it afterwards, data and all (scripts/test-stack.mjs). The ports come from that file.
 x-server: &server
   DEPLOY_MODE: server
   AUTH_MODE: full
   MCP_AUTH: token
   JOB_RUNNER: worker
   COMPOSE_PROFILES: server,proxytest
-  PUBLIC_BASE_URL: http://localhost:8088/opsis
+  PUBLIC_BASE_URL: http://localhost:${PROXYTEST_PORT:-8088}/opsis
   TRUSTED_PROXIES: 172.16.0.0/12
   POSTGRES_USER: ${POSTGRES_USER}
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -61,23 +60,23 @@ services:
     volumes:
       - ./e2e/fake-google.mjs:/fake/fake-google.mjs:ro
     ports:
-      - "127.0.0.1:9700:9700"
+      - "127.0.0.1:${FAKE_GOOGLE_PORT:-9700}:9700"
   fake-smtp:
     image: node:24-bookworm-slim
     command: ["node", "/fake/fake-smtp.mjs"]
     volumes:
       - ./e2e/fake-smtp.mjs:/fake/fake-smtp.mjs:ro
     ports:
-      - "127.0.0.1:9600:9600"
+      - "127.0.0.1:${FAKE_SMTP_PORT:-9600}:9600"
   fake-oidc:
     image: node:24-bookworm-slim
     command: ["node", "/fake/fake-oidc.mjs"]
     environment:
-      PUBLIC_URL: http://localhost:9400
+      PUBLIC_URL: http://localhost:${FAKE_OIDC_PORT:-9400}
       INTERNAL_URL: http://fake-oidc:9400
       CLIENT_ID: smoke-client
       CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
     volumes:
       - ./e2e/fake-oidc.mjs:/fake/fake-oidc.mjs:ro
     ports:
-      - "127.0.0.1:9400:9400"
+      - "127.0.0.1:${FAKE_OIDC_PORT:-9400}:9400"

@@ -51,7 +51,8 @@ export function AssistantAccess() {
               People may use their own Anthropic and OpenAI API keys in the assistant
             </label>
             <p className="mt-2 text-xs text-zinc-500">
-              Switched off, keys people already added are kept but not used. Deactivating someone deletes their keys.
+              Switched off, keys people already added are kept but not used, and their owners can still delete them. Deactivating
+              someone deletes their keys.
             </p>
           </Card>
           <Card className="mb-5 p-4">

@@ -1,10 +1,11 @@
 # Overrides that serve Opsis at http://localhost:8088/opsis/ behind the proxytest
-# nginx, without editing .env. Used by `npm run smoke`, or by hand:
+# nginx, without editing .env. `npm run smoke` uses it in a test stack of its own (on
+# port 18088); by hand, on your own stack:
 #   docker compose -f compose.yml -f compose.subpath.yml --profile proxytest up -d --wait
 # and back to the root with:
-#   docker compose up -d --wait
+#   docker compose up -d --wait --remove-orphans
 x-subpath: &subpath
-  PUBLIC_BASE_URL: http://localhost:8088/opsis
+  PUBLIC_BASE_URL: http://localhost:${PROXYTEST_PORT:-8088}/opsis
   # The Docker network that nginx reaches the api from.
   TRUSTED_PROXIES: 172.16.0.0/12
 

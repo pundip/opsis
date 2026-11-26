@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-26 (v2, milestone V1: bring your own agent)
+Last updated: 2026-11-26 (v2: the V1 review's follow-ups, and test stacks kept apart from yours)
 
 Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2.md` (v2, milestones V0 to V7). A fresh session resumes v2 from this file, `BUILD_BRIEF_V2.md` and `docs/V2_DESIGN.md`.
 
@@ -9,7 +9,7 @@ Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2
 | Milestone | Status |
 |---|---|
 | V0 Plan | Done, reviewed |
-| V1 BYO agent | Done, waiting for your review |
+| V1 BYO agent | Done, reviewed; the review's follow-ups done |
 | V2 Workspace model and Model view | Not started |
 | V3 Data prep | Not started |
 | V4 Slicers | Not started |
@@ -19,7 +19,7 @@ Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2
 
 ## v2, V1: bring your own agent
 
-People bring their own Anthropic or OpenAI keys, and the workspace's Claude key is only for people an admin allows. The decisions are in ADR-036 (proposed until your review). Built:
+People bring their own Anthropic or OpenAI keys, and the workspace's Claude key is only for people an admin allows. The decisions are in ADR-036, accepted at the review. Built:
 
 - **Account page, "AI providers":** add, test, rename and delete Anthropic and OpenAI keys, several per person, each with an optional default model. Only the provider, a name and the last four characters are ever shown. **Test** asks the provider for the key's models (free) and shows the provider's own message when it refuses the key; a new key is tested as soon as it is added. When you edit a key, its default-model field offers the key's own list of models. Below the keys: your assistant use per key and provider (requests and tokens, in all and over the last 30 days).
 - **Users page, "AI assistant" tab (admins, with sign-in):** "May use the workspace key" per person and per group, off for everyone by default (a person's own setting wins, then a "no" on any of their groups); each person's result and which providers they have keys for, never the keys; and "Personal API keys" on or off for the whole workspace.
@@ -39,6 +39,24 @@ People bring their own Anthropic or OpenAI keys, and the workspace's Claude key 
 - **Found by the first server-mode run, and fixed:** the admin's toggles snapped back until the save came back, so a click looked ignored. They now show the click at once.
 - **The done-when items:** no keys and no grant shows the "add a key" message (server-mode browser test, and pytest); an own Anthropic key and an own OpenAI key each build a dashboard (browser tests in all three places, and pytest); granting works and revoking takes effect at once, a running request included (browser test and pytest); no key in an API response, a log line or an audit row (`test_no_key_ever_appears_in_a_response_a_log_or_an_audit_row`, and the browser tests check the page and the key list).
 - **Your stack on port 8080:** the root and sub-path runs were by hand in project `opsis-v1` on port 8094 (`smoke.mjs` hard-codes 8080 and restarts your stack), and the server stage in the usual disposable `opsis-servertest`. One thing reached your stack: in the first root run the test stack had loaded your `.env` (Compose's `env_file: .env`), so the fake Google sent the Google Sheets test's browser back to `http://localhost:8080`: one page load, then a POST to `/api/connections/google/finish`, which your stack refused (404). Nothing was written there. Later runs used an override that replaces `env_file`. The test projects, the test image and the test settings are removed.
+
+## After the V1 review: the test message, keys kept when switched off, and test stacks kept apart from yours
+
+Built:
+
+- **"Send a test message"** beside Test on the Account page: one short request to the key's default model (an Anthropic key without one uses the workspace's `ANTHROPIC_MODEL`; an OpenAI key needs one), with `max_tokens` 1 on Anthropic and 16 on OpenAI (its minimum). It costs a fraction of a cent and shows whether the key's account can pay: an account with no credit shows the provider's own words (Anthropic's "credit balance is too low", OpenAI's "exceeded your current quota"). Its tokens count in the usage table, and it is audited (`assistant.key_test_message`, with no key in it). The free Test stays the default, and a new key is still tested with it.
+- **Personal keys switched off:** the keys are kept, and their owners still see, rename and delete them. Test, the test message and the model list are refused (409 `byo_keys_off`), so no key is sent anywhere. The Account page says "You can still delete them", and the Users page's hint says the same.
+- **A choice that is taken away** asks the person to choose again: V1 already did, so no change. **Usage** stays in tokens; estimated cost per provider is on the backlog.
+- **Test stacks kept apart from yours (ADR-037).** `scripts/test-stack.mjs` gives every test stack its own Compose project (`opsis-test`, `opsis-test-server`, `opsis-test-backend`, `opsis-test-bench`), its own env file written from `.env.local.example` or `.env.server.example` with random test secrets (`.env.opsis-test*`, gitignored, removed afterwards), its own image tag, and its own ports: the usual ones plus 10000 (18080, 18088, 18089 and so on), bound to 127.0.0.1. `.env` is never read: `compose.yml`'s `env_file` is now `${OPSIS_ENV_FILE:-.env}`, the scripts pass `--env-file`, and they drop every shell variable the Compose files name, so nothing set in your shell leaks in. Before anything starts, each script checks its plan and the resolved Compose configuration (`docker compose config`, which needs no Docker daemon). It refuses the project `opsis`, port 8080, a published port it did not choose, a port not bound to 127.0.0.1, an image without the test tag, a service without the test marker, and `.env`, then exits with code 2 and "Refusing to start a test stack ... Nothing was started." Playwright refuses a target on port 8080 as well. `npm run smoke`, `npm run test:backend` (new), `npm run lint:backend` and `scripts/benchmark.mjs` all go through it; `npm run smoke -- --dry-run` shows what would start, with an env file of its own, so it can run beside a real run. In another checkout, `OPSIS_TEST_PROJECT` and `OPSIS_TEST_PORT_OFFSET` move its stacks off this one's (README, Development).
+- **The proof:** `npm run test:scripts` (16 tests, part of `npm test`). The guard refuses each unsafe plan and each unsafe configuration; then every script is run with an unsafe setting and must exit with code 2 and the message, leaving no env file behind. Those runs point Docker at an address where nothing listens, so even a broken guard could not start anything. A last test runs the dry runs beside the env files of a run in progress and checks they are left as they were (found before the commit; the test fails without the fix).
+
+### How it was checked
+
+- **Backend:** 380 pytest tests pass (379 at V1; new: `test_a_test_message_shows_whether_the_account_can_pay`, and the grants and leak tests cover keys switched off and test messages). `ruff check`, `ruff format --check` and `mypy --strict` pass. Both through the new scripts (`npm run test:backend`, `npm run lint:backend`), so in the project `opsis-test-backend`, removed afterwards, on the final backend files.
+- **Frontend:** typecheck, lint and the 52 unit tests pass.
+- **The guard:** `npm run test:scripts`, 16 tests pass (the safe dry runs included, as Docker was running).
+- **Smoke tests in all three places,** now through `npm run smoke` and its own stacks: at the root (http://localhost:18080) 12 passed (3 server-only skipped), under `/opsis` (http://localhost:18088/opsis/) 12 passed (3 skipped), and in server mode (http://localhost:18089/opsis/) 14 passed (1 local-only skipped), as at V1. New steps: a test message on an Anthropic key, then a key whose account has no credit, which passes Test and fails the test message with Anthropic's words (all three places); and in server mode, personal keys switched off: Ann's key is kept, she has no Test, test message or Add, and she deletes it.
+- **Your stack was not touched:** before and after all the runs, project `opsis` had the same five containers, with the same ids, start times and images, and no test env file is left in the folder.
 
 ## v2, V0: the plan
 
@@ -63,7 +81,7 @@ No feature code: the app behaves exactly as before. Built:
 The in-app guide (`docs/guide`) is not edited in v2 runs (brief v2, rule 7). What each milestone will make out of date:
 
 - **V0:** nothing (no behaviour changed).
-- **V1:** chapter 8 (the providers table: the workspace's Claude key only for people an admin allows, your own Anthropic and OpenAI keys, Ollama with `OLLAMA_ENABLED`; the picker and its "add a key" message; a revoke stopping a request at its next step); chapter 1 (the Account page's AI providers section and its usage table); chapter 7 (admins: the Users page's AI assistant tab, per person and per group, personal keys on or off, deactivating deletes keys); chapter 9 (settings: `ANTHROPIC_API_KEY` optional, `OLLAMA_ENABLED`, the upgrade note).
+- **V1:** chapter 8 (the providers table: the workspace's Claude key only for people an admin allows, your own Anthropic and OpenAI keys, Ollama with `OLLAMA_ENABLED`; the picker and its "add a key" message; a revoke stopping a request at its next step); chapter 1 (the Account page's AI providers section and its usage table); chapter 7 (admins: the Users page's AI assistant tab, per person and per group, personal keys on or off, deactivating deletes keys); chapter 9 (settings: `ANTHROPIC_API_KEY` optional, `OLLAMA_ENABLED`, the upgrade note). After the review: chapter 1 (the Account page's "Send a test message", which costs a fraction of a cent and shows whether the key's account can pay, and which needs a default model for an OpenAI key); chapter 7 (personal keys switched off: kept, not used or tested, and their owners can still delete them).
 - **V2:** chapter 4 (one workspace model, the Model view, measures, date tables, YAML); chapter 5 (relationships instead of joins: direction, active, paths; row-level security through relationships, which removes the warning section); chapters 7 and 8 (security, MCP tools); chapter 9 (current limits).
 - **V3:** chapter 3 (the Table view, transforms), a new chapter on data prep and SQL Lab, chapter 7 (inherited rules and restrictions), chapter 8 (MCP tools).
 - **V4:** chapter 6 (pages, slicers, Edit interactions, links with slicer state).
@@ -251,6 +269,7 @@ M3.5 benchmark, in one line: 5 million rows on this laptop, typical queries 77 t
 
 ## Review outcomes so far
 
+- **V1 (bring your own agent):** approved, ADR-036 accepted. The free model-list Test stays the default, plus an optional "Send a test message" (one short billed request) that shows whether the account can pay. A choice that is taken away asks the person to choose again. Switching personal keys off keeps the keys, and people can still delete their own. Usage stays in tokens; estimated cost per provider goes to the backlog. Before V2: test isolation, so that no test can reach your stack (every test stack with its own Compose project, an explicit env file, its own ports, never `.env`; the scripts refuse port 8080 and the project `opsis` with a clear error; a test that proves the guard). All done (ADR-037).
 - **V0 (v2 plan):** approved, ADR-030 to ADR-035 accepted. Row-level security through relationships applies to migrated models, after a report of which dashboards and which people will see fewer rows is shown and approved. Measures from several tables and measures that name a relationship are in V2; many-to-many is on the backlog. Replacement rules on a transform: anyone allowed to edit the input's rules, except where an admin set the input's rule or restriction (then admins only); every replacement audited, with a clear warning when it gives wider access. The renderer container for PDF and PNG. The security rules' tests must exist and pass before V2 and V3 count as done. Pages in V4. Export cap 25 MB by default, adjustable by admins.
 - **M0:** keep psycopg; `Australia/Melbourne`, Monday weeks, financial years in v1 (ADR-012); Apache 2.0; deviations ADR-005, 006 and 007 approved.
 - **M1:** brief replaced with the current version (sub-path hosting, section 3.1); ADR-013 superseded by ADR-016; `FISCAL_YEAR_LABEL` added; one-shot config check; placeholder secrets refused in server mode; `httpx2` kept.
@@ -276,6 +295,7 @@ Run: `copy .env.local.example .env`, `docker compose up -d`, open http://localho
 - `opsis/main.py`: everything mounted under the base path; `index.html` served with a runtime `<base href>` and JSON config block; security headers; CSRF check (`opsis/auth/cookies.py`).
 - `opsis/auth/principal.py`: `Principal`, roles, permissions. `AUTH_MODE=none` uses a built-in admin. Other modes return 401 until M6.
 - `opsis/api/sse.py`: SSE helper for use behind proxies (first real stream in M5).
+- Tests: `npm test`, `npm run smoke`, `npm run test:backend`, `npm run test:scripts`. Every test stack has its own Compose project, env file and ports, and `scripts/test-stack.mjs` refuses yours (ADR-037).
 
 **Data ingestion (M2)**
 - Connectors: `opsis/connectors/file` (CSV, Excel), `postgres`, `mysql`, with `registry.py`, `sql_base.py` and `tabular.py`. Drop-in connectors go in `plugins/connectors/<id>/`.
@@ -414,7 +434,7 @@ Not verified:
 - ADR-026 (new, M8): Google Sheets signs in with your own OAuth client (installed-app style, with a pasted address where Google cannot come back) or a service account, through its REST API with `google-auth` for the token, not the Google API client library; emailed dashboards carry numbers and tables, not pictures of charts; SQL Lab is not in v1 (your decision); unknown non-GET `/api` paths answer 404.
 - ADR-015: the task runner is npm scripts, not `tasks.py`; `httpx2` for the test client (approved), and now also for Ollama.
 - **v2, proposed in V0:** the draft schemas are in `spec/drafts/v2`, not edited in place in `spec/` (the app reads `spec/`, and V0 changes no behaviour); ADR-035: PDF and PNG from an optional renderer container rather than the worker container (local mode has no worker).
-- **v2, proposed in V1 (ADR-036):** "deleting a user deletes their keys" happens when someone is deactivated, since Opsis deactivates people rather than deleting them (the foreign key cascades as well); in local mode the one built-in admin may always use the workspace key, as there is nobody to grant it to; the key's Test lists its models rather than sending a message, which is free but cannot tell whether the account has credit.
+- **v2, proposed in V1 (ADR-036):** "deleting a user deletes their keys" happens when someone is deactivated, since Opsis deactivates people rather than deleting them (the foreign key cascades as well); in local mode the one built-in admin may always use the workspace key, as there is nobody to grant it to; the key's Test lists its models rather than sending a message, which is free but cannot tell whether the account has credit (kept as the default at the review, with an optional "Send a test message" beside it).
 
 ## Open issues and notes
 
@@ -443,16 +463,12 @@ Not verified:
 
 - **M8:** bulk export and import of a `models/` folder; two-hop joins; the 10 million row check; drag-and-drop of fields into wells; email for invitations, resets and snapshots; a clean-up job for ended sessions and links. (All done.)
 - **Post-v1 (decided at M8):** SQL Lab, the admin-only read-only SQL page (`FEATURE_SQL_LAB` in the brief).
+- **Later (decided at V1):** estimated cost per provider beside the tokens on the Account page (prices differ per model and change, so they need a table to keep up to date).
 - **Later (brief):** OAuth for the MCP server so it can be a claude.ai connector; TOTP second factor.
 
 ## Questions for review
 
-For the V1 review (ADR-036):
-
-- **V1-Q1. The key's Test lists the key's models:** free, and it proves the key is accepted, but not that the account has credit (that shows at the first request, in the provider's words). A one-token message to the key's default model would prove both, for a fraction of a cent each time. Keep the free check?
-- **V1-Q2. A choice that is taken away** (a grant revoked, a key deleted, personal keys switched off) asks the person to choose again rather than moving them to another option, which could be a key they pay for. Agreed?
-- **V1-Q3. Switching personal keys off keeps the keys** (stored, but neither listed nor used), so switching back restores them. Or should switching off delete them?
-- **V1-Q4. Usage is shown in tokens, not money:** prices differ per model and change. Enough for now?
+The V1 questions were answered at its review (see "Review outcomes so far").
 
 From v1, still open:
 
@@ -460,7 +476,7 @@ From v1, still open:
 
 ## Exact next step
 
-1. **Your review of V1.** To try it on your stack: `docker compose up -d --build` (migration 0013 runs at start), then the Account page (AI providers) and the editor's Assistant tab. The admins' tab on the Users page needs sign-in (`AUTH_MODE=local` on the laptop, or the server). Please answer V1-Q1 to V1-Q4 under "Questions for review". V2 (the workspace model) starts after the review; its first step ships the upgrade report and `results-digest` alone, for your approval before any migration (ADR-031).
+1. **V2, step 1: the upgrade check, alone** (V2_DESIGN section 1.4). `python -m opsis results-digest` records a hash of what every dashboard item shows today (draft and published, at the default filters, as an admin and as each person with attributes), and writes the report of which dashboards and which people will see fewer rows once row-level security travels through relationships (ADR-032). It changes nothing. Tests run it on fixtures for every v1 join pattern. Running it on your stack needs your go-ahead, and the migration waits until you have seen the report and approved it (decided at the V0 review). To try the review's follow-ups on your stack meanwhile: `docker compose up -d --build`, then the Account page (AI providers).
 2. **Still yours from M8**, unchanged: the three steps below.
 
 Your part of M8, then the M8 review:
