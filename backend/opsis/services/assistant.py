@@ -37,10 +37,15 @@ def latest(
 
 
 def start(
-    db: Session, dashboard_id: uuid.UUID, user_id: uuid.UUID, provider: str, model: str
+    db: Session,
+    dashboard_id: uuid.UUID,
+    user_id: uuid.UUID,
+    provider: str,
+    model: str,
+    option: str | None = None,
 ) -> AssistantConversation:
     conversation = AssistantConversation(
-        dashboard_id=dashboard_id, user_id=user_id, provider=provider, model=model
+        dashboard_id=dashboard_id, user_id=user_id, provider=provider, model=model, option=option
     )
     db.add(conversation)
     db.commit()
@@ -113,6 +118,7 @@ def describe(conversation: AssistantConversation) -> dict[str, Any]:
         "id": str(conversation.id),
         "provider": conversation.provider,
         "model": conversation.model,
+        "option": conversation.option,
         "inputTokens": conversation.input_tokens,
         "outputTokens": conversation.output_tokens,
         "createdAt": conversation.created_at.isoformat() if conversation.created_at else None,

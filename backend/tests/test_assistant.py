@@ -24,14 +24,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from opsis.assistant import loop, prompt
-from opsis.assistant.providers import (
-    AnthropicProvider,
-    OllamaProvider,
-    _echo,
-)
+from opsis.assistant.providers import _echo
 from opsis.db.models import AuditLog, DashboardVersion
 from opsis.settings import Settings
-from tests.conftest import make_settings
 from tests.test_auth import SERVER_SIGN_IN, admin_client, person
 from tests.test_ingestion import ok
 from tests.test_query_api import load
@@ -115,6 +110,102 @@ def claude_sse(
     return "".join(out).encode()
 
 
+def openai_sse(
+    parts: list[tuple[Any, ...]], stop: str = "completed", *, model: str = "gpt-5.5"
+) -> bytes:
+    """A streamed Responses API answer, event by event, as OpenAI sends it. Parts:
+    ("text", s), ("update", s) (a commentary message), ("call", name, args),
+    ("reasoning",) and ("refusal", s). `stop` other than "completed" is the reason
+    the response is incomplete (max_output_tokens, content_filter)."""
+    out: list[str] = []
+    sequence = iter(range(1_000_000))
+
+    def event(name: str, data: dict[str, Any]) -> None:
+        body = {"type": name, "sequence_number": next(sequence), **data}
+        out.append(f"event: {name}\ndata: {json.dumps(body)}\n\n")
+
+    base = {"id": "resp_test", "object": "response", "created_at": 1767225600, "model": model,
+            "output": [], "parallel_tool_calls": True, "tool_choice": "auto", "tools": [],
+            "status": "in_progress"}  # fmt: skip
+    event("response.created", {"response": base})
+    output: list[dict[str, Any]] = []
+    for index, part in enumerate(parts):
+        kind = part[0]
+        if kind in ("text", "update", "refusal"):
+            item_id = f"msg_{next(_ids)}"
+            item: dict[str, Any] = {"type": "message", "id": item_id, "role": "assistant",
+                                    "status": "in_progress", "content": []}  # fmt: skip
+            if kind == "update":
+                item["phase"] = "commentary"
+            event("response.output_item.added", {"output_index": index, "item": item})
+            if kind == "refusal":
+                content = {"type": "refusal", "refusal": part[1]}
+            else:
+                event("response.output_text.delta", {"item_id": item_id, "output_index": index,
+                      "content_index": 0, "delta": part[1], "logprobs": []})  # fmt: skip
+                content = {"type": "output_text", "text": part[1], "annotations": []}
+            done = {**item, "status": "completed", "content": [content]}
+        elif kind == "call":
+            item_id, call_id = f"fc_{next(_ids)}", f"call_{next(_ids)}"
+            arguments = part[2] if isinstance(part[2], str) else json.dumps(part[2])
+            item = {"type": "function_call", "id": item_id, "call_id": call_id, "name": part[1],
+                    "arguments": "", "status": "in_progress"}  # fmt: skip
+            event("response.output_item.added", {"output_index": index, "item": item})
+            event("response.function_call_arguments.delta",
+                  {"item_id": item_id, "output_index": index, "delta": arguments})  # fmt: skip
+            done = {**item, "arguments": arguments, "status": "completed"}
+        else:  # reasoning, encrypted as OpenAI sends it with store=false
+            done = {"type": "reasoning", "id": f"rs_{next(_ids)}", "summary": [],
+                    "encrypted_content": "gAAAAB-encrypted-reasoning"}  # fmt: skip
+            event("response.output_item.added", {"output_index": index, "item": done})
+        event("response.output_item.done", {"output_index": index, "item": done})
+        output.append(done)
+    usage = {"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 400, "cache_write_tokens": 0},
+             "output_tokens": 50, "output_tokens_details": {"reasoning_tokens": 10}, "total_tokens": 1050}  # fmt: skip
+    final: dict[str, Any] = {**base, "output": output, "usage": usage, "status": "completed"}
+    # Scripts written for Claude stop with tool_use or end_turn: OpenAI just completes.
+    reason = {"max_output_tokens": "max_output_tokens", "max_tokens": "max_output_tokens",
+              "content_filter": "content_filter"}.get(stop)  # fmt: skip
+    if reason is not None:
+        final.update(status="incomplete", incomplete_details={"reason": reason})
+    event("response.incomplete" if reason else "response.completed", {"response": final})
+    return "".join(out).encode()
+
+
+ANTHROPIC_MODELS = [
+    {"type": "model", "id": "claude-opus-5-5", "display_name": "Claude Opus 5.5",
+     "created_at": "2026-09-01T00:00:00Z"},
+    {"type": "model", "id": "claude-haiku-5-5", "display_name": "Claude Haiku 5.5",
+     "created_at": "2026-08-01T00:00:00Z"},
+]  # fmt: skip
+OPENAI_MODELS = ["gpt-5.5", "gpt-5.5-mini", "text-embedding-3-large", "whisper-1"]
+
+
+def models_answer(request: httpx2.Request) -> httpx2.Response:
+    """GET /v1/models as each provider answers it; a key with "bad" in it is refused.
+    Both SDKs send the key as a bearer token; Anthropic's also sends anthropic-version."""
+    anthropic = "anthropic-version" in request.headers
+    key = request.headers.get("authorization", "").removeprefix("Bearer ")
+    if "bad" in key:
+        if anthropic:
+            body = {
+                "type": "error",
+                "error": {"type": "authentication_error", "message": "invalid x-api-key"},
+            }
+        else:
+            body = {"error": {"message": f"Incorrect API key provided: {key[:3]}****{key[-4:]}.",
+                              "type": "invalid_request_error", "code": "invalid_api_key"}}  # fmt: skip
+        return httpx2.Response(401, json=body)
+    if anthropic:
+        return httpx2.Response(200, json={"data": ANTHROPIC_MODELS, "has_more": False,
+                                          "first_id": "claude-opus-5-5", "last_id": "claude-haiku-5-5"})  # fmt: skip
+    data = [
+        {"id": name, "object": "model", "created": 1767225600, "owned_by": "openai"}
+        for name in OPENAI_MODELS
+    ]
+    return httpx2.Response(200, json={"object": "list", "data": data})
+
+
 def ollama_lines(
     parts: list[tuple[Any, ...]], stop: str = "stop", *, prompt_tokens: int = 900
 ) -> bytes:
@@ -155,6 +246,9 @@ class FakeModel:
         self.fail: tuple[int, dict[str, Any]] | None = None
 
     def handler(self, request: httpx2.Request) -> httpx2.Response:
+        if request.method == "GET":  # the models endpoints: the Test button, model lists
+            self.headers.append(dict(request.headers))
+            return models_answer(request)
         body = json.loads(request.content)
         self.paths.append(request.url.path)
         self.requests.append(body)
@@ -163,9 +257,15 @@ class FakeModel:
             return httpx2.Response(self.fail[0], json=self.fail[1])
         assert self.turns, "the model was called more often than scripted"
         parts, stop = self.turns.pop(0)(body)
-        if self.kind == "anthropic":
+        # A model call goes where its provider sends it, whatever this fake was made for.
+        if request.url.path.endswith("/v1/messages"):
             extra = parts.pop() if parts and isinstance(parts[-1], dict) else {}
             content = claude_sse(parts, stop, **extra)
+            return httpx2.Response(
+                200, headers={"content-type": "text/event-stream"}, content=content
+            )
+        if request.url.path.endswith("/responses"):
+            content = openai_sse(parts, stop, model=body["model"])
             return httpx2.Response(
                 200, headers={"content-type": "text/event-stream"}, content=content
             )
@@ -179,17 +279,20 @@ class FakeModel:
 
 
 def use(client: TestClient, fake: FakeModel, **overrides: Any) -> Settings:
-    """Point the client's app at a fake model, with settings changed as given."""
+    """Point the client's app at a fake model, with settings changed as given. Claude
+    answers on the workspace's key and Ollama as the workspace's Ollama; an OpenAI
+    fake answers whatever personal key a test adds."""
     state = client.app.state  # type: ignore[attr-defined]
     if not hasattr(state, "original_settings"):
         state.original_settings = state.settings
     if fake.kind == "anthropic":
         key = SecretStr("sk-test-0123")
         overrides = {"assistant_provider": "anthropic", "anthropic_api_key": key, **overrides}
+    elif fake.kind == "ollama":
+        overrides = {"assistant_provider": "ollama", **overrides}
     settings = state.original_settings.model_copy(update=overrides)
-    provider_class = AnthropicProvider if fake.kind == "anthropic" else OllamaProvider
-    client.app.state.assistant_provider = provider_class(settings, fake.transport())  # type: ignore[attr-defined]
-    client.app.state.settings = settings  # type: ignore[attr-defined]
+    state.assistant_transport = fake.transport()
+    state.settings = settings
     return settings
 
 
@@ -217,18 +320,25 @@ def entries(events: list[tuple[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
     return [(e["kind"], e["data"]) for name, e in events if name == "entry"]
 
 
+def history_of(body: dict[str, Any]) -> list[dict[str, Any]]:
+    """The conversation in a request: Claude's and Ollama's `messages`, OpenAI's `input`."""
+    return list(body.get("messages") or body.get("input") or [])
+
+
 def last_tool_result(body: dict[str, Any]) -> Any:
-    """The newest tool result in a request, parsed, in either provider's format."""
-    for message in reversed(body["messages"]):
-        if message["role"] == "tool":
+    """The newest tool result in a request, parsed, in any provider's format."""
+    for message in reversed(history_of(body)):
+        if message.get("type") == "function_call_output":
+            return json.loads(message["output"])
+        if message.get("role") == "tool":
             return json.loads(message["content"])
-        if message["role"] == "user" and isinstance(message["content"], list):
+        if message.get("role") == "user" and isinstance(message["content"], list):
             return json.loads(message["content"][-1]["content"])
     raise AssertionError("no tool result")
 
 
 def context_of(body: dict[str, Any]) -> str:
-    first = next(m for m in body["messages"] if m["role"] == "user")
+    first = next(m for m in history_of(body) if m.get("role") == "user")
     return str(first["content"])
 
 
@@ -432,7 +542,10 @@ def test_claude_refusals_fallbacks_and_errors(
     )
     shown = entries(ask(client, dashboard, "Hello"))
     assert any(
-        kind == "notice" and "API key was not accepted" in data["text"] for kind, data in shown
+        kind == "notice"
+        and "The workspace's Anthropic key was not accepted" in data["text"]
+        and "ANTHROPIC_API_KEY" in data["text"]
+        for kind, data in shown
     )
     assert shown[-1][1]["outcome"] == "error"
 
@@ -595,8 +708,7 @@ def test_stop_ends_a_request_and_keeps_what_was_written(
             200, headers={"content-type": "application/x-ndjson"}, content=body()
         )
 
-    settings = make_settings()
-    client.app.state.assistant_provider = OllamaProvider(settings, httpx2.MockTransport(slow))  # type: ignore[attr-defined]
+    client.app.state.assistant_transport = httpx2.MockTransport(slow)  # type: ignore[attr-defined]
     result: dict[str, Any] = {}
     sender = threading.Thread(target=lambda: result.update(events=ask(client, dashboard, "Go")))
     begun = time.monotonic()
@@ -707,11 +819,9 @@ def test_after_a_fallback_only_text_is_sent_back_from_before_it() -> None:
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
-        (
-            {"assistant_provider": "anthropic"},
-            "ASSISTANT_PROVIDER=anthropic needs ANTHROPIC_API_KEY",
-        ),
-        ({"assistant_provider": "anthropic", "anthropic_api_key": "  "}, "needs ANTHROPIC_API_KEY"),
+        ({"ollama_enabled": True, "ollama_url": ""}, "OLLAMA_URL is empty"),
+        ({"anthropic_model": " "}, "ANTHROPIC_MODEL is empty"),
+        ({"openai_base_url": "fake-llm:9500"}, "OPENAI_BASE_URL"),
         ({"ollama_url": "host.docker.internal:11434"}, "OLLAMA_URL"),
         ({"ollama_model": " "}, "OLLAMA_MODEL is empty"),
         ({"anthropic_effort": "extreme"}, "ANTHROPIC_EFFORT"),
@@ -731,8 +841,20 @@ def test_assistant_settings_that_work() -> None:
     from opsis.settings import build_settings
 
     assert build_settings().assistant_model == "gemma4:12b"
+    assert build_settings().ollama_on is True  # v1 setups: Ollama when it is the provider
     claude = build_settings(assistant_provider="anthropic", anthropic_api_key="sk-ant-test")
     assert claude.assistant_model == "claude-opus-5-5" and "sk-ant" not in repr(claude)
+    assert claude.workspace_key_on is True and claude.ollama_on is False
+    # Since v2 people may bring their own keys, so the workspace key is optional; a
+    # blank one counts as none.
+    for keyless in (
+        build_settings(assistant_provider="anthropic"),
+        build_settings(assistant_provider="anthropic", anthropic_api_key="  "),
+    ):
+        assert keyless.workspace_key_on is False
+    both = build_settings(assistant_provider="anthropic", ollama_enabled=True)
+    assert both.ollama_on is True
+    assert build_settings(ollama_enabled=False).ollama_on is False
     assert (
         build_settings(assistant_provider="anthropic", feature_assistant=False).feature_assistant
         is False

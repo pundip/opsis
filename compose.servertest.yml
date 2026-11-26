@@ -39,7 +39,9 @@ x-server: &server
   FEATURE_ASSISTANT: "true"
   ASSISTANT_PROVIDER: anthropic
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+  # The workspace key and people's own keys all reach the fake model.
   ANTHROPIC_BASE_URL: http://fake-llm:9500
+  OPENAI_BASE_URL: http://fake-llm:9500/v1
 
 services:
   config-check:

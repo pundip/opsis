@@ -468,6 +468,10 @@ class AssistantConversation(Base):
     # The history can only be sent back to the provider and model that wrote it.
     provider: Mapped[str] = mapped_column(String(20))
     model: Mapped[str] = mapped_column(String(200))
+    # Whose key answered: "key:<id>" (the person's own), "workspace" or "ollama". A
+    # conversation continues only with the same one (an account's thinking blocks
+    # are not for another account).
+    option: Mapped[str | None] = mapped_column(String(80))
     input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     output_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -505,6 +509,107 @@ class AssistantEntry(Base):
     )
     kind: Mapped[str] = mapped_column(String(20))  # request | text | update | step | notice | done
     data: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class UserApiKey(Base):
+    """A person's own API key for the assistant (v2, ADR-036): Anthropic or OpenAI.
+
+    The key is encrypted with ENCRYPTION_KEY and decrypted only to make a call on
+    its owner's behalf. It is never returned: only its provider, label and last four
+    characters are shown.
+    """
+
+    __tablename__ = "user_api_keys"
+    __table_args__ = (UniqueConstraint("user_id", "label"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(20))  # anthropic | openai
+    label: Mapped[str] = mapped_column(String(100))
+    secret: Mapped[str] = mapped_column(Text)  # Fernet token
+    last4: Mapped[str] = mapped_column(String(4))
+    default_model: Mapped[str | None] = mapped_column(String(200))
+    last_test_ok: Mapped[bool | None] = mapped_column()
+    last_test_message: Mapped[str | None] = mapped_column(Text)
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class CapabilityGrant(Base):
+    """A capability an admin gives to, or takes from, a person or a group (ADR-030):
+    "may use the workspace key" (v2 V1), "may export" (V7). services/grants.py."""
+
+    __tablename__ = "capability_grants"
+    __table_args__ = (UniqueConstraint("capability", "grantee"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    capability: Mapped[str] = mapped_column(String(60))
+    grantee: Mapped[str] = mapped_column(String(60))  # user:<id> | group:<id>
+    allowed: Mapped[bool] = mapped_column()
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WorkspaceSetting(Base):
+    """A setting an admin changes in the app, without a restart (ADR-030)."""
+
+    __tablename__ = "workspace_settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[Any] = mapped_column(JSONB)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AssistantChoice(Base):
+    """What a person last chose in the assistant: their own key, the workspace key or
+    Ollama, and a model for their own key."""
+
+    __tablename__ = "assistant_choices"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    option: Mapped[str] = mapped_column(String(80))
+    model: Mapped[str | None] = mapped_column(String(200))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AssistantUsage(Base):
+    """Tokens one assistant request used: per person, key and provider. Kept when the
+    key is deleted (with its label), for the person's Account page."""
+
+    __tablename__ = "assistant_usage"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    key_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("user_api_keys.id", ondelete="SET NULL")
+    )
+    key_label: Mapped[str | None] = mapped_column(String(100))
+    source: Mapped[str] = mapped_column(String(20))  # own | workspace | ollama
+    provider: Mapped[str] = mapped_column(String(20))
+    model: Mapped[str] = mapped_column(String(200))
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    cached_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    output_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

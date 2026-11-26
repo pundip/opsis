@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-26 (v2, milestone V0: the plan)
+Last updated: 2026-11-26 (v2, milestone V1: bring your own agent)
 
 Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2.md` (v2, milestones V0 to V7). A fresh session resumes v2 from this file, `BUILD_BRIEF_V2.md` and `docs/V2_DESIGN.md`.
 
@@ -9,13 +9,36 @@ Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2
 | Milestone | Status |
 |---|---|
 | V0 Plan | Done, reviewed |
-| V1 BYO agent | In progress |
+| V1 BYO agent | Done, waiting for your review |
 | V2 Workspace model and Model view | Not started |
 | V3 Data prep | Not started |
 | V4 Slicers | Not started |
 | V5 Visual SDK | Not started |
 | V6 Mobile | Not started |
 | V7 Export | Not started |
+
+## v2, V1: bring your own agent
+
+People bring their own Anthropic or OpenAI keys, and the workspace's Claude key is only for people an admin allows. The decisions are in ADR-036 (proposed until your review). Built:
+
+- **Account page, "AI providers":** add, test, rename and delete Anthropic and OpenAI keys, several per person, each with an optional default model. Only the provider, a name and the last four characters are ever shown. **Test** asks the provider for the key's models (free) and shows the provider's own message when it refuses the key; a new key is tested as soon as it is added. When you edit a key, its default-model field offers the key's own list of models. Below the keys: your assistant use per key and provider (requests and tokens, in all and over the last 30 days).
+- **Users page, "AI assistant" tab (admins, with sign-in):** "May use the workspace key" per person and per group, off for everyone by default (a person's own setting wins, then a "no" on any of their groups); each person's result and which providers they have keys for, never the keys; and "Personal API keys" on or off for the whole workspace.
+- **The assistant panel:** a provider picker listing only what you may use (your own keys, the workspace key if allowed, Ollama if on) and, for your own keys, a model field offering the key's own list. The choice is remembered per person. With nothing to use, the panel explains how to get something, with a link to the Account page. When what you chose is taken away, you are asked to choose again rather than moved to something else, and a running request stops at its next step.
+- **The OpenAI provider:** the official `openai` SDK (Apache-2.0) and its Responses API, with tool calling and streaming, sharing the tool loop, budgets, undo and history with Claude and Ollama. Claude on a person's own key gets the options its model takes.
+- **Usage** per request in a new `assistant_usage` table and in the `assistant.request` audit row, which now says whose key answered (own, with the key's id and name; the workspace's; or Ollama). No key and none of the person's words in any log line or audit row.
+- **Security:** keys are encrypted with `ENCRYPTION_KEY` and decrypted only inside the backend, for their owner's requests, Test and model list; a key is never in a response, a log line or an audit row (a test searches for both test keys everywhere); deactivating someone deletes their keys (Opsis deactivates people rather than deleting them). MCP is unchanged.
+- **Settings:** `ANTHROPIC_API_KEY` is optional now with `ASSISTANT_PROVIDER=anthropic`; new `OLLAMA_ENABLED` (default: on when `ASSISTANT_PROVIDER=ollama`) and `OPENAI_BASE_URL` (for the tests' fake model). README and both `.env` templates are updated, with an upgrade note.
+- **Migration 0013:** `user_api_keys`, `capability_grants`, `workspace_settings`, `assistant_choices`, `assistant_usage`, and the option each conversation was written with.
+- **When you upgrade the server:** nobody may use the workspace key until you allow them on the Users page; until then people see the "add a key" message.
+
+### How V1 was checked
+
+- **Backend:** 379 pytest tests pass (367 at V0): the new ones are in `tests/test_byo_agent.py`, and the fakes in `tests/test_assistant.py` now answer over HTTP, so every provider runs through its own SDK. One v1 test changed on purpose: the server template no longer needs `ANTHROPIC_API_KEY` to start. `ruff check`, `ruff format --check` and `mypy --strict` pass. Run on the final files, in a Compose project of their own (`opsis-v1t`), removed afterwards.
+- **Frontend:** typecheck, lint and the 52 unit tests pass (the new pages are covered by the browser tests).
+- **Smoke tests in all three places,** against the same scripted fake model (`e2e/fake-llm.mjs`), which now speaks Ollama's, Anthropic's and OpenAI's APIs and says whose key answered: at the root 12 passed (3 server-only skipped), under `/opsis` 12 passed (3 skipped), and in server mode 14 passed (1 local-only skipped). New: `assistant.spec.ts` builds with an Anthropic key and an OpenAI key added on the Account page; `assistant-access.spec.ts` (server mode) covers the "add a key" message, two people each building with their own key, and a grant, then a revoke that stops the next request without a reload.
+- **Found by the first server-mode run, and fixed:** the admin's toggles snapped back until the save came back, so a click looked ignored. They now show the click at once.
+- **The done-when items:** no keys and no grant shows the "add a key" message (server-mode browser test, and pytest); an own Anthropic key and an own OpenAI key each build a dashboard (browser tests in all three places, and pytest); granting works and revoking takes effect at once, a running request included (browser test and pytest); no key in an API response, a log line or an audit row (`test_no_key_ever_appears_in_a_response_a_log_or_an_audit_row`, and the browser tests check the page and the key list).
+- **Your stack on port 8080:** the root and sub-path runs were by hand in project `opsis-v1` on port 8094 (`smoke.mjs` hard-codes 8080 and restarts your stack), and the server stage in the usual disposable `opsis-servertest`. One thing reached your stack: in the first root run the test stack had loaded your `.env` (Compose's `env_file: .env`), so the fake Google sent the Google Sheets test's browser back to `http://localhost:8080`: one page load, then a POST to `/api/connections/google/finish`, which your stack refused (404). Nothing was written there. Later runs used an override that replaces `env_file`. The test projects, the test image and the test settings are removed.
 
 ## v2, V0: the plan
 
@@ -40,7 +63,7 @@ No feature code: the app behaves exactly as before. Built:
 The in-app guide (`docs/guide`) is not edited in v2 runs (brief v2, rule 7). What each milestone will make out of date:
 
 - **V0:** nothing (no behaviour changed).
-- **V1:** chapter 8 (the assistant: providers, your own keys, the picker); chapter 7 (admins: may use the workspace key); chapter 9 (settings).
+- **V1:** chapter 8 (the providers table: the workspace's Claude key only for people an admin allows, your own Anthropic and OpenAI keys, Ollama with `OLLAMA_ENABLED`; the picker and its "add a key" message; a revoke stopping a request at its next step); chapter 1 (the Account page's AI providers section and its usage table); chapter 7 (admins: the Users page's AI assistant tab, per person and per group, personal keys on or off, deactivating deletes keys); chapter 9 (settings: `ANTHROPIC_API_KEY` optional, `OLLAMA_ENABLED`, the upgrade note).
 - **V2:** chapter 4 (one workspace model, the Model view, measures, date tables, YAML); chapter 5 (relationships instead of joins: direction, active, paths; row-level security through relationships, which removes the warning section); chapters 7 and 8 (security, MCP tools); chapter 9 (current limits).
 - **V3:** chapter 3 (the Table view, transforms), a new chapter on data prep and SQL Lab, chapter 7 (inherited rules and restrictions), chapter 8 (MCP tools).
 - **V4:** chapter 6 (pages, slicers, Edit interactions, links with slicer state).
@@ -391,6 +414,7 @@ Not verified:
 - ADR-026 (new, M8): Google Sheets signs in with your own OAuth client (installed-app style, with a pasted address where Google cannot come back) or a service account, through its REST API with `google-auth` for the token, not the Google API client library; emailed dashboards carry numbers and tables, not pictures of charts; SQL Lab is not in v1 (your decision); unknown non-GET `/api` paths answer 404.
 - ADR-015: the task runner is npm scripts, not `tasks.py`; `httpx2` for the test client (approved), and now also for Ollama.
 - **v2, proposed in V0:** the draft schemas are in `spec/drafts/v2`, not edited in place in `spec/` (the app reads `spec/`, and V0 changes no behaviour); ADR-035: PDF and PNG from an optional renderer container rather than the worker container (local mode has no worker).
+- **v2, proposed in V1 (ADR-036):** "deleting a user deletes their keys" happens when someone is deactivated, since Opsis deactivates people rather than deleting them (the foreign key cascades as well); in local mode the one built-in admin may always use the workspace key, as there is nobody to grant it to; the key's Test lists its models rather than sending a message, which is free but cannot tell whether the account has credit.
 
 ## Open issues and notes
 
@@ -423,16 +447,20 @@ Not verified:
 
 ## Questions for review
 
+For the V1 review (ADR-036):
+
+- **V1-Q1. The key's Test lists the key's models:** free, and it proves the key is accepted, but not that the account has credit (that shows at the first request, in the provider's words). A one-token message to the key's default model would prove both, for a fraction of a cent each time. Keep the free check?
+- **V1-Q2. A choice that is taken away** (a grant revoked, a key deleted, personal keys switched off) asks the person to choose again rather than moving them to another option, which could be a key they pay for. Agreed?
+- **V1-Q3. Switching personal keys off keeps the keys** (stored, but neither listed nor used), so switching back restores them. Or should switching off delete them?
+- **V1-Q4. Usage is shown in tokens, not money:** prices differ per model and change. Enough for now?
+
+From v1, still open:
+
 - **Q1. Emailed dashboards carry numbers, not pictures of charts** (ADR-026): a KPI's value and its comparison, the first 10 rows of each other visual with a bar beside a chart's first measure, and a link to the dashboard. Pictures would need a headless browser in the image (a few hundred MB more, and a browser to keep patched), while tables show reliably in every mail client. Is that enough for v1? (V7's renderer service, if you approve it, could later add them.)
 
 ## Exact next step
 
-1. **V1, bring your own agent: started, no code yet** (2026-11-26; the session reached its usage limit after reading the code and planning). The plan, to build next:
-   - Migration 0013: `user_api_keys` (provider, label, Fernet-encrypted key, last 4, default model, test result, last used; cascade on user delete), `capability_grants` (ADR-030), `workspace_settings` (BYO keys on or off), `assistant_choices` (each person's remembered option and model), `assistant_usage` (tokens per person, key and provider), and `assistant_conversations.option` (a conversation continues only on the same key; backfill `workspace` or `ollama`).
-   - Options per person: own keys (Anthropic, OpenAI), `workspace` (ANTHROPIC_API_KEY, only with a grant; always for the built-in admin in local mode), `ollama` (new `OLLAMA_ENABLED`, default on when `ASSISTANT_PROVIDER=ollama`). `ASSISTANT_PROVIDER=anthropic` no longer needs a key at start.
-   - Providers built per request (keys decrypted only then), with `app.state.assistant_transport` for tests. The grant and the key are re-checked before every model call, so a revoke stops a running request too. Anthropic request options gated per model (adaptive thinking, display updates, fallbacks: lists in the claude-api skill). OpenAI: the official `openai` SDK (3.59, Apache-2.0, built on `httpx2`), Responses API, `store: false`, `include: ["reasoning.encrypted_content"]`, `phase: "commentary"` messages as progress notes; `OPENAI_BASE_URL` for tests. Key test and model lists via each provider's models endpoint (free).
-   - Routes: `/api/account/api-keys` (list, add, rename, default model, test, models, delete; people only, editors and admins), usage on Account; admin `/api/assistant/access` (BYO switch, grants per person and group, who has keys of which provider); the panel's state gains options and the choice. Deactivating a person deletes their keys (Opsis has no delete for people).
-   - Tests: pytest for each provider and the key-leak search (responses, DEBUG logs, audit and assistant tables); e2e fake-llm.mjs gains `/v1/responses` and `/v1/models`, and puts the key's last 4 in its reply so tests see whose key answered; local runs use both own keys and Ollama; server mode: no key shows the "add a key" message, two editors with their own keys, grant then revoke. Run the root and sub-path stages by hand in a project of their own (your `.env` and stack are on 8080), and the server stage with `OPSIS_VERSION` set so `opsis/app:dev` is not rebuilt.
+1. **Your review of V1.** To try it on your stack: `docker compose up -d --build` (migration 0013 runs at start), then the Account page (AI providers) and the editor's Assistant tab. The admins' tab on the Users page needs sign-in (`AUTH_MODE=local` on the laptop, or the server). Please answer V1-Q1 to V1-Q4 under "Questions for review". V2 (the workspace model) starts after the review; its first step ships the upgrade report and `results-digest` alone, for your approval before any migration (ADR-031).
 2. **Still yours from M8**, unchanged: the three steps below.
 
 Your part of M8, then the M8 review:

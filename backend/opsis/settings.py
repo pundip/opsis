@@ -130,7 +130,10 @@ class Settings(BaseSettings):
     # Sheets and Drive calls go (empty: sheets.googleapis.com and www.googleapis.com).
     google_api_base_url: str = ""
 
-    # In-app assistant (FEATURE_ASSISTANT, ASSISTANT_PROVIDER)
+    # In-app assistant (FEATURE_ASSISTANT). People bring their own Anthropic or OpenAI
+    # keys (v2, ADR-036). The workspace's own options are the Anthropic key below, for
+    # people an admin allows, and Ollama. ASSISTANT_PROVIDER is the default for people
+    # who have not chosen.
     anthropic_api_key: SecretStr | None = None
     anthropic_model: str = "claude-opus-5-5"
     # How much Claude thinks before it acts. More is slower and costs more.
@@ -138,8 +141,11 @@ class Settings(BaseSettings):
     # Re-run a request that Claude's safety checks decline on the model Anthropic
     # recommends for it. Turn off for a model without server-side fallbacks.
     anthropic_fallbacks: bool = True
-    # Change only to test against a fake server.
+    # Change only to test against a fake server. They apply to people's own keys too.
     anthropic_base_url: str = ""
+    openai_base_url: str = ""
+    # Offer the workspace's Ollama. Unset: on when ASSISTANT_PROVIDER=ollama (v1 setups).
+    ollama_enabled: bool | None = None
     ollama_url: str = "http://host.docker.internal:11434"
     ollama_model: str = "gemma4:12b"
     # Context size asked of Ollama with each request. The instructions and tools
@@ -232,7 +238,7 @@ class Settings(BaseSettings):
             ) from exc
         return value
 
-    @field_validator("ollama_url", "anthropic_base_url")
+    @field_validator("ollama_url", "anthropic_base_url", "openai_base_url")
     @classmethod
     def _check_service_url(cls, value: str) -> str:
         value = value.strip().rstrip("/")
@@ -345,18 +351,21 @@ class Settings(BaseSettings):
                 problems.append(
                     "FEATURE_PUBLIC_SHARE_LINKS=true is only available with DEPLOY_MODE=server."
                 )
+        # ANTHROPIC_API_KEY is optional since v2: without it people use their own keys.
         if self.feature_assistant:
-            if self.assistant_provider == "anthropic" and self.anthropic_api_key is None:
+            if self.ollama_on and not self.ollama_url:
                 problems.append(
-                    "ASSISTANT_PROVIDER=anthropic needs ANTHROPIC_API_KEY (create one in the "
-                    "Claude Console). Or set ASSISTANT_PROVIDER=ollama, or FEATURE_ASSISTANT=false."
+                    "Ollama is on (OLLAMA_ENABLED, or ASSISTANT_PROVIDER=ollama) but OLLAMA_URL "
+                    "is empty."
                 )
-            if self.assistant_provider == "ollama" and not self.ollama_url:
-                problems.append("ASSISTANT_PROVIDER=ollama needs OLLAMA_URL.")
-            if not self.assistant_model:
+            if self.ollama_on and not self.ollama_model.strip():
                 problems.append(
-                    f"{self.assistant_provider.upper()}_MODEL is empty. Name the model the "
-                    "assistant should use."
+                    "OLLAMA_MODEL is empty. Name the model the assistant should use with Ollama."
+                )
+            if not self.anthropic_model.strip():
+                problems.append(
+                    "ANTHROPIC_MODEL is empty. Name the Claude model to use with the workspace "
+                    "key, and for people's own keys that name none."
                 )
         if self.feature_email:
             if not self.smtp_host.strip():
@@ -444,10 +453,22 @@ class Settings(BaseSettings):
 
     @property
     def assistant_model(self) -> str:
-        """The model the in-app assistant uses with the configured provider."""
+        """The model of the workspace's default option (ASSISTANT_PROVIDER)."""
         if self.assistant_provider == "anthropic":
             return self.anthropic_model.strip()
         return self.ollama_model.strip()
+
+    @property
+    def ollama_on(self) -> bool:
+        """The workspace's Ollama is offered in the assistant."""
+        if self.ollama_enabled is not None:
+            return self.ollama_enabled
+        return self.assistant_provider == "ollama"
+
+    @property
+    def workspace_key_on(self) -> bool:
+        """The workspace's Anthropic key exists (people still need an admin's grant)."""
+        return self.anthropic_api_key is not None
 
     @property
     def trusted_proxy_list(self) -> list[str]:

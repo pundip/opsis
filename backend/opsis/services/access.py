@@ -48,7 +48,7 @@ from opsis.db.models import (
     User,
 )
 from opsis.errors import ApiError
-from opsis.services import audit
+from opsis.services import audit, grants
 
 LEVELS = {"viewer": 1, "editor": 2}
 
@@ -803,6 +803,7 @@ def delete_group(db: Session, actor: Principal, group_id: uuid.UUID) -> None:
     grantee = f"group:{group.id}"
     db.execute(delete(DashboardShare).where(DashboardShare.grantee == grantee))
     db.execute(delete(DatasetGrant).where(DatasetGrant.grantee == grantee))
+    grants.forget(db, grantee)
     audit.record(
         db,
         action="group.deleted",

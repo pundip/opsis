@@ -23,12 +23,13 @@ import time
 import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 import anyio.to_thread
 from sqlalchemy.orm import Session
 
-from opsis.assistant import prompt
+from opsis.assistant import choices, prompt
 from opsis.assistant.providers import (
     Call,
     Part,
@@ -39,7 +40,7 @@ from opsis.assistant.providers import (
     ToolResult,
 )
 from opsis.assistant.runs import Run
-from opsis.db.models import Dashboard
+from opsis.db.models import AssistantUsage, Dashboard, UserApiKey
 from opsis.mcp import tools
 from opsis.services import assistant as store
 from opsis.services import audit, dashboards
@@ -166,11 +167,14 @@ class Request:
         dashboard_id: uuid.UUID,
         text: str,
         selected: str | None,
+        option: choices.Option | None = None,
     ) -> None:
         self.run = run
         self.ctx = ctx
         self.settings = ctx.settings
         self.provider = provider
+        # Whose key this request runs on: checked again before every model call.
+        self.option = option
         self.conversation_id = conversation_id
         self.dashboard_id = dashboard_id
         self.text = text
@@ -331,6 +335,7 @@ class Request:
                     },
                 )
                 return
+            await self._permit()
             self.partial.clear()
             reply = await self._guard(
                 self.provider.complete(
@@ -341,8 +346,8 @@ class Request:
             self.partial.clear()
             self.totals.add(reply)
             await self.provider.check(reply)
-            if reply.message is not None:
-                await self._append([reply.message], history)
+            if reply.messages:
+                await self._append(reply.messages, history)
             for level, text in reply.notices:
                 await self._entry("notice", {"level": level, "text": text})
             if not reply.parts and reply.stop == "end":
@@ -419,6 +424,19 @@ class Request:
                         "run. The assistant will try again in smaller steps.",
                     },
                 )
+
+    async def _permit(self) -> None:
+        """Stop when the person may no longer use this option (a grant taken away, the
+        key deleted, personal keys switched off): it takes effect at once."""
+        option = self.option
+        if option is None:
+            return
+        user_id = self.ctx.principal.user_id
+        reason = await self._db(
+            lambda db: choices.still_allowed(db, self.settings, user_id, option.id)
+        )
+        if reason is not None:
+            raise ProviderError(reason)
 
     async def _show(self, parts: list[Part]) -> None:
         for part in parts:
@@ -523,9 +541,14 @@ class Request:
         ms = int((time.monotonic() - self.started) * 1000)
         try:
             after = await self._db(self._version)
+            option = self.option
             summary = {
                 "outcome": self.outcome,
                 "provider": self.provider.name,
+                # Whose key: own (with the key's id and name), workspace or ollama.
+                "source": option.source if option else None,
+                "keyId": str(option.key_id) if option and option.key_id else None,
+                "keyLabel": option.key_label if option else None,
                 "model": totals.model or self.provider.model,
                 "modelCalls": totals.model_calls,
                 "steps": totals.steps,
@@ -540,6 +563,23 @@ class Request:
 
             def record(db: Session) -> None:
                 store.add_usage(db, self.conversation_id, totals.input_tokens, totals.output_tokens)
+                if option is not None and totals.model_calls:
+                    db.add(
+                        AssistantUsage(
+                            user_id=self.ctx.principal.user_id,
+                            key_id=option.key_id,
+                            key_label=option.key_label,
+                            source=option.source,
+                            provider=self.provider.name,
+                            model=str(summary["model"])[:200],
+                            input_tokens=totals.input_tokens,
+                            cached_tokens=totals.cached_tokens,
+                            output_tokens=totals.output_tokens,
+                        )
+                    )
+                    key = db.get(UserApiKey, option.key_id) if option.key_id else None
+                    if key is not None:
+                        key.last_used_at = datetime.now(UTC)
                 audit.record(
                     db,
                     action="assistant.request",

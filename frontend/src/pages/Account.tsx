@@ -2,6 +2,7 @@
 // The same password form is shown on its own when a new password is required.
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import { ApiKeys } from "../components/ApiKeys";
 import { Badge, Button, Card, Empty, ErrorNote, Field, Input, PageHeader, ROW, TD, TH } from "../components/ui";
 import { useChangePassword, useSignOut } from "../lib/access";
 import type { AppConfig, Me } from "../lib/config";
@@ -152,6 +153,7 @@ export function Account({ config, me }: { config: AppConfig; me: Me }) {
           let AI clients and scripts work in {config.appName} as you.
         </p>
       </Card>
+      {config.features.assistant && me.permissions.includes("dashboards:edit") && <ApiKeys />}
       {signIn && (
         <>
           <Card className="mb-5 p-4">

@@ -32,7 +32,7 @@ flowchart LR
   pg[("Postgres 16: metadata, sessions, jobs, audit")]
   data[("opsisdata volume: Parquet snapshots")]
   sources["Sources: CSV/Excel, Postgres, MySQL, Google Sheets, Salesforce"]
-  llm["Anthropic API or Ollama"]
+  llm["Anthropic, OpenAI or Ollama"]
 
   browser --> caddy
   agent --> caddy
@@ -214,7 +214,7 @@ The editor's Assistant tab sends the person's request to `POST /api/dashboards/{
 sequenceDiagram
   participant P as Panel
   participant A as api (tool loop)
-  participant M as Claude or Ollama
+  participant M as Claude, OpenAI or Ollama
   participant T as MCP tools (as the person)
 
   P->>A: request, selected item
@@ -233,6 +233,8 @@ sequenceDiagram
 - Providers keep the history in their own format and the loop sends it back unchanged (ADR-025). The tools are the MCP tools, so permissions, RLS, validation and the audit of agent writes are the same as for MCP.
 - Every dashboard change is a new version by the assistant; open editors reload it through the live-update channel of section 4. Undo in the panel restores the version before a step, or before the whole request.
 - Conversations, the history and the panel's entries are in Postgres (`assistant_*` tables); requests in progress are in the api process (`assistant/runs.py`).
+
+**Bring your own agent (v2 V1).** Before each request the api works out what the person may use and what they chose (`assistant/choices.py`): their own Anthropic and OpenAI keys (`user_api_keys`, encrypted), the workspace's Claude key if an admin allowed them (`capability_grants`), and Ollama if it is on. It decrypts the chosen key, builds a provider for that request only, and checks the choice again before every model call, so a revoke stops a running request at its next step. Each request's tokens go to `assistant_usage` and the audit log, never a key or the person's words. Details in ADR-036.
 
 ## 7. Schedules, backups and email (M8)
 

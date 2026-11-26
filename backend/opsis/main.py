@@ -25,6 +25,7 @@ from opsis import __version__
 from opsis.api import (
     admin,
     assistant,
+    assistant_keys,
     auth,
     connection_auth,
     dashboards,
@@ -37,7 +38,6 @@ from opsis.api import (
     user_guide,
 )
 from opsis.api.errors import ApiError, install_error_handlers
-from opsis.assistant.providers import build_provider
 from opsis.assistant.runs import Runs
 from opsis.auth import cookies
 from opsis.jobs.worker import InlineRunner
@@ -75,9 +75,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     mcp = OpsisMcp(settings, session_factory, runtime)
     subscriptions.use_runtime(runtime)  # emailed dashboards, when the runner is inline
-    # The in-app assistant: one provider client and the requests in progress.
+    # The in-app assistant's requests in progress. Each request makes its own provider
+    # client, with the key it may use (assistant/choices.py).
     runs = Runs()
-    provider = build_provider(settings) if settings.feature_assistant else None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -104,8 +104,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 yield
         finally:
             await runs.shutdown()
-            if provider is not None:
-                await provider.aclose()
             if runner is not None:
                 runner.stop()
             engine.dispose()
@@ -122,7 +120,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.session_factory = session_factory
     app.state.query_runtime = runtime
     app.state.assistant_runs = runs
-    app.state.assistant_provider = provider
+    # Tests point every model call at a fake (an httpx2 transport); None in real use.
+    app.state.assistant_transport = None
     install_error_handlers(app)
 
     @app.middleware("http")
@@ -187,6 +186,9 @@ def register_feature_routers(api: APIRouter, settings: Settings) -> None:
         api.include_router(sharing.router)
     if settings.feature_assistant:
         api.include_router(assistant.router)
+        api.include_router(assistant_keys.router)
+        if settings.sign_in:
+            api.include_router(assistant_keys.access_router)
     if settings.feature_scheduled_refresh:
         api.include_router(operations.schedules_router)
     if settings.feature_backups:

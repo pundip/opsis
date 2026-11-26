@@ -151,16 +151,17 @@ def test_server_env_template_refuses_to_start_until_placeholders_are_replaced() 
     with pytest.raises(ConfigError) as info:
         build_settings(**values)
     problems = "\n".join(info.value.problems)
-    assert len(info.value.problems) == 6
+    assert len(info.value.problems) == 5
     for name in (
         "TRUSTED_PROXIES",
         "POSTGRES_PASSWORD",
         "ENCRYPTION_KEY",
         "ADMIN_EMAIL",
         "GOOGLE_CLIENT_ID",
-        "ANTHROPIC_API_KEY",
     ):
         assert name in problems
+    # The workspace's Claude key is optional (v2 V1): people may bring their own.
+    assert "ANTHROPIC_API_KEY" not in problems
 
     values.update(
         trusted_proxies="192.168.1.10",
@@ -169,6 +170,7 @@ def test_server_env_template_refuses_to_start_until_placeholders_are_replaced() 
         admin_email="admin@example.org",
         google_client_id="1234.apps.googleusercontent.com",
         google_client_secret="GOCSPX-test-value-5",
-        anthropic_api_key="sk-ant-test-value-7",
     )
-    assert build_settings(**values).base_path == "/opsis"
+    settings = build_settings(**values)
+    assert settings.base_path == "/opsis"
+    assert settings.assistant_provider == "anthropic" and not settings.workspace_key_on

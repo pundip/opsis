@@ -85,6 +85,9 @@ if (run("--root") || run("--subpath")) {
 if (run("--server")) {
   const secret = (bytes) => randomBytes(bytes).toString("base64url");
   const admin = { email: "admin@smoke.test", initial: `Initial-${secret(12)}`, chosen: `Chosen-${secret(12)}` };
+  // The workspace's Claude key, for the fake model only (it accepts any key). The tests
+  // get its last four characters, to see which key answered.
+  const workspaceKey = `sk-fake-${secret(16)}`;
   writeFileSync(
     SERVER_ENV,
     [
@@ -96,8 +99,7 @@ if (run("--server")) {
       `ADMIN_EMAIL=${admin.email}`,
       `ADMIN_INITIAL_PASSWORD=${admin.initial}`,
       `GOOGLE_CLIENT_SECRET=${secret(24)}`,
-      // For the fake model only: it accepts any key.
-      `ANTHROPIC_API_KEY=sk-fake-${secret(16)}`,
+      `ANTHROPIC_API_KEY=${workspaceKey}`,
       "BIND_ADDRESS=127.0.0.1",
       "HTTP_PORT=8081",
       "",
@@ -113,6 +115,7 @@ if (run("--server")) {
       OPSIS_ADMIN_EMAIL: admin.email,
       OPSIS_ADMIN_PASSWORD: admin.initial,
       OPSIS_ADMIN_NEW_PASSWORD: admin.chosen,
+      OPSIS_WORKSPACE_KEY_END: workspaceKey.slice(-4),
     });
     if (status !== 0) failed.push("server mode");
   } finally {

@@ -16,7 +16,8 @@ import {
   useUpdateUser,
   useUsers,
 } from "../lib/access";
-import type { Me } from "../lib/config";
+import { AssistantAccess } from "../components/AssistantAccess";
+import { type Me, useConfig } from "../lib/config";
 import { timeAgo } from "../lib/format";
 
 const ROLES: Role[] = ["viewer", "editor", "admin"];
@@ -286,6 +287,7 @@ function People({ me, groups }: { me: Me; groups: Group[] }) {
                         <Button
                           variant={user.isActive ? "danger" : "secondary"}
                           aria-label={`${user.isActive ? "Deactivate" : "Reactivate"} ${user.email}`}
+                          title={user.isActive ? "Signs them out everywhere and deletes their own AI provider keys." : undefined}
                           onClick={() => update.mutate({ id: user.id, isActive: !user.isActive })}
                         >
                           {user.isActive ? "Deactivate" : "Reactivate"}
@@ -370,15 +372,19 @@ function Groups({ groups, users }: { groups: Group[]; users: UserRow[] }) {
   );
 }
 
+const TABS = { people: "People", groups: "Groups", assistant: "AI assistant" } as const;
+
 export function Users({ me }: { me: Me }) {
-  const [tab, setTab] = useState<"people" | "groups">("people");
+  const [tab, setTab] = useState<keyof typeof TABS>("people");
   const groups = useGroups();
   const users = useUsers();
+  const config = useConfig();
+  const tabs = (Object.keys(TABS) as (keyof typeof TABS)[]).filter((key) => key !== "assistant" || config.data?.features.assistant);
   return (
     <div className="mx-auto max-w-6xl">
       <PageHeader title="Users" description="Who can sign in, what they may do, and the groups you share with." />
       <div role="tablist" className="mb-4 flex gap-1">
-        {(["people", "groups"] as const).map((key) => (
+        {tabs.map((key) => (
           <button
             key={key}
             type="button"
@@ -387,12 +393,14 @@ export function Users({ me }: { me: Me }) {
             onClick={() => setTab(key)}
             className={`rounded-md px-3 py-1.5 text-sm ${tab === key ? "bg-zinc-200/70 font-medium dark:bg-zinc-800" : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400"}`}
           >
-            {key === "people" ? "People" : "Groups"}
+            {TABS[key]}
           </button>
         ))}
       </div>
       <ErrorNote error={groups.error} />
-      {tab === "people" ? <People me={me} groups={groups.data ?? []} /> : <Groups groups={groups.data ?? []} users={users.data ?? []} />}
+      {tab === "people" && <People me={me} groups={groups.data ?? []} />}
+      {tab === "groups" && <Groups groups={groups.data ?? []} users={users.data ?? []} />}
+      {tab === "assistant" && <AssistantAccess />}
     </div>
   );
 }

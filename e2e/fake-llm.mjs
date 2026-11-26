@@ -1,17 +1,22 @@
 // A stand-in for a model in the smoke tests: a scripted dashboard builder that
-// streams like Anthropic's Messages API (/v1/messages) and like Ollama's own chat
-// API (/api/chat, JSON lines). Node only.
+// streams like Anthropic's Messages API (/v1/messages), OpenAI's Responses API
+// (/v1/responses) and Ollama's own chat API (/api/chat, JSON lines). It also
+// answers both providers' models endpoint (GET /v1/models), which the Account
+// page's Test button and model lists use. Node only.
 //
 // It reads the conversation the way the assistant writes it: the <context> block
 // for the dashboard's id, version and datasets, then the tool results so far to
 // decide the next step. Asked to "build" a dashboard, it describes the dataset,
 // lists the visuals, patches the dashboard with a KPI card and a bar chart, and
-// says so. Anything else gets a one-line answer.
+// says so, naming the last four characters of the key it was called with (or
+// "no key" for Ollama), so a test can see whose key answered. Anything else gets
+// a one-line answer. A key with "bad" in it is refused, as a provider would.
 //
 // It also refuses what the real Claude API refuses for current models, so a
 // regression in the request shows up here: forced tool use, thinking turned
-// off or given a budget, and sampling parameters. For Ollama it insists on a
-// context size in each request (options.num_ctx), which a default install needs.
+// off or given a budget, and sampling parameters. For OpenAI it insists on
+// store: false and the whole history in `input`; for Ollama on a context size in
+// each request (options.num_ctx), which a default install needs.
 import { createServer } from "node:http";
 
 const PORT = Number(process.env.PORT ?? 9500);
@@ -30,6 +35,24 @@ function parse(text) {
   } catch {
     return text;
   }
+}
+
+/** The key a call carried (both SDKs send it as a bearer token), or null. */
+function keyOf(req) {
+  const value = req.headers.authorization ?? "";
+  return value.startsWith("Bearer ") ? value.slice(7) : null;
+}
+
+/** OpenAI's history: the newest user message and the function call outputs after it. */
+function openaiConversation(body) {
+  const items = body.input ?? [];
+  let at = -1;
+  items.forEach((item, i) => {
+    if (item.role === "user" && typeof item.content === "string") at = i;
+  });
+  const request = at < 0 ? "" : items[at].content;
+  const results = items.slice(at + 1).filter((item) => item.type === "function_call_output").map((item) => parse(item.output));
+  return { request, results };
 }
 
 /** The request (with its context) and the tool results after it, in either format. */
@@ -53,7 +76,7 @@ function conversation(body, anthropic) {
   return { request, results };
 }
 
-function decide({ request, results }) {
+function decide({ request, results }, key) {
   const ask = request.split("</context>").pop().trim();
   const found = /id ([0-9a-f-]{36}), version (\d+)/.exec(request);
   const listed = request.split("Datasets you may use:")[1] ?? "";
@@ -90,7 +113,8 @@ function decide({ request, results }) {
     }
     default: {
       const saved = results[2]?.saved === true;
-      return { parts: [["text", saved ? "Added a KPI card and a bar chart." : `It did not save: ${JSON.stringify(results[2]).slice(0, 500)}`]] };
+      const whose = key ? `key ending ${key.slice(-4)}` : "no key";
+      return { parts: [["text", saved ? `Added a KPI card and a bar chart (${whose}).` : `It did not save: ${JSON.stringify(results[2]).slice(0, 500)}`]] };
     }
   }
 }
@@ -162,23 +186,92 @@ function ollamaProblem(body) {
   return null;
 }
 
+function openaiProblem(body) {
+  if (body.store !== false) return "the fake model expects store: false (nothing kept at OpenAI)";
+  if (body.stream !== true) return "the fake model expects stream: true";
+  if (!body.instructions) return "the fake model expects the system prompt in instructions";
+  if (!Array.isArray(body.input) || !Array.isArray(body.tools) || body.tools.some((t) => t.type !== "function")) return "input and function tools expected";
+  return null;
+}
+
+async function streamOpenAI(res, body, parts) {
+  res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+  let sequence = 0;
+  const send = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...data })}\n\n`);
+  const base = { id: `resp_${++counter}`, object: "response", created_at: Math.floor(Date.now() / 1000), model: body.model, output: [], parallel_tool_calls: true, tool_choice: "auto", tools: [], status: "in_progress" };
+  send("response.created", { response: base });
+  const output = [];
+  for (const [index, [kind, a, b]] of parts.entries()) {
+    let done;
+    if (kind === "call") {
+      const item = { type: "function_call", id: `fc_${++counter}`, call_id: `call_fake_${++counter}`, name: a, arguments: "", status: "in_progress" };
+      send("response.output_item.added", { output_index: index, item });
+      const text = JSON.stringify(b);
+      for (let i = 0; i < text.length; i += 200) send("response.function_call_arguments.delta", { item_id: item.id, output_index: index, delta: text.slice(i, i + 200) });
+      done = { ...item, arguments: text, status: "completed" };
+    } else {
+      // A progress note is a message marked as commentary, as newer OpenAI models send it.
+      const item = { type: "message", id: `msg_${++counter}`, role: "assistant", status: "in_progress", content: [], ...(kind === "update" ? { phase: "commentary" } : {}) };
+      send("response.output_item.added", { output_index: index, item });
+      for (const word of a.split(/(?<= )/)) {
+        send("response.output_text.delta", { item_id: item.id, output_index: index, content_index: 0, delta: word, logprobs: [] });
+        await pause(15);
+      }
+      done = { ...item, status: "completed", content: [{ type: "output_text", text: a, annotations: [] }] };
+    }
+    send("response.output_item.done", { output_index: index, item: done });
+    output.push(done);
+  }
+  const usage = { input_tokens: 1300, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 }, output_tokens: 70, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 1370 };
+  send("response.completed", { response: { ...base, output, usage, status: "completed" } });
+  res.end();
+}
+
+/** GET /v1/models, as Anthropic (it also sends anthropic-version) or OpenAI answers it. */
+function models(req, res) {
+  const anthropic = "anthropic-version" in req.headers;
+  const key = keyOf(req) ?? "";
+  res.writeHead(key.includes("bad") ? 401 : 200, { "Content-Type": "application/json" });
+  if (key.includes("bad")) {
+    const error = anthropic
+      ? { type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }
+      : { error: { message: `Incorrect API key provided: ${key.slice(0, 3)}****${key.slice(-4)}.`, type: "invalid_request_error", code: "invalid_api_key" } };
+    return res.end(JSON.stringify(error));
+  }
+  if (anthropic) {
+    const data = [
+      { type: "model", id: "claude-opus-5-5", display_name: "Claude Opus 5.5", created_at: "2026-09-01T00:00:00Z" },
+      { type: "model", id: "claude-haiku-5-5", display_name: "Claude Haiku 5.5", created_at: "2026-08-01T00:00:00Z" },
+    ];
+    return res.end(JSON.stringify({ data, has_more: false, first_id: data[0].id, last_id: data[1].id }));
+  }
+  const data = ["gpt-5.5", "gpt-5.5-mini", "text-embedding-3-large"].map((id) => ({ id, object: "model", created: 1767225600, owned_by: "openai" }));
+  return res.end(JSON.stringify({ object: "list", data }));
+}
+
 createServer(async (req, res) => {
   try {
     const path = new URL(req.url, "http://fake").pathname;
-    if (req.method !== "POST" || !["/v1/messages", "/api/chat"].includes(path)) {
+    if (req.method === "GET" && path === "/v1/models") return models(req, res);
+    if (req.method !== "POST" || !["/v1/messages", "/v1/responses", "/api/chat"].includes(path)) {
       res.writeHead(404, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ error: { message: `no route ${req.method} ${path}` } }));
     }
     const body = await json(req);
     const anthropic = path === "/v1/messages";
-    const problem = anthropic ? claudeProblem(body) : ollamaProblem(body);
+    const openai = path === "/v1/responses";
+    const problem = anthropic ? claudeProblem(body) : openai ? openaiProblem(body) : ollamaProblem(body);
     if (problem) {
       res.writeHead(400, { "Content-Type": "application/json" });
-      const error = anthropic ? { type: "error", error: { type: "invalid_request_error", message: problem } } : { error: problem };
+      const error = anthropic
+        ? { type: "error", error: { type: "invalid_request_error", message: problem } }
+        : openai
+          ? { error: { message: problem, type: "invalid_request_error" } }
+          : { error: problem };
       return res.end(JSON.stringify(error));
     }
-    const { parts } = decide(conversation(body, anthropic));
-    await (anthropic ? streamClaude(res, body, parts) : streamOllama(res, body, parts));
+    const { parts } = decide(openai ? openaiConversation(body) : conversation(body, anthropic), keyOf(req));
+    await (anthropic ? streamClaude(res, body, parts) : openai ? streamOpenAI(res, body, parts) : streamOllama(res, body, parts));
   } catch (error) {
     if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: { message: String(error) } }));

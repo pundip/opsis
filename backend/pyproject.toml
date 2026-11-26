@@ -27,8 +27,10 @@ dependencies = [
     "mcp>=1.12",
     "argon2-cffi>=23.1",
     "authlib>=1.3",
-    # The in-app assistant: Claude through the official SDK, Ollama over plain HTTP.
+    # The in-app assistant: Claude and OpenAI through their official SDKs (both on
+    # httpx2), Ollama over plain HTTP.
     "anthropic>=1.7",
+    "openai>=3.59,<4",
     "httpx2>=1.0",
     # M8: Google Sheets (service account tokens), Salesforce, and refresh schedules.
     "google-auth>=2.30",

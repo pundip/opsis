@@ -154,12 +154,19 @@ The tools: `list_datasets`, `describe_dataset`, `list_visuals`, `get_spec_schema
 
 The dashboard editor has an **Assistant** tab: ask it to build a dashboard, change a visual, or answer a question about the data. It uses the same tools as MCP, with your own access, and works on the dashboard you have open (the visual you have selected is what "this" means). Its reply streams in, each tool call is a step you can open to see what it sent and got back, and every change is saved as a new version with an **Undo** button. It cannot create, publish or share dashboards: you do that. Save your own changes first; Send waits for that.
 
-It runs on one of two providers, set in `.env`:
+A picker at the top of the tab chooses what it runs on, from what you may use, and remembers your choice:
 
-- **Ollama** (`ASSISTANT_PROVIDER=ollama`, the laptop default): a model on your own machine. Install Ollama, pull a model that can call tools (`ollama pull gemma4:12b`), and set `OLLAMA_MODEL`. Nothing else needs setting up in Ollama: the assistant uses Ollama's own chat API and asks for a 32,768-token context with each request (`OLLAMA_NUM_CTX`), which its instructions and tools need. With the `ollama` Compose profile, use `OLLAMA_URL=http://ollama:11434`. Local models are slower and less reliable than Claude: on this laptop `gemma4:12b` takes a few minutes to build a small dashboard.
-- **Claude** (`ASSISTANT_PROVIDER=anthropic`, the server default): set `ANTHROPIC_API_KEY`, and optionally `ANTHROPIC_MODEL` (default `claude-opus-5-5`) and `ANTHROPIC_EFFORT` (`low` to `max`, default `medium`). A request Claude's safety checks decline is re-run on the model Anthropic recommends for it, and the panel says when that happened (`ANTHROPIC_FALLBACKS=false` turns it off).
+- **Your own API keys** for Anthropic (Claude) or OpenAI: add them on your **Account** page, under **AI providers**. A key is encrypted with `ENCRYPTION_KEY`, used only for your requests, and never shown again: the page shows its name and last four characters. **Test** asks the provider which models the key may use (it costs nothing). Each key can have a default model, and you can name another in the picker. Your use, per key, is on the same page.
+- **The workspace's Claude key** (`ANTHROPIC_API_KEY`), but only for people an admin allows, per person or per group, on the **Users** page under **AI assistant**. It is off for everyone, admins included, until someone is allowed; taking it away stops a request that is running at its next step. In local mode (no sign-in) the one built-in admin may always use it.
+- **Ollama**, when it is on (`OLLAMA_ENABLED`, or `ASSISTANT_PROVIDER=ollama`, the laptop default): a model on your own machine. Install Ollama, pull a model that can call tools (`ollama pull gemma4:12b`), and set `OLLAMA_MODEL`. Nothing else needs setting up in Ollama: the assistant uses Ollama's own chat API and asks for a 32,768-token context with each request (`OLLAMA_NUM_CTX`), which its instructions and tools need. With the `ollama` Compose profile, use `OLLAMA_URL=http://ollama:11434`. Local models are slower and less reliable than Claude: on this laptop `gemma4:12b` takes a few minutes to build a small dashboard.
 
-Each request has budgets: `ASSISTANT_MAX_STEPS` tool calls (25), `ASSISTANT_MAX_OUTPUT_TOKENS` (100,000), `ASSISTANT_TIMEOUT_SECONDS` (600) and `ASSISTANT_MAX_ROWS` rows of a result shown to the model (100). When one runs out the assistant stops and says so; ask it to continue. Token use is shown under each request and recorded in the audit log.
+With nothing to use, the panel says how to get something (a key of your own, or an admin's permission). Admins can also switch personal keys off for everyone on the **Users** page; keys already added are then kept but not used. Deactivating someone deletes their keys.
+
+`ANTHROPIC_MODEL` (default `claude-opus-5-5`) is the workspace key's model, and the model of your own Anthropic key when you name none; `ANTHROPIC_EFFORT` (`low` to `max`, default `medium`) sets how much Claude thinks. A request Claude's safety checks decline is re-run on the model Anthropic recommends for it, where the model takes that, and the panel says when that happened (`ANTHROPIC_FALLBACKS=false` turns it off). OpenAI runs through its Responses API with nothing stored at OpenAI (`store: false`). `ASSISTANT_PROVIDER` is the default for people who have not chosen.
+
+Each request has budgets: `ASSISTANT_MAX_STEPS` tool calls (25), `ASSISTANT_MAX_OUTPUT_TOKENS` (100,000), `ASSISTANT_TIMEOUT_SECONDS` (600) and `ASSISTANT_MAX_ROWS` rows of a result shown to the model (100). When one runs out the assistant stops and says so; ask it to continue. Token use is shown under each request, on your Account page per key, and in the audit log (with the provider and the key's name, never the key).
+
+**Upgrading a server from v1:** the workspace key is no longer open to everyone. After the upgrade, allow the people (or a group) who should use it on the Users page, or ask them to add their own keys.
 
 ### Server
 
@@ -268,8 +275,9 @@ Everything is set in `.env`. The two templates document each value. After a chan
 | `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` | Sign-in to the mail server (both empty: none), and the sender | empty | the sender is required with email on |
 | `FEATURE_ASSISTANT` | In-app AI panel | `true` | `true` |
 | `ASSISTANT_PROVIDER` | `anthropic` or `ollama` | `ollama` | `anthropic` |
+| `OLLAMA_ENABLED` | Offer the workspace's Ollama in the assistant | on when `ASSISTANT_PROVIDER=ollama` | same |
 | `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX` | Where Ollama is, the model to use, and the context size asked for with each request | `http://host.docker.internal:11434`, `gemma4:12b`, `32768` | same, if used |
-| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Claude for the assistant | empty, `claude-opus-5-5` | required for `anthropic` |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | The workspace's Claude key (for people an admin allows) and its model, also the default for people's own Anthropic keys | empty, `claude-opus-5-5` | optional |
 | `ANTHROPIC_EFFORT`, `ANTHROPIC_FALLBACKS` | How much Claude thinks; re-run declined requests on another model | `medium`, `true` | same |
 | `ASSISTANT_MAX_STEPS`, `ASSISTANT_MAX_OUTPUT_TOKENS`, `ASSISTANT_TIMEOUT_SECONDS`, `ASSISTANT_MAX_ROWS` | Budgets for one request to the assistant | `25`, `100000`, `600`, `100` | same |
 | `FEATURE_BACKUPS` | Nightly backup job | `false` | `true` |

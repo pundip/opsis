@@ -1,6 +1,6 @@
 // Shared set-up for the smoke tests: a small CSV dataset created through the
 // REST API, and removal of everything a test made.
-import { expect, type APIResponse, type Page } from "@playwright/test";
+import { expect, request, type APIResponse, type Browser, type Page } from "@playwright/test";
 
 export const CSV = [
   "id,fund,channel,amount,gift_date",
@@ -110,4 +110,66 @@ export function dashboardIdFrom(url: string): string {
   const match = /dashboards\/([0-9a-f-]{36})/.exec(url);
   if (!match) throw new Error(`No dashboard id in ${url}`);
   return match[1]!;
+}
+
+/** What the fake model says when it has built a dashboard, naming whose key answered. */
+export const BUILT = /Added a KPI card and a bar chart \((no key|key ending .{4})\)\./;
+
+/** Ask the open editor's assistant to build a dashboard from a dataset; returns the reply.
+ * A new provider starts a new conversation, so the newest reply is the last one shown. */
+export async function askToBuild(page: Page, dataset: string): Promise<string> {
+  const log = page.getByRole("log", { name: "Conversation with the assistant" });
+  await page.getByLabel("Message to the assistant").fill(`Build a dashboard from ${dataset}`);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(log.getByText(BUILT).last()).toBeVisible();
+  return (await log.getByText(BUILT).last().textContent()) ?? "";
+}
+
+const NOBODY = { cookies: [], origins: [] };
+export const PERSON_PASSWORD = "Smoke-Test-Pass-2026";
+
+interface Email {
+  to: string;
+  subject: string;
+  text: string;
+}
+
+/** Server mode: invite someone (the invitation is emailed to the fake mail server),
+ * then set their password from the link in a browser of their own, signed in. */
+export async function invitePerson(
+  page: Page,
+  browser: Browser,
+  name: string,
+  role: "editor" | "viewer" = "editor",
+): Promise<{ page: Page; id: string; email: string }> {
+  const email = `${name.toLowerCase()}-${Date.now().toString(36)}@smoke.test`;
+  const made = await api(page, "POST", "api/users", { email, displayName: `${name} Smoke`, role });
+  let link: string | null = made.link;
+  if (!link) {
+    const mailbox = await request.newContext({ storageState: NOBODY });
+    try {
+      await expect
+        .poll(
+          async () => {
+            const messages = (await (await mailbox.get(`http://localhost:9600/messages?to=${encodeURIComponent(email)}`)).json()) as Email[];
+            link = /http:\/\/localhost:8088\/opsis\/set-password\/[A-Za-z0-9_-]+/.exec(messages.at(-1)?.text ?? "")?.[0] ?? null;
+            return link !== null;
+          },
+          { timeout: 30_000 },
+        )
+        .toBe(true);
+    } finally {
+      await mailbox.dispose();
+    }
+  }
+  const context = await browser.newContext({ storageState: NOBODY, viewport: { width: 1500, height: 950 } });
+  const person = await context.newPage();
+  await person.goto(link!);
+  await person.getByLabel("New password").fill(PERSON_PASSWORD);
+  await person.getByLabel("Repeat the password").fill(PERSON_PASSWORD);
+  await person.getByRole("button", { name: "Set password and sign in" }).click();
+  await expect(person.getByRole("navigation", { name: "Main" })).toBeVisible();
+  return { page: person, id: made.user.id, email };
 }

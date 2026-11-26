@@ -3,16 +3,21 @@
 // sent and got back; each change it made can be undone with one click.
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import {
+  type AssistantState,
   type Entry,
   type Live,
   type Step,
   type Summary,
   NO_LIVE,
+  PROVIDER_NAMES,
   applyEvent,
   sendToAssistant,
   useAssistant,
+  useKeyModels,
   useNewConversation,
+  useSetChoice,
   useStopAssistant,
 } from "../../lib/assistant";
 import type { Item } from "../../lib/dashboard";
@@ -28,7 +33,76 @@ interface Props {
   undoing: boolean;
 }
 
-const PROVIDERS = { anthropic: "Claude", ollama: "Ollama" } as const;
+/** What the assistant uses: the person's own keys, the workspace's key, Ollama. The
+ * choice is remembered for the person; for their own key they also name the model. */
+function ProviderPicker({ state, busy }: { state: AssistantState; busy: boolean }) {
+  const choose = useSetChoice();
+  const current = state.options.find((option) => option.id === state.choice?.option) ?? null;
+  const own = current && !current.fixedModel ? current : null;
+  const [model, setModel] = useState(state.choice?.model ?? "");
+  useEffect(() => setModel(state.choice?.model ?? ""), [state.choice?.option, state.choice?.model]);
+  const models = useKeyModels(own?.keyId ?? null);
+  const commit = () => {
+    if (own && model.trim() !== (state.choice?.model ?? "")) choose.mutate({ option: own.id, model: model.trim() || null });
+  };
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          aria-label="AI provider"
+          className="min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-950"
+          value={current?.id ?? ""}
+          disabled={busy || choose.isPending}
+          onChange={(event) => choose.mutate({ option: event.target.value, model: null })}
+        >
+          {!current && (
+            <option value="" disabled>
+              Choose what to use
+            </option>
+          )}
+          {state.options.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        {own && (
+          <>
+            <input
+              aria-label="Model"
+              list="assistant-models"
+              className="w-40 rounded-md border border-zinc-300 bg-white px-2 py-1 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-950"
+              placeholder={own.provider === "openai" ? "for example gpt-5.5" : "for example claude-opus-5-5"}
+              value={model}
+              disabled={busy}
+              onChange={(event) => setModel(event.target.value)}
+              onBlur={commit}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commit();
+                }
+              }}
+            />
+            <datalist id="assistant-models">
+              {(models.data?.models ?? []).map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.name}
+                </option>
+              ))}
+            </datalist>
+          </>
+        )}
+      </div>
+      {state.notice && (
+        <p role="alert" className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm dark:border-amber-900 dark:bg-amber-950/40">
+          {state.notice}
+        </p>
+      )}
+      <ErrorNote error={choose.error} />
+    </div>
+  );
+}
 
 function seconds(ms: number): string {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
@@ -194,7 +268,7 @@ export function AssistantPanel({ dashboardId, items, selected, dirty, onUndo, un
 
   const send = async () => {
     const request = text.trim();
-    if (!request || busy || dirty) return;
+    if (!request || busy || dirty || !state.data?.choice) return;
     setError(null);
     setText("");
     setLive({ ...NO_LIVE });
@@ -216,20 +290,33 @@ export function AssistantPanel({ dashboardId, items, selected, dirty, onUndo, un
     }
   };
 
-  const provider = state.data ? `${PROVIDERS[state.data.provider]} (${state.data.model})` : "";
+  const provider = state.data?.provider ? `${PROVIDER_NAMES[state.data.provider]} (${state.data.model ?? "no model yet"})` : "";
+  const nothing = state.data !== undefined && state.data.options.length === 0;
+  // Options, but none chosen: what was chosen is gone, so the person picks again.
+  const unchosen = state.data !== undefined && !nothing && state.data.choice === null;
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
       <div className="flex items-center gap-2">
         <p className="mr-auto truncate text-xs text-zinc-500" title={provider}>
           {provider}
         </p>
-        <Button className="!px-2 !py-0.5 text-xs" disabled={busy || shown.length === 0} busy={fresh.isPending} onClick={() => fresh.mutate()}>
+        <Button className="!px-2 !py-0.5 text-xs" disabled={busy || shown.length === 0 || nothing} busy={fresh.isPending} onClick={() => fresh.mutate()}>
           New conversation
         </Button>
       </div>
+      {state.data && !nothing && <ProviderPicker state={state.data} busy={busy} />}
+      {nothing && (
+        <div role="note" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm dark:border-amber-900 dark:bg-amber-950/40">
+          <p className="font-medium">No AI provider to use yet</p>
+          <p className="mt-1">{state.data?.unavailable}</p>
+          <Link to="/account" className="mt-2 inline-block text-brand underline">
+            Add a key on your Account page
+          </Link>
+        </div>
+      )}
       <div ref={log} role="log" aria-label="Conversation with the assistant" className="min-h-0 flex-1 space-y-2 overflow-auto pr-1">
         {state.isPending && <p className="text-sm text-zinc-500">Loading...</p>}
-        {state.data && shown.length === 0 && (
+        {state.data && !nothing && shown.length === 0 && (
           <p className="text-sm text-zinc-500">
             Ask for a dashboard or a change, for example "Build a dashboard of gifts by fund and month", or ask a question about
             the data. Changes are saved as new versions you can undo.
@@ -279,7 +366,14 @@ export function AssistantPanel({ dashboardId, items, selected, dirty, onUndo, un
               Stop
             </Button>
           ) : (
-            <Button type="submit" variant="primary" disabled={!text.trim() || dirty} title={dirty ? "Save your changes first" : undefined}>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={!text.trim() || dirty || nothing || unchosen}
+              title={
+                dirty ? "Save your changes first" : nothing ? "Add a key on your Account page first" : unchosen ? "Choose what the assistant should use" : undefined
+              }
+            >
               Send
             </Button>
           )}

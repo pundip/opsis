@@ -19,7 +19,7 @@ from opsis.auth import passwords
 from opsis.auth.principal import Principal, Role
 from opsis.db.models import AccessToken, Group, GroupMember, User, UserLink
 from opsis.errors import ApiError
-from opsis.services import audit, lockout, sessions
+from opsis.services import api_keys, audit, lockout, sessions
 from opsis.settings import Settings
 
 log = logging.getLogger("opsis.accounts")
@@ -397,6 +397,7 @@ def update_user(
         user.attributes = _check_attributes(changes["attributes"])
     if changes.get("groupIds") is not None:
         _set_groups(db, user, list(changes["groupIds"]))
+    removed_keys = 0
     if active is not None:
         user.is_active = bool(active)
         if not user.is_active:
@@ -404,11 +405,15 @@ def update_user(
             db.execute(
                 delete(UserLink).where(UserLink.user_id == user.id, UserLink.used_at.is_(None))
             )
+            # Their own API keys go too: deactivating is how access ends here (ADR-036).
+            removed_keys = api_keys.remove_all(db, user.id)
     after = {"role": user.role, "isActive": user.is_active}
     detail: dict[str, Any] = {
         "email": user.email,
         **{k: [before[k], after[k]] for k in after if before[k] != after[k]},
     }
+    if removed_keys:
+        detail["api_keys_deleted"] = removed_keys
     if changes.get("attributes") is not None:
         detail["attributes_changed"] = True
     if changes.get("groupIds") is not None:
