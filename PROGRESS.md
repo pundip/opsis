@@ -8,8 +8,8 @@ Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2
 
 | Milestone | Status |
 |---|---|
-| V0 Plan | Done, awaiting review |
-| V1 BYO agent | Not started (waits for the V0 review) |
+| V0 Plan | Done, reviewed |
+| V1 BYO agent | In progress |
 | V2 Workspace model and Model view | Not started |
 | V3 Data prep | Not started |
 | V4 Slicers | Not started |
@@ -228,6 +228,7 @@ M3.5 benchmark, in one line: 5 million rows on this laptop, typical queries 77 t
 
 ## Review outcomes so far
 
+- **V0 (v2 plan):** approved, ADR-030 to ADR-035 accepted. Row-level security through relationships applies to migrated models, after a report of which dashboards and which people will see fewer rows is shown and approved. Measures from several tables and measures that name a relationship are in V2; many-to-many is on the backlog. Replacement rules on a transform: anyone allowed to edit the input's rules, except where an admin set the input's rule or restriction (then admins only); every replacement audited, with a clear warning when it gives wider access. The renderer container for PDF and PNG. The security rules' tests must exist and pass before V2 and V3 count as done. Pages in V4. Export cap 25 MB by default, adjustable by admins.
 - **M0:** keep psycopg; `Australia/Melbourne`, Monday weeks, financial years in v1 (ADR-012); Apache 2.0; deviations ADR-005, 006 and 007 approved.
 - **M1:** brief replaced with the current version (sub-path hosting, section 3.1); ADR-013 superseded by ADR-016; `FISCAL_YEAR_LABEL` added; one-shot config check; placeholder secrets refused in server mode; `httpx2` kept.
 - **M2:** keep the built-in schema form for connections; at the start of M4 prototype rjsf with a CSP-safe validator and decide then (ADR-018). `BIND_ADDRESS` stays `0.0.0.0` in the server template and is not a required value. Editors may see connections and their non-secret settings.
@@ -422,25 +423,12 @@ Not verified:
 
 ## Questions for review
 
-**v2, from V0** (details and recommendations in `docs/V2_DESIGN.md`, section 10):
-
-- **V0-Q1. Row-level security through relationships changes some results.** The brief's rule makes a rule on a joined table filter the tables that join to it, so people that rule applies to will see fewer rows on some existing dashboards (ADR-032, R2). Apply it on migration (recommended), or keep v1's behaviour per relationship until you switch it on?
-- **V0-Q2.** Measures from several tables in one visual, and USERELATIONSHIP measures, in V2 (recommended), or on the backlog?
-- **V0-Q3.** Many-to-many relationships on the backlog (recommended), or in V2 for filtering only?
-- **V0-Q4.** Who may re-declare an inherited rule on a transform: anyone who may edit the input's rules, as v1 lets editors edit rules (recommended), or admins only? And should editing row-level security become admin-only in v2?
-- **V0-Q5.** PDF and PNG from an optional renderer container (recommended) rather than Chromium in the worker image?
-- **V0-Q6.** "Propose the exact rule in V0 and test it": V0 states the rules and lists the tests; the tests come with the features (V2, V3), since nothing exists to test yet. Is that what you meant?
-- **V0-Q7.** Pages in V4: agreed? **V0-Q8.** An export cap of 25 MB by default?
-
-**v1:**
-
 - **Q1. Emailed dashboards carry numbers, not pictures of charts** (ADR-026): a KPI's value and its comparison, the first 10 rows of each other visual with a bar beside a chart's first measure, and a link to the dashboard. Pictures would need a headless browser in the image (a few hundred MB more, and a browser to keep patched), while tables show reliably in every mail client. Is that enough for v1? (V7's renderer service, if you approve it, could later add them.)
 
 ## Exact next step
 
-1. **Review V0** (about 30 minutes; the reading order is at the top of `docs/V2_DESIGN.md`) and answer V0-Q1 to V0-Q8. Then give the go-ahead for V1.
-2. **V1, bring your own agent**, starts after that: per-person keys, the admin toggles, the OpenAI provider, the picker, usage logging, and the tests the brief lists (V2_DESIGN section 7).
-3. **Still yours from M8**, unchanged: the three steps below.
+1. **V1, bring your own agent, is in progress** (started 2026-11-26 after the V0 review): per-person keys, the admin toggles, the OpenAI provider, the picker, usage logging, and the tests the brief lists (V2_DESIGN section 7).
+2. **Still yours from M8**, unchanged: the three steps below.
 
 Your part of M8, then the M8 review:
 

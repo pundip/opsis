@@ -480,10 +480,10 @@ Short ADR entries. Newest at the bottom. "Brief" means `BUILD_BRIEF.md`. An entr
 
 # v2 (BUILD_BRIEF_V2.md)
 
-ADR-030 to ADR-035 were written in milestone V0, the plan, and are **proposed** until the V0 review. "Brief v2" means `BUILD_BRIEF_V2.md`. The details behind each one are in `docs/V2_DESIGN.md`; the draft schemas are in `spec/drafts/v2`.
+ADR-030 to ADR-035 were written in milestone V0, the plan, and accepted at the V0 review (2026-11-26) with the changes marked "Decided at the V0 review". "Brief v2" means `BUILD_BRIEF_V2.md`. The details behind each one are in `docs/V2_DESIGN.md`; the draft schemas are in `spec/drafts/v2`.
 
 ## ADR-030: The v2 plan and the choices every milestone shares
-- **Status:** proposed, V0
+- **Status:** accepted, V0 review
 - **Order:** V1 to V7 as in the brief. V2's compiler (relationships) is on the critical path: V4's slicers across tables and V7's export both build on it.
 - **Draft schemas** live in `spec/drafts/v2` until the milestone that builds each one moves it into `spec/` with its code and migration. The app does not read them (it loads `spec/*.schema.json` without subfolders); `tests/test_spec_drafts.py` keeps them valid and checks the examples.
 - **Grants per person and group, one mechanism:** a `capability_grants` table (capability, grantee, allowed) for "may use the workspace key" (V1, off by default) and "may export" (V7, on for editors and admins). A setting on the person wins; otherwise a deny on any of their groups wins over an allow; otherwise the role's default.
@@ -493,7 +493,8 @@ ADR-030 to ADR-035 were written in milestone V0, the plan, and are **proposed** 
 - **New MCP tools** follow ADR-022: compact results, one example input in each description, flag and permission checks, audited writes. They are listed per milestone in `V2_DESIGN.md`.
 
 ## ADR-031: One workspace model, migrated from the models per dataset
-- **Status:** proposed, V0 (built in V2)
+- **Status:** accepted, V0 review (built in V2)
+- **Decided at the V0 review:** measures from several tables in one visual and measures that name a relationship are in V2; many-to-many stays on the backlog; row-level security through relationships applies to migrated models, but only after a report of which dashboards and which people will see fewer rows has been shown to you and approved (section 1.4 of `V2_DESIGN.md`: the report ships, alone, before the migration).
 - **Decision: one workspace model for the whole workspace**, not one per subject area. A table is named after the dataset or transform it reads, so every field reference in dashboards, queries, MCP calls and URLs (`gifts.total_amount`) means what it means today, and dashboards need no model reference. Several models would put a model name in every dashboard and query, and the same dataset would need a different name in each model. Subject areas can come later as display folders or perspectives, which change no reference.
 - **Shape** (`spec/drafts/v2/workspace-model.schema.json`): `tables` (each the v1 model of a dataset without its `joins`, plus `source`, `hidden`, `dateTable` and field `hidden`, `format`, `dataCategory`), `relationships` keyed by id, and `layout`. Everything is a map, never a list, so a JSON Patch path means the same in the whole model and in the part someone may see. A dataset with data and no table entry is a table with its generated starter definition, as in v1, until someone edits it.
 - **Storage:** one `workspace_model` row and `workspace_model_versions` (the whole document per save, like dashboards: diff, restore, author, note). Table positions in the Model view are stored beside the model, not in its history. Saves carry `baseVersion`; a stale patch is applied anyway when none of its paths changed since, so two people working on different tables do not collide.
@@ -508,7 +509,10 @@ ADR-030 to ADR-035 were written in milestone V0, the plan, and are **proposed** 
 - **Not chosen:** keeping joins inside each table (a relationship belongs to two tables, and the Model view and two-way filters need them global); per-table rows with their own versions (a change often touches two tables, and restoring "the model as it was on Monday" needs one history).
 
 ## ADR-032: Row-level security through relationships and transforms, and SQL written by people
-- **Status:** proposed, V0 (relationships in V2, transforms and SQL Lab in V3)
+- **Status:** accepted, V0 review (relationships in V2, transforms and SQL Lab in V3)
+- **Decided at the V0 review:**
+  - The tests for these rules (section 3.5 of `V2_DESIGN.md`) must exist and pass before V2 and V3 can count as done.
+  - R4 changes: a replacement rule may be written by anyone allowed to edit the input's rules, **except where an admin set the input's rule or its restriction: then only an admin may.** A rule saved by an admin is admin-set, as restrictions are (ADR-024). Every replacement is audited, and the UI warns clearly when it gives wider access than the input's rule: for each person with attributes and each role, Opsis compares the transform computed from what they may see of the inputs with what the replacement shows them, and names who would see more.
 - **The rules.** R1 to R6 are the requirement; `V2_DESIGN.md` section 3 has examples and the tests that must pass.
   - **R1, a table's own rules:** as in v1 (ADR-019, ADR-020): the rules that apply to the person's role are ANDed, a missing attribute denies, a broken rule blocks, admins are exempt unless listed (with the badge), share links are never exempt.
   - **R2, through relationships:** a table keeps only rows related to visible rows of each table that filters it for security. For each active relationship from T (many) to S (one) where S's rows are restricted for this person, T keeps rows whose key is in S's visible keys; rows with an empty or unmatched key are hidden. With `securityFilter: both`, S likewise keeps only rows related to visible rows of T. Inactive relationships carry no security filter, and a measure that uses one still reads T's visible rows only. A loop of active relationships through a table with rules is refused. A table read only to apply a security filter is not a use of it: no access check, and none of its rows are returned.
@@ -525,7 +529,7 @@ ADR-030 to ADR-035 were written in milestone V0, the plan, and are **proposed** 
 - **Consequence:** R2 changes results: people a joined table's rule applies to see fewer rows than in v1 (the trap ADR-028 warns about, now closed). Question Q1 asks whether that is wanted on migrated models.
 
 ## ADR-033: Pages, slicers and Edit interactions
-- **Status:** proposed, V0 (built in V4; phone layout in V6)
+- **Status:** accepted, V0 review (built in V4; phone layout in V6)
 - **Pages: yes, in V4.** They are cheap now: items stay in one flat list and gain a `page`, so JSON Patch paths, the agent's instructions, the data endpoint (one item at a time) and validation per item are unchanged; a position is already per item, so each page has its own grid. A dashboard without `pages` is one page, which is what migrated dashboards are. Tabs sit at the bottom; the page is in the URL.
 - **Slicers are items** with `visual: "slicer"`, a `field` binding (several fields, top level first, for a hierarchy; a date hierarchy is one field at several grains) and a `slicer` object: type (list, dropdown, tiles, between, date, hierarchy), date mode (between, relative, before, after), single or multiple, select all, search, clear, default, sort, `scope` (its page, the dashboard, or listed pages) and `syncGroup` (slicers that share one selection, so one slicer can appear on several pages). The filter bar stays for dashboard-wide filters.
 - **One slicer filters many visuals:** within its scope, every item whose query the model relates to the slicer's field, through relationships in their filter direction (ADR-031), including items on other tables. The server decides which slicers apply to an item; the browser only sends their values. Slicers narrow each other's options the same way.
@@ -535,7 +539,7 @@ ADR-030 to ADR-035 were written in milestone V0, the plan, and are **proposed** 
 - **Phone layout (V6):** `phone` on each item (hidden, order, height); without it, tiles stack in reading order at full width.
 
 ## ADR-034: Visual packages and their sandbox
-- **Status:** proposed, V0 (built in V5)
+- **Status:** accepted, V0 review (built in V5)
 - **Package:** an `.opsisviz` zip with `manifest.json` (the manifest format of built-in visuals plus `sdkVersion`, `entry`, `author`, optional `style`, `icon`, `licence`, `sampleData`, `libraries`, and `capabilities` as a list), one self-contained ES module, optional CSS, README, icon and sample data. Flat file names only; at most 5 MB zipped, 15 MB unpacked, 20 files. ECharts 6 and D3 7 are provided inside the frame on request, so packages stay small.
 - **Contract** (TypeScript types in `sdk/visuals/` in V5): the module exports `create(host)`, returning `update(data, config, context)` and `destroy()`. `data` is columnar (field metadata plus one array per field, and which fields fill which role); `context` has the theme, size, locale, financial-year settings and current selection; `host` has `select`, `drill`, `tooltip`, `requestResize` and `log`, nothing else.
 - **Sandbox:** one iframe per tile, `sandbox="allow-scripts"` without `allow-same-origin`, so it has an opaque origin: no cookies, no storage, no access to the parent, no popups, forms, downloads or top-level navigation. The frame page is built by the server from the stored package and sent with its own policy: `default-src 'none'`, scripts only by hash (plus `blob:` for importing the bundle), inline styles, images and fonts only as `data:` and `blob:`, `connect-src 'none'`, no frames, workers, forms or base URL, `frame-ancestors 'self'` and `sandbox allow-scripts`. Opsis's own policy gains an explicit `frame-src 'self'`, which also stops a frame navigating itself to another site with data in the address.
@@ -547,7 +551,8 @@ ADR-030 to ADR-035 were written in milestone V0, the plan, and are **proposed** 
 - **Residual risks, accepted with admins as the gate:** a visual can see the rows of its own tile; WebRTC is outside every browser's CSP, so the frame's runtime removes it before the visual loads (best effort); a visual stuck in a loop can freeze the page in browsers that run sandboxed frames on the page's own thread, which the playground preview is there to catch.
 
 ## ADR-035: Export: data per tile, aggregated for its controls, and a renderer for PDF and PNG
-- **Status:** proposed, V0 (built in V7)
+- **Status:** accepted, V0 review (built in V7)
+- **Decided at the V0 review:** the renderer container, as proposed. The export cap is 25 MB by default and admins can change it (a workspace setting, ADR-030).
 - **Decision: each tile's data is pre-aggregated** at the grain of its own fields plus every filter, slicer and cross-filter field that can reach it, and a small engine in the file filters and re-aggregates it. Not DuckDB-WASM with Parquet: its WebAssembly alone is tens of megabytes, base64 makes that a third bigger, it needs `wasm-unsafe-eval` and workers, and it would carry row-level data for every table the dashboard reads. Tile data is usually far smaller, opens at once, and needs no eval.
 - **Fidelity:** every control of the dashboard works offline. Sums, counts, minimums, maximums and averages (as sum and count) re-aggregate exactly, and formula measures are worked out from them. Distinct counts are exact while the value lists fit a cap, then approximate (a HyperLogLog sketch, shown with "≈" and a note). Relative dates are resolved when the file is made; the file says so.
 - **Size:** before export, Opsis counts each tile's rows as the person and shows the estimated size per tile and in all. Over the cap (`EXPORT_MAX_MB`, default 25) it refuses, names the tiles and what makes them big, and offers to fix a control at its current value for the offline copy.

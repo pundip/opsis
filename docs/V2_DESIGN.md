@@ -1,8 +1,6 @@
 # Opsis v2: the designs (milestone V0)
 
-The plan for `BUILD_BRIEF_V2.md`, written in milestone V0. Nothing here is built yet. The decisions are ADR-030 to ADR-035 in `DECISIONS.md` (proposed until the V0 review); this file has the detail behind them. The draft schemas and their migrations are in `spec/drafts/v2` (start with its README).
-
-**Reviewing in 30 minutes:** the six ADRs (about 12 minutes), section 10 here (the questions, 3 minutes), `spec/drafts/v2/README.md` and two examples, `dashboard.pages-and-slicers.json` and `workspace-model.demo.json` (10 minutes). Sections 1 to 9 are the detail to dip into.
+The plan for `BUILD_BRIEF_V2.md`, written in milestone V0 and approved at the V0 review (2026-11-26; the answers are in section 10). The decisions are ADR-030 to ADR-035 in `DECISIONS.md`; this file has the detail behind them, and each milestone builds from it. The draft schemas and their migrations are in `spec/drafts/v2` (start with its README).
 
 ## 1. The workspace model (ADR-031, built in V2)
 
@@ -67,7 +65,7 @@ The migration steps are in `spec/drafts/v2/README.md` and written out in `tests/
 2. **Filter reach.** v2 lets filters reach further (any number of steps, both directions where set). Dashboards keep the v1 reach until V4 migrates them, and that migration writes down any difference (section 4.3).
 3. **Row-level security through relationships** (ADR-032, R2) is the one intended change of results. Before the upgrade, a report lists every model with a rule on a joined table (the `joined_rules_not_applied` warning of ADR-028 finds them).
 
-The check on your stack: V2's first commit adds `python -m opsis results-digest`, and nothing else. Deployed and run before the migration, it writes, for every dashboard (draft and published) and every item, a hash of the rows at the default filter state, as an admin and as each person who has attributes. After the upgrade, `results-digest --compare <file>` lists every item whose rows changed, with who saw the difference. Tests do the same on fixtures that cover every v1 join pattern: direct, two steps, inner, `one_to_many` declared, a restricted dataset in between, and two ways to one dataset.
+The check on your stack: V2's first commit adds `python -m opsis results-digest`, and nothing else. Deployed and run before the migration, it writes, for every dashboard (draft and published) and every item, a hash of the rows at the default filter state, as an admin and as each person who has attributes. It also writes the report of which dashboards and which people will see fewer rows once row-level security travels through relationships. **The migration waits until you have seen that report and approved it** (decided at the V0 review). After the upgrade, `results-digest --compare <file>` lists every item whose rows changed, with who saw the difference. Tests do the same on fixtures that cover every v1 join pattern: direct, two steps, inner, `one_to_many` declared, a restricted dataset in between, and two ways to one dataset.
 
 Model files: export writes `models/<table>.yml` (each with a `table` key) and `models/workspace-model.yml` (relationships, layout); `workspace-model` cannot be a table name, because table names have no hyphen. Import accepts that layout, or v1 files (`dataset` plus `joins`), converted with the migration's rules; all files are checked first and nothing is saved unless all are valid, as today.
 
@@ -150,7 +148,7 @@ Input `gifts` has the rule `region IN {{ user.attributes.regions }}`:
 
 A filter that reaches `gifts` through a relationship (the donors rule of 3.1) is inherited the same way, on `donor_id`: the transform's rows are kept when their `donor_id` is among the visible donors, at query time.
 
-When a rule is not inherited, the table denies those roles, the Model view says which input rule could not be carried over and why, and someone who may edit the input's rules can write a rule with `replaces: {table: gifts}`. For a transform of totals by fund, they might decide fund totals may be seen by everyone (`filter: "TRUE"`), or limit them by fund (`fund IN {{ user.attributes.funds }}`). Opsis stamps `rulesHash`; if the input's rules change later, the replacement stops counting and the table denies again until someone confirms it.
+When a rule is not inherited, the table denies those roles, the Model view says which input rule could not be carried over and why, and someone who may edit the input's rules can write a rule with `replaces: {table: gifts}`; when an admin set the input's rule or its restriction, only an admin can. Every replacement is audited, and the Model view warns when it gives wider access: for each person with attributes and each role, it compares the transform built from what they may see of the inputs with what the replacement shows them from the full build, and lists who would see more. For a transform of totals by fund, they might decide fund totals may be seen by everyone (`filter: "TRUE"`), or limit them by fund (`fund IN {{ user.attributes.funds }}`). Opsis stamps `rulesHash`; if the input's rules change later, the replacement stops counting and the table denies again until someone confirms it.
 
 ### 3.3 The four gates for SQL
 
@@ -372,13 +370,12 @@ The assistant gets the same tools, with v1's limits (ADR-025): it changes only t
 
 Still open from v1: R2 (DuckDB memory in the api process), R3 (snapshot rewrite cost, which transforms add to), R5 (a single api process), R8 (hot reload on the Windows filesystem).
 
-## 10. Questions for the review
+## 10. Decided at the V0 review (2026-11-26)
 
-1. **Row-level security on migrated relationships (ADR-032, R2).** The brief's rule makes a rule on a joined table filter the tables that join to it, so people it applies to will see fewer rows on some existing dashboards. Apply it on migration (recommended, the safe direction), or keep v1's behaviour per relationship until you switch it on?
-2. **Measures from several tables in one visual, and USERELATIONSHIP measures, in V2** (recommended: yes, both use the same per-table blocks), or on the backlog?
-3. **Many-to-many relationships: backlog** (recommended), or in V2 for filtering only?
-4. **Who may re-declare an inherited rule on a transform:** anyone who may edit the input's rules, as v1 lets editors edit rules (recommended), or admins only? And should editing row-level security become admin-only in v2 altogether?
-5. **PDF and PNG from an optional renderer container** (recommended) rather than Chromium in the worker image (ADR-035, a deviation)?
-6. **"Propose the exact rule in V0 and test it":** V0 states the rules and the tests (section 3.5); the tests are written with the features in V2 and V3, because nothing exists to test yet. Is that what you meant?
-7. **Pages in V4** (ADR-033): agreed?
-8. **The export cap,** 25 MB by default?
+1. **Row-level security through relationships applies to migrated models,** after a report of which dashboards and which people will see fewer rows has been shown and approved (section 1.4).
+2. **Measures from several tables in one visual, and measures that name a relationship,** are both in V2.
+3. **Many-to-many relationships:** backlog.
+4. **Replacement rules on a transform:** anyone allowed to edit the input's rules, except where an admin set the input's rule or its restriction, when only an admin may. Every replacement is audited, and the UI warns clearly when one gives wider access than the input's rule (section 3.2).
+5. **PDF and PNG** come from the optional renderer container.
+6. **The tests of the security rules** (section 3.5) must exist and pass before V2 and V3 count as done.
+7. **Pages in V4.** The export cap is 25 MB by default, and admins can change it.
