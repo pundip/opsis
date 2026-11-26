@@ -245,6 +245,7 @@ TRUSTED_PROXIES=172.16.0.0/12
 | `docker compose exec api python -m opsis seed-demo` | Load the demo data |
 | `docker compose exec api python -m opsis backup` | Write a backup now (to the `backups` volume) |
 | `docker compose exec api python -m opsis reset-link <email>` | Print a one-time link to set someone's password |
+| `docker compose exec api python -m opsis results-digest` | Before the v2 upgrade: print the report of who will see fewer rows once row-level security travels through joins, and save what every dashboard shows each viewer (under `/data/upgrade` in the api container). Changes nothing. After the upgrade, `--compare <file>` lists what changed |
 
 ### Compose profiles
 
@@ -338,6 +339,8 @@ Run `npm install` inside `frontend/` once before the frontend commands. The smok
 |---|---|---|
 | `OPSIS_TEST_PROJECT` | `opsis-test` | The test projects' name (`-server`, `-backend` and `-bench` are added) |
 | `OPSIS_TEST_PORT_OFFSET` | `10000` | Added to each usual port: 18080 for the root, 18088 for the sub-path, 18089 for server mode |
+
+Run one of each at a time in a checkout: two runs of the same test stack would remove each other's, and `npm run test:backend` and `npm run lint:backend` share one (`opsis-test-backend`). To run another beside it, give it its own `OPSIS_TEST_PROJECT`, as for a second checkout. A `--dry-run` is always safe to run beside the others.
 
 On Windows, hot reload uses file polling. It is noticeably faster when the repository lives inside the WSL filesystem.
 

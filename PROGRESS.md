@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-26 (v2: the V1 review's follow-ups, and test stacks kept apart from yours)
+Last updated: 2026-11-26 (v2: V2 step 1, the upgrade check, for your go-ahead and approval)
 
 Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2.md` (v2, milestones V0 to V7). A fresh session resumes v2 from this file, `BUILD_BRIEF_V2.md` and `docs/V2_DESIGN.md`.
 
@@ -10,12 +10,30 @@ Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2
 |---|---|
 | V0 Plan | Done, reviewed |
 | V1 BYO agent | Done, reviewed; the review's follow-ups done |
-| V2 Workspace model and Model view | Not started |
+| V2 Workspace model and Model view | In progress: step 1 (the upgrade check) built; its report on your stack waits for your go-ahead, then your approval |
 | V3 Data prep | Not started |
 | V4 Slicers | Not started |
 | V5 Visual SDK | Not started |
 | V6 Mobile | Not started |
 | V7 Export | Not started |
+
+## v2, V2: workspace model and Model view (in progress)
+
+### Step 1: the upgrade check (ADR-038)
+
+V2's first step, alone, as ADR-031 and the V0 review ask: nothing the app does changes, and the migration waits until you have seen this report on your stack and approved it.
+
+- **`python -m opsis results-digest`** runs every item of every dashboard, draft and published, at its default filters: as an admin, as every active person on the versions they can open, and as every live share link (published only, never exempt). It keeps a hash of each result with its row count and measure totals, then runs each item again as it will be once row-level security travels through relationships (R2). It prints and saves the report: who will see fewer rows, in which items and how (rows and totals, now and after); for each viewer, each table that loses rows and whose rules do it; loops to resolve before the migration; items that cannot be shown now either; and the relationships the migration will make, active or not. The files go to `/data/upgrade/` in the api container (or `--out`). It changes nothing.
+- **`--compare <file>`** runs again, counting relative dates from the day of the file, and lists every result that changed since, with who saw it and whether the report predicted it. Run after the migration, it is the check that every dashboard renders unchanged apart from the predicted changes.
+- **The R2 simulation** (`semantic/relationships.py`): the relationships the migration will make from the v1 joins (the planned migration's rules, and a test that they agree), and a scan that applies R2 through the active ones: transitive, empty and unmatched keys hidden, no access check on a table read only to filter. The compiler takes it through an optional `scan` hook whose default is v1's behaviour (`compile_query`, `queries.execute`, `dashboards.data_for_spec`), so dashboards, previews and MCP are unchanged.
+- **For your review:** the check covers every active person and live share link, not only people with attributes, as a rule can also use the role or the email; and a precision of ADR-032's loop rule (V2-Q1 under "Questions for review").
+
+### How step 1 was checked
+
+- **Backend:** 396 pytest tests pass (380 before). The 16 new ones are in `tests/test_results_digest.py`: the relationships agree with the planned migration's (the demo models and four more cases); loops; the six v1 join patterns on real data (direct, two steps, inner, `one_to_many` declared, a restricted dataset in between, two ways to one dataset), each with the rows a person sees now and after, checked against SQL on the source; admins exempt, share links never; who is checked on drafts and on published versions; the command, `--compare`, and that no table, audit row or link's view count changes; the comparison report. `ruff check`, `ruff format --check` and `mypy --strict` pass. The new tests were run again on the final files after two typing fixes.
+- **Frontend:** no frontend file changed.
+- **Smoke tests in all three places,** as the step touches the query path every dashboard uses (the default scan is v1's): at the root 12 passed (3 skipped), under `/opsis` 12 passed (3 skipped), in server mode 14 passed (1 skipped), as before.
+- **Your stack was not touched:** the same five containers, start times and images before and after, and no test env file left. The report has not been run on it yet: that needs your go-ahead (below).
 
 ## v2, V1: bring your own agent
 
@@ -82,7 +100,7 @@ The in-app guide (`docs/guide`) is not edited in v2 runs (brief v2, rule 7). Wha
 
 - **V0:** nothing (no behaviour changed).
 - **V1:** chapter 8 (the providers table: the workspace's Claude key only for people an admin allows, your own Anthropic and OpenAI keys, Ollama with `OLLAMA_ENABLED`; the picker and its "add a key" message; a revoke stopping a request at its next step); chapter 1 (the Account page's AI providers section and its usage table); chapter 7 (admins: the Users page's AI assistant tab, per person and per group, personal keys on or off, deactivating deletes keys); chapter 9 (settings: `ANTHROPIC_API_KEY` optional, `OLLAMA_ENABLED`, the upgrade note). After the review: chapter 1 (the Account page's "Send a test message", which costs a fraction of a cent and shows whether the key's account can pay, and which needs a default model for an OpenAI key); chapter 7 (personal keys switched off: kept, not used or tested, and their owners can still delete them).
-- **V2:** chapter 4 (one workspace model, the Model view, measures, date tables, YAML); chapter 5 (relationships instead of joins: direction, active, paths; row-level security through relationships, which removes the warning section); chapters 7 and 8 (security, MCP tools); chapter 9 (current limits).
+- **V2:** chapter 4 (one workspace model, the Model view, measures, date tables, YAML); chapter 5 (relationships instead of joins: direction, active, paths; row-level security through relationships, which removes the warning section); chapters 7 and 8 (security, MCP tools); chapter 9 (current limits, and the upgrade: `results-digest` and its report before, `--compare` after).
 - **V3:** chapter 3 (the Table view, transforms), a new chapter on data prep and SQL Lab, chapter 7 (inherited rules and restrictions), chapter 8 (MCP tools).
 - **V4:** chapter 6 (pages, slicers, Edit interactions, links with slicer state).
 - **V5:** a new chapter on imported visuals and the playground; chapter 6 (the visual picker).
@@ -289,6 +307,9 @@ Run: `copy .env.local.example .env`, `docker compose up -d`, open http://localho
 **v2 plan (V0)**
 - `docs/V2_DESIGN.md`, ADR-030 to ADR-035, and the draft schemas with examples in `spec/drafts/v2` (not read by the app), checked by `backend/tests/test_spec_drafts.py`.
 
+**Workspace model (V2, in progress)**
+- The upgrade check: `python -m opsis results-digest` (`services/results_digest.py`, ADR-038), with the relationships from v1 joins and R2 simulated in `semantic/relationships.py`, through the compiler's optional `scan` hook.
+
 **Platform (M1 and catch-up)**
 - `compose.yml` profiles: `server` (worker), `caddy`, `tunnel`, `ollama`, `proxytest`, `sample`. A one-shot `config-check` service gates `api` and `worker`.
 - `opsis/settings.py`: all flags, fail-fast rules (ADR-014), `base_path` derived from `PUBLIC_BASE_URL`, `TRUSTED_PROXIES`.
@@ -435,6 +456,7 @@ Not verified:
 - ADR-015: the task runner is npm scripts, not `tasks.py`; `httpx2` for the test client (approved), and now also for Ollama.
 - **v2, proposed in V0:** the draft schemas are in `spec/drafts/v2`, not edited in place in `spec/` (the app reads `spec/`, and V0 changes no behaviour); ADR-035: PDF and PNG from an optional renderer container rather than the worker container (local mode has no worker).
 - **v2, proposed in V1 (ADR-036):** "deleting a user deletes their keys" happens when someone is deactivated, since Opsis deactivates people rather than deleting them (the foreign key cascades as well); in local mode the one built-in admin may always use the workspace key, as there is nobody to grant it to; the key's Test lists its models rather than sending a message, which is free but cannot tell whether the account has credit (kept as the default at the review, with an optional "Send a test message" beside it).
+- **v2, proposed in V2 step 1 (ADR-038):** the upgrade check runs as every active person and every live share link, not only the people who have attributes (`V2_DESIGN.md` section 1.4), since a rule can also use the role or the email; a loop of relationships is refused when a rule is on it or reachable from it (V2-Q1).
 
 ## Open issues and notes
 
@@ -470,13 +492,19 @@ Not verified:
 
 The V1 questions were answered at its review (see "Review outcomes so far").
 
+- **V2-Q1. Loops and row-level security** (ADR-038). ADR-032 refuses "a loop of active relationships through a table with rules". The upgrade check also refuses a loop when a rule is only reachable from it, for example donors and regions joined both ways, with the rule on a table that regions joins to: the rows the loop leaves would depend on themselves either way. The report lists any such loop to resolve before the migration, and V2's compiler would refuse it the same way. Agreed?
+
 From v1, still open:
 
 - **Q1. Emailed dashboards carry numbers, not pictures of charts** (ADR-026): a KPI's value and its comparison, the first 10 rows of each other visual with a bar beside a chart's first measure, and a link to the dashboard. Pictures would need a headless browser in the image (a few hundred MB more, and a browser to keep patched), while tables show reliably in every mail client. Is that enough for v1? (V7's renderer service, if you approve it, could later add them.)
 
 ## Exact next step
 
-1. **V2, step 1: the upgrade check, alone** (V2_DESIGN section 1.4). `python -m opsis results-digest` records a hash of what every dashboard item shows today (draft and published, at the default filters, as an admin and as each person with attributes), and writes the report of which dashboards and which people will see fewer rows once row-level security travels through relationships (ADR-032). It changes nothing. Tests run it on fixtures for every v1 join pattern. Running it on your stack needs your go-ahead, and the migration waits until you have seen the report and approved it (decided at the V0 review). To try the review's follow-ups on your stack meanwhile: `docker compose up -d --build`, then the Account page (AI providers).
+1. **Run the upgrade report on your stack, then approve it** (V2 step 1, ADR-038). Your stack runs the image built this morning, so it needs a rebuild first, which restarts it; step 1 adds no database migration. Either:
+   - tell me to, and I rebuild it (`docker compose up -d --build`, your project `opsis`), run `docker compose exec api python -m opsis results-digest` and show you the report; or
+   - run those two commands yourself and send me the report it prints (it is also saved under `/data/upgrade/` in the api container).
+
+   The migration (V2 step 2) starts only after you approve the report. Keep the digest file it writes: after the migration, `results-digest --compare <file>` checks every dashboard against it. The rebuild also brings the V1 review's follow-ups (the Account page's "Send a test message").
 2. **Still yours from M8**, unchanged: the three steps below.
 
 Your part of M8, then the M8 review:

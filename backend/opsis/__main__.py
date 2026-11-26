@@ -12,6 +12,9 @@ Written in Python, not shell, so it behaves the same on every platform.
   backup           write a backup to BACKUP_DIR now
   restore FILE     replace the database and data with a backup (api and worker stopped)
   seed-demo        load the demo datasets and dashboard (made-up giving data)
+  results-digest [--out FILE] [--compare FILE] [--today YYYY-MM-DD]
+                   the upgrade check for v2: what every dashboard shows each viewer,
+                   and the report of who will see fewer rows (changes nothing)
 """
 
 from __future__ import annotations
@@ -32,6 +35,10 @@ COMMANDS = (
     "backup",
     "restore",
     "seed-demo",
+    "results-digest",
+)
+DIGEST_USAGE = (
+    "usage: python -m opsis results-digest [--out FILE] [--compare FILE] [--today YYYY-MM-DD]"
 )
 USAGE = f"usage: python -m opsis <{'|'.join(COMMANDS)}>"
 
@@ -154,6 +161,70 @@ def _seed_demo(settings: Settings) -> None:
     print(f"Open the dashboard: {made['url']}")
 
 
+def _results_digest(settings: Settings, args: list[str]) -> None:
+    """Write what every dashboard shows each viewer (hashes) and the upgrade report, or
+    with --compare, what changed since an earlier digest. Reads only."""
+    import json
+    from datetime import UTC, date, datetime
+    from pathlib import Path
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from opsis.services import results_digest
+
+    options: dict[str, str | None] = {"--out": None, "--compare": None, "--today": None}
+    rest = list(args)
+    while rest:
+        flag = rest.pop(0)
+        if flag not in options or not rest:
+            raise SystemExit(DIGEST_USAGE)
+        options[flag] = rest.pop(0)
+    previous = None
+    if options["--compare"]:
+        try:
+            previous = json.loads(Path(options["--compare"]).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"Cannot read {options['--compare']}: {exc}") from None
+        if not isinstance(previous, dict) or previous.get("format") != results_digest.FORMAT:
+            raise SystemExit(f"{options['--compare']} is not a results digest.")
+    day = previous["today"] if previous else options["--today"]
+    try:
+        today = date.fromisoformat(day) if day else None
+    except ValueError:
+        raise SystemExit("--today must be a date: YYYY-MM-DD.") from None
+
+    engine = create_engine(settings.sqlalchemy_url)
+    runtime = results_digest.runtime_for(settings)
+    try:
+        with sessionmaker(engine, expire_on_commit=False)() as db:
+            result = results_digest.digest(
+                db,
+                settings,
+                runtime,
+                today=today,
+                simulate=previous is None,
+                progress=lambda line: print(line, file=sys.stderr),
+            )
+            db.rollback()
+    finally:
+        runtime.engine.close()
+        engine.dispose()
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    name = f"results-{'compared' if previous else 'digest'}-{stamp}.json"
+    out = Path(options["--out"]) if options["--out"] else settings.data_dir / "upgrade" / name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(result, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    text = (
+        results_digest.compare_report(previous, result)
+        if previous
+        else results_digest.report(result)
+    )
+    out.with_suffix(".md").write_text(text + "\n", encoding="utf-8")
+    print(text)
+    print(f"Written: {out} (the digest, for --compare) and {out.with_suffix('.md')}.")
+
+
 def main(argv: list[str]) -> None:
     if not argv or argv[0] not in COMMANDS:
         raise SystemExit(USAGE)
@@ -188,6 +259,9 @@ def main(argv: list[str]) -> None:
         return
     if command == "seed-demo":
         _seed_demo(settings)
+        return
+    if command == "results-digest":
+        _results_digest(settings, argv[1:])
         return
 
     from opsis.db.migrate import upgrade_to_head

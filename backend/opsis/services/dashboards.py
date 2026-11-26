@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable, Mapping
+from datetime import date
 from typing import Any
 
 from sqlalchemy import func, select
@@ -20,7 +21,7 @@ from opsis.dashboards import spec as specs
 from opsis.dashboards.manifests import Manifest, load_manifests
 from opsis.db.models import Dashboard, DashboardVersion, Dataset, User
 from opsis.errors import ApiError
-from opsis.semantic.compiler import UserContext
+from opsis.semantic.compiler import Scan, UserContext
 from opsis.semantic.model import Model, Problem, schema_problems, schema_validator
 from opsis.services import access as acl
 from opsis.services import audit, events, schedules
@@ -521,8 +522,13 @@ def data_for_spec(
     *,
     user: UserContext,
     include_query: bool,
+    today: date | None = None,
+    scan: Scan | None = None,
 ) -> dict[str, Any]:
-    """Rows for one item of an already authorised spec, as `user` may see them."""
+    """Rows for one item of an already authorised spec, as `user` may see them.
+
+    `today` fixes the day relative dates count from, and `scan` how each dataset is
+    read for the user; the upgrade check (services.results_digest) sets both."""
     if state and state.get("cross"):
         # A dashboard answers its own questions only: a cross-filter must be on a
         # field the dashboard uses, not any field its datasets can reach.
@@ -567,14 +573,16 @@ def data_for_spec(
             409, "no_data", f"Dataset {query['dataset']!r} has no data yet. Refresh it first."
         )
     queries.check_query(settings, query)
-    _, body = queries.execute(settings, runtime, sources, user, query)
+    _, body = queries.execute(settings, runtime, sources, user, query, today=today, scan=scan)
     body["itemId"] = item_id
 
     mode = (item.get("config") or {}).get("comparison")
     if mode and mode != "none":
-        compared = specs.comparison_query(query, mode, settings.calendar, settings.today())
+        compared = specs.comparison_query(query, mode, settings.calendar, today or settings.today())
         if compared is not None:
-            _, previous = queries.execute(settings, runtime, sources, user, compared[0])
+            _, previous = queries.execute(
+                settings, runtime, sources, user, compared[0], today=today, scan=scan
+            )
             body["comparison"] = {"mode": mode, "range": compared[1], "rows": previous["rows"]}
     if include_query:
         body["query"] = query

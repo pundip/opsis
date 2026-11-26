@@ -28,7 +28,7 @@ from opsis.query.engine import (
     TableRef,
 )
 from opsis.semantic import model as semantic
-from opsis.semantic.compiler import Source, UserContext, compile_query, secured_scan
+from opsis.semantic.compiler import Scan, Source, UserContext, compile_query, secured_scan
 from opsis.services import models
 from opsis.settings import Settings
 from opsis.storage import snapshots
@@ -236,9 +236,11 @@ def execute(
     max_rows: int | None = None,
     today: date | None = None,
     check: Callable[[CompiledQuery], None] | None = None,
+    scan: Scan | None = None,
 ) -> tuple[CompiledQuery, dict[str, Any]]:
     """Compile and run a schema-valid query against already loaded sources.
-    `check` sees the compiled query before it runs, and may refuse it."""
+    `check` sees the compiled query before it runs, and may refuse it. `scan` reads
+    each dataset for the user (the default applies its own rules, as v1 does)."""
     compiled, columns = compile_query(
         query,
         sources,
@@ -247,6 +249,7 @@ def execute(
         today or settings.today(),
         max_rows=min(max_rows or settings.query_max_rows, settings.query_max_rows),
         timeout_s=settings.query_timeout_seconds,
+        scan=scan,
     )
     if check is not None:
         check(compiled)

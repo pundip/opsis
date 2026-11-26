@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
@@ -90,6 +90,12 @@ class UserContext:
         for name, value in (self.attributes or {}).items():
             values[f"attributes.{name}"] = value
         return values
+
+
+# How a dataset's rows are read for a user: `SELECT * FROM <snapshot> WHERE <security>`,
+# and whether a rule was passed over (the badge). secured_scan is the default; the
+# upgrade check (opsis.semantic.relationships) passes one that adds v2's rule R2.
+Scan = Callable[[Source, UserContext], tuple[exp.Select, bool]]
 
 
 class _Problems:
@@ -177,10 +183,12 @@ class _Compiler:
         user: UserContext,
         calendar: CalendarConfig,
         today: date,
+        scan: Scan | None = None,
     ) -> None:
         self.query = query
         self.sources = sources
         self.user = user
+        self.scan: Scan = scan or secured_scan
         self.calendar = calendar
         self.today = today
         self.problems = _Problems()
@@ -520,7 +528,7 @@ class _Compiler:
 
     def _table(self, source: Source) -> exp.Expr:
         """A dataset's snapshot, with its row-level security applied inside."""
-        scan, bypassed = secured_scan(source, self.user)
+        scan, bypassed = self.scan(source, self.user)
         if bypassed:
             self.rls_bypassed = True  # reported to the user, never silent
         return scan.subquery(exp.to_identifier(source.model.dataset, quoted=True))
@@ -798,6 +806,10 @@ def compile_query(
     *,
     max_rows: int,
     timeout_s: float,
+    scan: Scan | None = None,
 ) -> tuple[CompiledQuery, tuple[ResultColumn, ...]]:
-    """Compile a schema-valid semantic query. Raises ApiError(422) with paths on problems."""
-    return _Compiler(query, sources, user, calendar, today).compile(max_rows, timeout_s)
+    """Compile a schema-valid semantic query. Raises ApiError(422) with paths on problems.
+
+    `scan` reads each dataset's rows for the user. The default, secured_scan, applies
+    the dataset's own row-level security rules, as v1 does."""
+    return _Compiler(query, sources, user, calendar, today, scan).compile(max_rows, timeout_s)
