@@ -639,7 +639,7 @@ ADR-031 and the V0 review ask for a report of who will see fewer rows before the
 - **Tests** (`tests/test_results_digest.py`, 16): the relationships match the planned migration's for the demo models and four more cases; loops; the six v1 join patterns on real data (direct, two steps, inner, `one_to_many` declared, a restricted dataset in between, two ways to one dataset); viewers, versions, admins and share links; the command, `--compare` and that nothing in the database changes; the comparison report.
 
 ## ADR-039: The workspace model as built in V2
-- **Status:** proposed (V2), for the V2 review.
+- **Status:** accepted at the V2 review (2026-11-28). V2-Q2: each table's page gets a small read-only "v1 history" link, with no restore. The assistant may propose model changes as a diff that the person reviews and applies with one click (see "MCP and the assistant"). Both are built at the start of V3.
 
 V2 builds ADR-031 (one workspace model) and R2 of ADR-032 (row-level security through relationships). These are the choices made while building it that the design left open, and the places it differs from the plan.
 
@@ -649,7 +649,7 @@ V2 builds ADR-031 (one workspace model) and R2 of ADR-032 (row-level security th
 - **Only new problems stop a save.** Problems the stored model already has are listed ("Problems the model already has") but do not block, so one broken table never stops work on the others. Restoring a version is a save of the part of it the person may use, under the same rule; tables whose datasets are gone stay out, and the version's note says so.
 - **Someone who may not use a table** never names it in a save: a change that names it is refused as if the table did not exist, and the relationships they cannot see are kept as they are.
 - **The v1 routes and MCP tools for one table** (`/api/models/{dataset}`, `get_semantic_model`, `patch_semantic_model`) are a view of the workspace model: a table's v1 `joins` are its relationships. `patch_semantic_model` applies its operations to the table as it was at `base_version`, then saves that like a stale change: refused with `version_conflict` only when the same part changed since, or when the operations no longer fit.
-- **A table's history** on its page is the workspace versions in which that table changed. The v1 per-dataset history (`semantic_model_versions`) is kept in the database, unchanged, but the app no longer shows it (a read-only view of it is on the backlog).
+- **A table's history** on its page is the workspace versions in which that table changed. The v1 per-dataset history (`semantic_model_versions`) is kept in the database, unchanged. Agreed at the V2 review: a small "v1 history" link on the table's page shows it, read-only, with no restore from it.
 
 **Relationships and warnings**
 - **Warnings are per relationship:** a repeated key on the one side (`duplicate_key`, or `key_not_checked` when the check could not run), key columns of different types, two paths as short as each other, and a relationship into a restricted table. v1's warning that a joined table's rules do not apply is gone, as R2 applies them. Inactive relationships are key-checked too, as a measure can name them.
@@ -667,6 +667,7 @@ V2 builds ADR-031 (one workspace model) and R2 of ADR-032 (row-level security th
 **MCP and the assistant**
 - **MCP gains** `get_workspace_model`, `patch_workspace_model`, `validate_workspace_model` and `suggest_relationships`, each permission-checked, with compact results and an example input in its description.
 - **The in-app assistant** gains `get_workspace_model` and `suggest_relationships`, not `patch_workspace_model`. It keeps v1's `get_semantic_model` and `patch_semantic_model` for one table, as before, acting with the person's permissions.
+- **Agreed at the V2 review:** the assistant may propose model changes (new measures, relationships, table and field properties) as a diff that the person reviews and applies with one click. Nothing changes until they click Apply, and the change is saved as a model version authored by the assistant.
 
 **The Model view**
 - **At `/model`** ("Model" in the navigation, for people with `models:edit`). The per-table pages stay at `/models` as "Model tables", for trying queries and importing model files.

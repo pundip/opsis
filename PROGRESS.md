@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-28 (v2: V2 done and stopped for review; your stack is not migrated yet)
+Last updated: 2026-11-28 (v2: V2 reviewed and approved; your stack is being migrated to V2, then V3)
 
 Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2.md` (v2, milestones V0 to V7). A fresh session resumes v2 from this file, `BUILD_BRIEF_V2.md` and `docs/V2_DESIGN.md`.
 
@@ -10,16 +10,16 @@ Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2
 |---|---|
 | V0 Plan | Done, reviewed |
 | V1 BYO agent | Done, reviewed; the review's follow-ups done |
-| V2 Workspace model and Model view | Done, for review (ADR-039); your stack is migrated at your go-ahead |
+| V2 Workspace model and Model view | Done, reviewed (ADR-039 accepted); your stack is being migrated |
 | V3 Data prep | Not started |
 | V4 Slicers | Not started |
 | V5 Visual SDK | Not started |
 | V6 Mobile | Not started |
 | V7 Export | Not started |
 
-## v2, V2: workspace model and Model view (done, for review)
+## v2, V2: workspace model and Model view (reviewed)
 
-One workspace model replaces the models per dataset: tables, and relationships between them, as in Power BI. Row-level security now travels through relationships (rule R2 of ADR-032). The choices made while building it are in ADR-039, proposed for this review. Your stack is not migrated yet: that waits for your go-ahead (see "Exact next step").
+One workspace model replaces the models per dataset: tables, and relationships between them, as in Power BI. Row-level security now travels through relationships (rule R2 of ADR-032). The choices made while building it are in ADR-039, accepted at the V2 review. Your stack is migrated at the review's go-ahead (see "Your stack migrated to V2" below).
 
 ### Step 1: the upgrade check (ADR-038)
 
@@ -67,6 +67,22 @@ V2's first step, alone, as ADR-031 and the V0 review ask: nothing the app does c
   - **With a rule on donors that applies to admins too** (`tier <> 'lapsed'`: 7.5 of the 10 million gifts are visible, each read through its donor): the dashboard opens in 1.11 s cold and 96 ms warm, 1.09 s after a filter change and 82 ms warm again; single queries take 165 to 488 ms cold and 11 to 15 ms warm. R2 about doubles a dashboard's cold time (an `EXISTS` on 200,000 donors for 10 million gifts) and leaves warm times as they were. **The brief's target, under 1.5 s warm on 10 million rows, is met with and without the rule.**
   - **Ten uncached queries at once** finished in 3.0 and 3.7 s while `/healthz` answered in a median of 9 and 19 ms. Peak api memory: 1,529 MB during the queries and the burst without the rule, 714 and 749 MB during the pass with the rule (which has no burst). M8 measured 422 MB and M3.5 1,138 MB (on 5 million rows): the peak depends on how the queries overlap, up to four at once with 1 GB each (`QUERY_MAX_CONCURRENT`, `QUERY_MEMORY_LIMIT_MB`).
 - **Your stack was not touched:** no test reached the project `opsis` or port 8080 (ADR-037).
+
+### Your stack migrated to V2 (2026-11-28, after the review)
+
+In the order you set at the review.
+
+1. **Backed up:** `python -m opsis backup` in your api container wrote `/backups/opsis-20261128-232820.tar` (1.7 MB: the database at revision 0013, the uploads, and the current snapshot of each of the 10 datasets) into your `opsis_backups` volume. A copy is in `C:\Users\prakashm\opsis-backups\pre-v2\` (the same SHA-256, `af4a7356...804363e`), out of reach of `BACKUP_RETENTION` and of `docker compose down -v`. The image your stack ran is kept as `opsis/app:pre-v2` (`e06c280134bf`, built from commit 9ed0670).
+2. **The backup restores:** restored into a scratch Compose project of its own (`opsis-restore`, port 18084 on 127.0.0.1, its own env file with fresh secrets, set up through `scripts/test-stack.mjs` and its guard) on the pre-V2 image, it started (`/healthz` ok). Its database matched yours on every count: revision 0013; 5 dashboards, 17 dashboard versions, 10 datasets, 13 snapshots, 9 connections, 9 models, 15 model versions, 1 user, 1,029 audit rows; the same dashboard titles and dataset names. The app listed the same 5 dashboards as yours, and `results-digest --compare` against your saved digest said "No result changed", so every item shows the same results from the restored files. Then the project was removed, data and all; your containers kept their images and start times.
+3. **The rollback steps,** written down before the migration. They put your stack back as it was at the backup (2026-11-28 23:28 Melbourne time); anything changed in Opsis after that is lost. In PowerShell, in `C:\Users\prakashm\Projects\opsis`:
+   1. Stop the api: `docker compose stop api` (and `worker`, if you run it).
+   2. Point your stack at the image from before: `docker tag opsis/app:pre-v2 opsis/app:dev`
+   3. Copy the backup into the volume, in case it has gone from there (copying it again is harmless): `docker cp C:\Users\prakashm\opsis-backups\pre-v2\opsis-20261128-232820.tar opsis-api-1:/backups/`
+   4. Restore it with that image: `docker compose run --rm --no-deps api restore /backups/opsis-20261128-232820.tar --yes`. It replaces the database and the data folder's uploads and datasets; the current ones are moved to `/data/before-restore-<time>` in the data volume, not deleted.
+   5. Start the stack without building: `docker compose up -d --no-build`. The api is recreated on the old image, and the database is already at its revision (0013).
+   6. Check: `docker compose exec api python -m opsis results-digest --compare /data/upgrade/results-digest-20261128-040111.json` should say "No result changed."
+
+   `ENCRYPTION_KEY` stays as it is in your `.env` (a backup does not hold it, and the migration does not change it). After a rollback, `docker compose up -d --build` would build V2 again from this folder and migrate again: build only from the version you want.
 
 ## v2, V1: bring your own agent
 
@@ -320,6 +336,7 @@ M3.5 benchmark, in one line: 5 million rows on this laptop, typical queries 77 t
 
 ## Review outcomes so far
 
+- **V2 (the workspace model and the Model view):** approved, ADR-039 accepted. V2-Q2: a small read-only "v1 history" link on each table's page, with no restore from it. The assistant may propose model changes (new measures, relationships, table and field properties) as a diff that you review and apply with one click: nothing changes until you click Apply, and the change is saved as a model version authored by the assistant. Both at the start of V3. V2-Q3, the migration of your stack, in this order: back it up; prove the backup restores in a separate scratch Compose project (it starts, and the dashboard count matches), then remove that project; write down the exact rollback steps here; rebuild your stack with V2 and run `results-digest --compare` against the saved file; show you the summary. If anything in the comparison was not predicted, stop and show you; otherwise continue with V3.
 - **V2 step 1 (the upgrade check):** approved, with the V1 review's fixes. ADR-038 accepted: the check covers every person and every share link. V2-Q1 agreed: a loop of joins is refused when a rule is on the loop or reachable from it; explicit path selection for that case goes to the backlog. The three old worktrees go if they hold nothing unsaved (they held nothing: removed). Then the report runs on your stack: V2 continues if nobody sees fewer rows and nothing needs fixing, and stops to show you otherwise. (It was clean, so V2 continues.)
 - **V1 (bring your own agent):** approved, ADR-036 accepted. The free model-list Test stays the default, plus an optional "Send a test message" (one short billed request) that shows whether the account can pay. A choice that is taken away asks the person to choose again. Switching personal keys off keeps the keys, and people can still delete their own. Usage stays in tokens; estimated cost per provider goes to the backlog. Before V2: test isolation, so that no test can reach your stack (every test stack with its own Compose project, an explicit env file, its own ports, never `.env`; the scripts refuse port 8080 and the project `opsis` with a clear error; a test that proves the guard). All done (ADR-037).
 - **V0 (v2 plan):** approved, ADR-030 to ADR-035 accepted. Row-level security through relationships applies to migrated models, after a report of which dashboards and which people will see fewer rows is shown and approved. Measures from several tables and measures that name a relationship are in V2; many-to-many is on the backlog. Replacement rules on a transform: anyone allowed to edit the input's rules, except where an admin set the input's rule or restriction (then admins only); every replacement audited, with a clear warning when it gives wider access. The renderer container for PDF and PNG. The security rules' tests must exist and pass before V2 and V3 count as done. Pages in V4. Export cap 25 MB by default, adjustable by admins.
@@ -525,7 +542,7 @@ Not verified:
 - **M8:** bulk export and import of a `models/` folder; two-hop joins; the 10 million row check; drag-and-drop of fields into wells; email for invitations, resets and snapshots; a clean-up job for ended sessions and links. (All done.)
 - **Post-v1 (decided at M8):** SQL Lab, the admin-only read-only SQL page (`FEATURE_SQL_LAB` in the brief).
 - **Later (decided at V2 step 1):** explicit path selection for a loop of relationships that a rule could travel round: the model's author says which path the security filter takes, instead of the loop being refused.
-- **Proposed in V2, for the review:** a read-only view of a table's v1 history (`semantic_model_versions`), if you want it back (V2-Q2).
+- **Agreed at the V2 review, for the start of V3:** a read-only "v1 history" link on each table's page (`semantic_model_versions`, no restore); the assistant proposing model changes as a diff that you apply with one click, saved as a version by the assistant.
 - **Later (decided at V1):** estimated cost per provider beside the tokens on the Account page (prices differ per model and change, so they need a table to keep up to date).
 - **Later (brief):** OAuth for the MCP server so it can be a claude.ai connector; TOTP second factor.
 
@@ -533,12 +550,7 @@ Not verified:
 
 The V1 questions were answered at its review (see "Review outcomes so far").
 
-V2-Q1 was answered at the step 1 review (see "Review outcomes so far").
-
-From V2:
-
-- **V2-Q2. The v1 history of each table is no longer shown.** A table's page now lists the workspace model's versions in which that table changed, from version 1 ("Migrated from the v1 models"). The v1 rows stay in the database, unchanged. Is that enough, or should the old history be shown read-only (on the backlog as proposed)?
-- **V2-Q3. Migrate your stack now?** At your go-ahead: back up (`python -m opsis backup` in the api container, into its `backups` volume), rebuild your stack with V2 (the migration runs as the api starts), then `python -m opsis results-digest --compare /data/upgrade/results-digest-20261128-040111.json`, and I show you its summary. The report before predicted no change on your stack.
+V2-Q1 was answered at the step 1 review, V2-Q2 and V2-Q3 at the V2 review (see "Review outcomes so far").
 
 From v1, still open:
 
@@ -546,7 +558,7 @@ From v1, still open:
 
 ## Exact next step
 
-1. **The V2 review:** ADR-039, and questions V2-Q2 and V2-Q3. Your stack is still on V2 step 1. At your go-ahead I back it up, rebuild it with V2 (the migration runs as the api starts) and run `results-digest --compare /data/upgrade/results-digest-20261128-040111.json` on it, then show you the summary. After the review: V3 (data prep).
+1. **Your stack, then V3:** the backup is made and proved, and the rollback steps are written (see "Your stack migrated to V2"). Next: rebuild your stack with V2, run `results-digest --compare /data/upgrade/results-digest-20261128-040111.json` and show you the summary, stopping if anything in it was not predicted. Then V3 (data prep), starting with the two follow-ups from the V2 review.
 2. **Still yours from M8**, unchanged: the three steps below.
 
 Your part of M8, then the M8 review:
