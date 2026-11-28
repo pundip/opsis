@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-28 (v2: V2 reviewed and approved; your stack is being migrated to V2, then V3)
+Last updated: 2026-11-28 (v2: V2 reviewed; your stack migrated to V2 with no result changed; V3 in progress)
 
 Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2.md` (v2, milestones V0 to V7). A fresh session resumes v2 from this file, `BUILD_BRIEF_V2.md` and `docs/V2_DESIGN.md`.
 
@@ -10,8 +10,8 @@ Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2
 |---|---|
 | V0 Plan | Done, reviewed |
 | V1 BYO agent | Done, reviewed; the review's follow-ups done |
-| V2 Workspace model and Model view | Done, reviewed (ADR-039 accepted); your stack is being migrated |
-| V3 Data prep | Not started |
+| V2 Workspace model and Model view | Done, reviewed (ADR-039 accepted); your stack migrated, no result changed |
+| V3 Data prep | In progress |
 | V4 Slicers | Not started |
 | V5 Visual SDK | Not started |
 | V6 Mobile | Not started |
@@ -83,6 +83,9 @@ In the order you set at the review.
    6. Check: `docker compose exec api python -m opsis results-digest --compare /data/upgrade/results-digest-20261128-040111.json` should say "No result changed."
 
    `ENCRYPTION_KEY` stays as it is in your `.env` (a backup does not hold it, and the migration does not change it). After a rollback, `docker compose up -d --build` would build V2 again from this folder and migrate again: build only from the version you want.
+
+4. **Rebuilt with V2:** `docker compose up -d --build` in your project `opsis`, on commit e8cb243 (V2, 94d5fcb, and the review's notes). The api and config-check containers were recreated on the new image (`48d8336c3d99`); Postgres, sample-mysql and proxytest kept running. As it started, the api ran the migration from 0013 to 0014 and came up healthy. The workspace model is at version 1 with the 10 tables and the three relationships the report predicted, all active: gifts (donor_id) to donors (id), demo_donors (state_code) to demo_regions (code), demo_gifts (donor_id) to demo_donors (donor_id).
+5. **`results-digest --compare /data/upgrade/results-digest-20261128-040111.json`:** "No result changed." All 23 results (5 dashboards, in the 4 versions with items that show data, as the admin, the only person on your stack) are the same as before and as the report predicted; none is missing and none fails. The comparison is kept beside the first file: `/data/upgrade/results-compared-20261128-123354.json` and its `.md`.
 
 ## v2, V1: bring your own agent
 
@@ -558,7 +561,7 @@ From v1, still open:
 
 ## Exact next step
 
-1. **Your stack, then V3:** the backup is made and proved, and the rollback steps are written (see "Your stack migrated to V2"). Next: rebuild your stack with V2, run `results-digest --compare /data/upgrade/results-digest-20261128-040111.json` and show you the summary, stopping if anything in it was not predicted. Then V3 (data prep), starting with the two follow-ups from the V2 review.
+1. **V3 (data prep)**, starting with the two follow-ups from the V2 review. Your stack is on V2 (see "Your stack migrated to V2", with the rollback steps).
 2. **Still yours from M8**, unchanged: the three steps below.
 
 Your part of M8, then the M8 review:
