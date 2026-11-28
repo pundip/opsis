@@ -1,17 +1,16 @@
-"""The upgrade check for v2 (ADR-031, V2_DESIGN section 1.4): `python -m opsis
+"""The results check (ADR-031, V2_DESIGN section 1.4): `python -m opsis
 results-digest`. It reads, and changes nothing.
 
 For every dashboard, draft and published, and every item that shows data, it runs the
 item at its default filters as each viewer: an admin, every active person who may
-open that version, and every live share link (published versions only, never exempt).
-Each result is hashed twice: as it is now, and as it will be once row-level security
-travels through relationships (rule R2 of ADR-032, simulated by
-`semantic.relationships`). The report lists who will see fewer rows, in which items
-and tables, and why; and what the migration must resolve first.
+open that version, and every live share link (published versions only, never exempt),
+and keeps a hash of the rows.
 
 `--compare FILE` runs again, counting relative dates from the day FILE was made, and
-lists every item whose rows changed since, with who saw it and whether the report had
-predicted it.
+lists every item whose rows changed since, with who saw it. A digest made before the
+upgrade to the workspace model also holds what its simulation of row-level security
+through relationships predicted (`after`, rule R2 of ADR-032): each change says
+whether it was predicted.
 """
 
 from __future__ import annotations
@@ -27,13 +26,11 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from sqlglot import exp
 
 from opsis.auth.principal import Principal
-from opsis.db.models import Dashboard, DashboardVersion, Dataset, ShareLink, User
+from opsis.db.models import Dashboard, DashboardVersion, ShareLink, User
 from opsis.errors import ApiError
-from opsis.semantic import relationships as rels
-from opsis.semantic.compiler import Scan, Source, UserContext, secured_scan
+from opsis.semantic.compiler import UserContext
 from opsis.services import access as acl
 from opsis.services import dashboards, links, users
 from opsis.services import query as queries
@@ -189,76 +186,20 @@ def same(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None) -> bool:
     return dict(a) == dict(b)
 
 
-def _count(
-    settings: Settings, runtime: QueryRuntime, source: Source, scan: exp.Select
-) -> int | str:
-    sql = exp.select(exp.Count(this=exp.Star())).from_(scan.subquery("t")).sql(dialect="duckdb")
-    try:
-        return int(queries.run_raw(settings, runtime, source, sql, 1)[0][0])
-    except ApiError as exc:
-        return f"{exc.code}: {exc.message}"
-
-
-def _tables(
-    settings: Settings,
-    runtime: QueryRuntime,
-    sources: Mapping[str, Source],
-    relationships: Sequence[rels.Relationship],
-    r2: Scan,
-    people: Sequence[Viewer],
-) -> list[dict[str, Any]]:
-    """For each viewer, each table whose visible rows R2 changes: how many now, how
-    many after, and the rules that do it."""
-    edges: dict[str, list[str]] = {}
-    for rel in relationships:
-        if rel.active:
-            edges.setdefault(rel.from_table, []).append(rel.to_table)
-    found: list[dict[str, Any]] = []
-    for viewer in people:
-        for name in sorted(sources):
-            source = sources[name]
-            now, _ = secured_scan(source, viewer.user)
-            try:
-                after, _ = r2(source, viewer.user)
-            except ApiError as exc:
-                found.append({"viewer": viewer.key, "table": name, "error": exc.message})
-                continue
-            if after.sql(dialect="duckdb") == now.sql(dialect="duckdb"):
-                continue
-            ruled = sorted(
-                other
-                for other in rels.reachable(name, edges)
-                if other in sources and queries.rls_applies(sources[other], viewer.user)
-            )
-            found.append(
-                {
-                    "viewer": viewer.key,
-                    "table": name,
-                    "now": _count(settings, runtime, source, now),
-                    "after": _count(settings, runtime, source, after),
-                    "by": ruled,
-                }
-            )
-    return found
-
-
 def digest(
     db: Session,
     settings: Settings,
     runtime: QueryRuntime,
     *,
     today: date | None = None,
-    simulate: bool = True,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Every item's result as each viewer sees it now and, with `simulate`, once R2
-    applies. Reads only."""
+    """Every item's result as each viewer sees it. Reads only. Row-level security
+    travels through relationships (R2) since the workspace model: a digest made
+    before it also holds what its simulation predicted (`after`), which `compare`
+    checks."""
     today = today or settings.today()
-    names = set(db.scalars(select(Dataset.name)))
-    sources = queries.load_sources(db, settings, names)
-    models = {name: source.model for name, source in sources.items()}
-    relationships = rels.from_v1_joins(models)
-    r2 = rels.relationship_scan(sources, relationships) if simulate else None
+    workspace = queries.load_workspace(db, settings)
     people = viewers(db)
     # What to run, worked out before anything runs (running rolls the session back).
     plan = []
@@ -291,41 +232,32 @@ def digest(
                     include_query=False,
                     today=today,
                 )
-                entry: dict[str, Any] = {
-                    "dashboard": board,
-                    "title": title,
-                    "which": version.which,
-                    "number": version.number,
-                    "item": item["id"],
-                    "itemTitle": item.get("title") or f"{item['visual']} {item['id']}",
-                    "viewer": viewer.key,
-                    "now": _run(partial(call, scan=None)),
-                }
-                if r2 is not None:
-                    entry["after"] = _run(partial(call, scan=r2))
-                entries.append(entry)
+                entries.append(
+                    {
+                        "dashboard": board,
+                        "title": title,
+                        "which": version.which,
+                        "number": version.number,
+                        "item": item["id"],
+                        "itemTitle": item.get("title") or f"{item['visual']} {item['id']}",
+                        "viewer": viewer.key,
+                        "now": _run(call),
+                    }
+                )
 
-    result: dict[str, Any] = {
+    return {
         "format": FORMAT,
         "formatVersion": FORMAT_VERSION,
         "createdAt": datetime.now(UTC).isoformat(timespec="seconds"),
         "today": today.isoformat(),
-        "simulated": simulate,
+        "simulated": False,
         "datasets": {
-            name: {"snapshot": s.table.snapshot_id} for name, s in sorted(sources.items())
+            name: {"snapshot": s.table.snapshot_id} for name, s in sorted(workspace.sources.items())
         },
         "viewers": {viewer.key: viewer.label for viewer in people},
         "dashboards": len(boards),
         "items": entries,
     }
-    if r2 is not None:
-        result["relationships"] = [
-            {"id": rel.id, "describe": rel.describe(), "active": rel.active}
-            for rel in relationships
-        ]
-        result["loops"] = [list(loop) for loop in rels.refused_loops(relationships, models)]
-        result["tables"] = _tables(settings, runtime, sources, relationships, r2, people)
-    return result
 
 
 # ---- the reports --------------------------------------------------------------------
@@ -339,7 +271,9 @@ def _number(value: Any) -> str:
 
 def _change(now: Mapping[str, Any], after: Mapping[str, Any]) -> str:
     if "error" in after:
-        return f"cannot be shown after the upgrade: {after['error']}"
+        return f"cannot be shown: {after['error']}"
+    if "error" in now:
+        return f"could not be shown before ({now['error']}), and can now"
     if after.get("empty") or now.get("empty"):
         return "its query changes"
     parts = []
@@ -358,86 +292,44 @@ def _heading(entry: Mapping[str, Any]) -> str:
     return f"{entry['title']} ({entry['which']}, version {entry['number']})"
 
 
+def _counted(number: int, one: str, many: str | None = None) -> str:
+    return f"{number:,} {one if number == 1 else (many or one + 's')}"
+
+
 def report(result: Mapping[str, Any]) -> str:
-    """The upgrade report, in Markdown."""
+    """What a digest recorded, in Markdown."""
     viewers_ = result["viewers"]
     entries = result["items"]
-    checked = [e for e in entries if "hash" in e["now"]]
-    changed = [e for e in checked if "after" in e and not same(e["now"], e["after"])]
     people = sum(1 for key in viewers_ if key.startswith("user:"))
     shared = sum(1 for key in viewers_ if key.startswith("link:"))
     versions_ = len({(e["dashboard"], e["which"]) for e in entries})
     items = len({(e["dashboard"], e["which"], e["item"]) for e in entries})
+    empty = result["dashboards"] - len({e["dashboard"] for e in entries})
+    nothing = (
+        f" {_counted(empty, 'dashboard')} {'has' if empty == 1 else 'have'} no item that "
+        "shows data, so nothing to record."
+        if empty > 0
+        else ""
+    )
     lines = [
-        "# Upgrade report: row-level security through relationships",
+        "# Results digest",
         "",
         f"Made {result['createdAt']}, counting relative dates from {result['today']}. "
         "Nothing was changed.",
         "",
-        f"Checked {result['dashboards']} dashboards ({versions_} versions, {items} items that "
-        f"show data) at their default filters, as an admin, {people} people and {shared} share "
-        f"links, each person and link on the versions they can open: {len(entries)} results.",
+        f"Recorded {_counted(result['dashboards'], 'dashboard')} at their default filters, as an "
+        f"admin, {_counted(people, 'person', 'people')} and {_counted(shared, 'share link')}, "
+        f"each on the versions they can open: {_counted(items, 'item')} that show data, in "
+        f"{_counted(versions_, 'dashboard version')}, "
+        f"{_counted(len(entries), 'result')}.{nothing} After a change, "
+        "`results-digest --compare` with this file lists every result that changed.",
         "",
     ]
-    if not changed:
-        lines += ["**Nobody will see fewer rows.** Every result stays the same.", ""]
-    else:
-        who = sorted({e["viewer"] for e in changed})
-        lines += [
-            f"**{len(who)} of {len(viewers_)} viewers will see fewer rows, in "
-            f"{len({(e['dashboard'], e['item']) for e in changed})} items of "
-            f"{len({e['dashboard'] for e in changed})} dashboards.**",
-            "",
-            "## Who will see fewer rows",
-            "",
-        ]
-        by_board: dict[str, list[Mapping[str, Any]]] = {}
-        for entry in changed:
-            by_board.setdefault(_heading(entry), []).append(entry)
-        for heading, group in by_board.items():
-            lines += [f"### {heading}", ""]
-            for viewer in sorted({e["viewer"] for e in group}, key=lambda k: viewers_[k]):
-                lines.append(f"- **{viewers_[viewer]}**")
-                for entry in (e for e in group if e["viewer"] == viewer):
-                    lines.append(
-                        f"  - {entry['itemTitle']}: {_change(entry['now'], entry['after'])}"
-                    )
-            lines.append("")
-    tables = [t for t in result.get("tables", []) if "error" not in t]
-    if tables:
-        lines += [
-            "## Tables each viewer will see fewer rows of",
-            "",
-            "| Viewer | Table | Rows now | After the upgrade | Because of the rules on |",
-            "|---|---|---|---|---|",
-        ]
-        for row in tables:
-            lines.append(
-                f"| {viewers_[row['viewer']]} | {row['table']} | {_number(row['now'])} | "
-                f"{_number(row['after'])} | {', '.join(row['by'])} |"
-            )
-        lines.append("")
-    loops = result.get("loops") or []
-    if loops:
-        lines += ["## To resolve before the migration", ""]
-        for loop in loops:
-            lines.append(
-                f"- The relationships {' → '.join(loop)} would form a loop that row-level "
-                "security would travel round, which v2 refuses. Change one of these joins to "
-                "`one_to_many` on the other model, or remove it, so the loop is broken."
-            )
-        lines.append("")
     failed = [e for e in entries if "error" in e["now"]]
     if failed:
-        lines += ["## Not checked", "", "These items cannot be shown now either:", ""]
+        lines += ["## Not checked", "", "These items cannot be shown:", ""]
         for message, labels in _grouped(failed).items():
             lines.append(f"- {message}: {', '.join(labels)}")
-        lines.append("")
-    if result.get("relationships"):
-        lines += ["## The relationships the migration will make", ""]
-        for rel in result["relationships"]:
-            state = "active" if rel["active"] else "inactive (carries no security filter)"
-            lines.append(f"- {rel['describe']}: {state}")
         lines.append("")
     return "\n".join(lines)
 
@@ -453,23 +345,24 @@ def _grouped(entries: Sequence[Mapping[str, Any]]) -> dict[str, list[str]]:
 
 
 def compare(previous: Mapping[str, Any], current: Mapping[str, Any]) -> dict[str, Any]:
-    """Every result that changed since `previous`, and whether its report predicted it."""
+    """Every result that changed since `previous`, and, when `previous` was made
+    before the upgrade (with a simulation), whether its report predicted it. Also,
+    then, the results that the report said would change and did not (`missed`): a
+    rule that should now reach a table and does not would show there."""
     keys = ("dashboard", "which", "item", "viewer")
     before = {tuple(e[k] for k in keys): e for e in previous["items"]}
-    changes, added = [], []
+    changes, added, missed = [], [], []
     for entry in current["items"]:
         earlier = before.pop(tuple(entry[k] for k in keys), None)
         if earlier is None:
             added.append(entry)
-        elif not same(earlier["now"], entry["now"]):
-            changes.append(
-                {
-                    **entry,
-                    "before": earlier["now"],
-                    "predicted": same(earlier.get("after"), entry["now"]),
-                    "edited": earlier["number"] != entry["number"],
-                }
-            )
+            continue
+        about = {**entry, "before": earlier["now"], "edited": earlier["number"] != entry["number"]}
+        if not same(earlier["now"], entry["now"]):
+            predicted = same(earlier["after"], entry["now"]) if "after" in earlier else None
+            changes.append({**about, "predicted": predicted})
+        elif "after" in earlier and not same(earlier["after"], entry["now"]):
+            missed.append({**about, "expected": earlier["after"]})
     refreshed = sorted(
         name
         for name, data in current["datasets"].items()
@@ -477,6 +370,7 @@ def compare(previous: Mapping[str, Any], current: Mapping[str, Any]) -> dict[str
     )
     return {
         "changes": changes,
+        "missed": missed,
         "added": added,
         "gone": list(before.values()),
         "refreshed": refreshed,
@@ -500,18 +394,42 @@ def compare_report(previous: Mapping[str, Any], current: Mapping[str, Any]) -> s
             "results too.",
             "",
         ]
-    changes = found["changes"]
+    changes, missed = found["changes"], found["missed"]
     if not changes:
         lines += ["**No result changed.**", ""]
-    else:
+    elif previous.get("simulated"):
         unexpected = [c for c in changes if not c["predicted"]]
         lines += [
             f"**{len(changes)} results changed: {len(changes) - len(unexpected)} as the upgrade "
             f"report predicted, {len(unexpected)} not.**",
             "",
         ]
+    else:
+        lines += [f"**{len(changes)} results changed.**", ""]
+    if missed:
+        lines += [
+            f"**{len(missed)} results did not change, though the upgrade report said they "
+            "would.** Check the rules on the tables these items use.",
+            "",
+            "## Predicted, but unchanged",
+            "",
+        ]
+        for entry in missed:
+            how = _change(entry["before"], entry["expected"])
+            lines.append(
+                f"- {_heading(entry)}, {entry['itemTitle']}, as {viewers_[entry['viewer']]}: "
+                f"the report said {how}"
+            )
+        lines.append("")
+    if changes:
+        unexpected = [c for c in changes if not c["predicted"]]
         expected = [c for c in changes if c["predicted"]]
-        for title, group in (("Not predicted", unexpected), ("As predicted", expected)):
+        groups = (
+            (("Not predicted", unexpected), ("As predicted", expected))
+            if previous.get("simulated")
+            else (("Changed", changes),)
+        )
+        for title, group in groups:
             if not group:
                 continue
             lines += [f"## {title}", ""]

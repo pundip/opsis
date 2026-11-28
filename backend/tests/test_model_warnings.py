@@ -1,5 +1,7 @@
-"""Warnings on a semantic model: a join key that is on more than one row, and
-row-level security on a joined dataset that does not limit the base dataset."""
+"""Warnings on the workspace model (V2_DESIGN 1.2): a relationship whose key is on more
+than one row of its one side, a relationship into a restricted table, and what the
+warnings show to whom. The v1 view of one table shows its joins' warnings at
+/joins/<n> with v1's codes; the Model view shows each once, on its relationship."""
 
 from __future__ import annotations
 
@@ -81,6 +83,10 @@ def viewed(client: TestClient, dataset: str) -> list[dict[str, Any]]:
     return ok(client.get(f"/api/models/{dataset}"))["warnings"]  # type: ignore[no-any-return]
 
 
+def in_model_view(client: TestClient) -> list[dict[str, Any]]:
+    return ok(client.get("/api/model"))["warnings"]  # type: ignore[no-any-return]
+
+
 def counts_by(client: TestClient, field: str) -> dict[str, int]:
     found = query(
         client, {"dataset": "gifts", "measures": ["gifts.row_count"], "dimensions": [field]}
@@ -88,7 +94,7 @@ def counts_by(client: TestClient, field: str) -> dict[str, int]:
     return {row[field]: row["gifts.row_count"] for row in as_dicts(found)}
 
 
-def test_a_repeated_join_key_warns_and_is_checked_again_after_a_refresh(
+def test_a_repeated_key_warns_and_is_checked_again_after_a_refresh(
     client_for: ClientFor, lookups: dict[str, Any]
 ) -> None:
     client = client_for()
@@ -117,8 +123,8 @@ def test_a_repeated_join_key_warns_and_is_checked_again_after_a_refresh(
     assert {
         "code": "duplicate_join_key",
         "path": "/joins/0",
+        "relationship": "gifts__funds",
         "dataset": "funds",
-        "through": None,
         "key": ["fund"],
         "repeatedValues": 2,
         "examples": [
@@ -128,12 +134,18 @@ def test_a_repeated_join_key_warns_and_is_checked_again_after_a_refresh(
         "examplesHidden": False,
     }.items() <= warning.items()
     for part in (
-        "The join to 'funds' is declared many_to_one, but its key 'fund' is not unique",
+        "The relationship gifts (fund) to funds (fund) is many-to-one, but its key 'fund' is "
+        "not unique in 'funds'",
         "2 values are on more than one row, for example 'Sport' (3 rows), 'Library' (2 rows).",
         "A row of 'gifts' that matches a repeated value is counted once for every row",
         "totals and counts are too high in queries that use fields from 'funds'",
     ):
         assert part in warning["message"]
+    # The Model view shows it once, on the relationship, with the workspace code.
+    [shown] = in_model_view(client)
+    assert (shown["code"], shown["path"]) == ("duplicate_key", "/relationships/gifts__funds")
+    assert shown["message"] == warning["message"]
+    assert viewed(client, "funds") == []  # the relationship is one of gifts' joins
 
     # A warning, not an error: Check passes, and Save and Restore go through.
     assert validate(client, "gifts", definition) == {
@@ -142,13 +154,13 @@ def test_a_repeated_join_key_warns_and_is_checked_again_after_a_refresh(
         "warnings": [warning],
     }
     saved = save(client, "gifts", {**definition, "label": "All gifts"})
-    assert (saved["version"], saved["warnings"]) == (3, [warning])
-    restored = ok(client.post("/api/models/gifts/versions/2/restore"))
-    assert (restored["version"], restored["warnings"]) == (4, [warning])
+    assert (saved["version"], saved["warnings"]) == (2, [warning])
+    restored = ok(client.post("/api/models/gifts/versions/1/restore"))
+    assert (restored["version"], restored["warnings"]) == (3, [warning])
 
     conn.execute("DELETE FROM src.funds WHERE category IN ('Buildings','Clubs','Teams')")
     refresh(client, ids["funds"])
-    assert viewed(client, "gifts") == []
+    assert viewed(client, "gifts") == [] and in_model_view(client) == []
 
     # A key column that a refresh took away is a problem for Check, not a warning.
     conn.execute("ALTER TABLE src.funds RENAME COLUMN fund TO name")
@@ -159,7 +171,7 @@ def test_a_repeated_join_key_warns_and_is_checked_again_after_a_refresh(
     assert broken["problems"][0]["path"] == "/joins/0/on/fund"
 
 
-def test_composite_keys_five_examples_and_only_the_joins_queries_use(
+def test_composite_keys_five_examples_and_inactive_relationships_too(
     client_for: ClientFor,
     source: dict[str, Any],  # noqa: F811
 ) -> None:
@@ -199,19 +211,28 @@ def test_composite_keys_five_examples_and_only_the_joins_queries_use(
         ("Library", "VIC", 2),
         ("Scholarships", "VIC", 2),
     ]
-    assert "declared one_to_one" in warning["message"]
-    assert "its key ('Fund \"name\"', 'region') is not unique" in warning["message"]
+    assert (
+        "is one-to-one, but its key ('Fund \"name\"', 'region') is not unique" in warning["message"]
+    )
     assert (
         "7 values are on more than one row, for example ('Sport', 'VIC') (3 rows)"
         in warning["message"]
     )
 
-    # Queries cannot use a one_to_many join, so it cannot double anything.
+    # A one_to_many join becomes an inactive relationship the other way round, from
+    # targets to gifts. A measure may name it, so its one side is checked too: gifts
+    # holds every (fund, region) pair on many rows.
     many = {**join, "relationship": "one_to_many"}
-    assert validate(client, "gifts", gifts_model(many))["warnings"] == []
+    [inactive] = validate(client, "gifts", gifts_model(many))["warnings"]
+    assert (inactive["dataset"], inactive["key"], inactive["repeatedValues"]) == (
+        "gifts",
+        ["fund", "region"],
+        12,
+    )
+    assert inactive["relationship"] == "targets__gifts"
 
 
-def test_a_repeated_key_two_joins_away_warns_the_models_that_reach_it(
+def test_a_relationship_further_away_is_warned_once_on_itself(
     client_for: ClientFor, lookups: dict[str, Any]
 ) -> None:
     client = admin_client(client_for)  # restricting a dataset needs sign-in
@@ -219,74 +240,57 @@ def test_a_repeated_key_two_joins_away_warns_the_models_that_reach_it(
     ids = load_all(client, lookups)
     funds = model_of("fund", "category", "code", joins=[FUNDS_TO_CATEGORIES])
     [own] = save(client, "funds", funds)["warnings"]
-    assert (own["path"], own["dataset"], own["through"]) == ("/joins/0", "categories", None)
-
+    assert (own["path"], own["dataset"], own["relationship"]) == (
+        "/joins/0",
+        "categories",
+        "funds__categories",
+    )
     save(client, "categories", model_of("code", "area"))
-    [far] = save(client, "gifts", gifts_model(TO_FUNDS))["warnings"]
-    assert (far["path"], far["dataset"], far["through"]) == ("/joins/0", "categories", "funds")
-    assert far["repeatedValues"] == 1
+    # gifts reaches categories through funds. The repeated key is the relationship's,
+    # not gifts': it is shown once, on funds to categories.
+    assert save(client, "gifts", gifts_model(TO_FUNDS))["warnings"] == []
+    [far] = in_model_view(client)
+    assert (far["path"], far["repeatedValues"]) == ("/relationships/funds__categories", 1)
     assert far["examples"] == [{"values": {"code": "F"}, "rows": 2}]
-    for part in (
-        "The join from 'funds' to 'categories' is declared many_to_one",
-        "A row of 'gifts' that leads through 'funds' to a repeated value",
-        "(the join is in the model of 'funds')",
-    ):
-        assert part in far["message"]
-    assert counts_by(client, "categories.code")["F"] == 1000
+    assert counts_by(client, "categories.code")["F"] == 1000  # why it matters
 
-    # A path never goes through a restricted dataset, so nothing can be doubled.
-    access = f"/api/datasets/{ids['funds']}/access"
-    ok(client.put(access, json={"restricted": True, "grants": []}))
-    assert viewed(client, "gifts") == []
+    # A relationship into a restricted table says what that means, and no path goes
+    # through one, so gifts no longer reaches categories at all.
+    ok(client.put(f"/api/datasets/{ids['funds']}/access", json={"restricted": True, "grants": []}))
+    restricted = {
+        w["path"] for w in in_model_view(client) if w["code"] == "relationship_to_restricted"
+    }
+    assert restricted == {"/relationships/gifts__funds", "/relationships/funds__categories"}
+    unreachable = client.post(
+        "/api/query",
+        json={
+            "query": {
+                "dataset": "gifts",
+                "measures": ["gifts.row_count"],
+                "dimensions": ["categories.code"],
+            }
+        },
+    )
+    assert unreachable.status_code == 422
 
 
-def test_rules_on_a_joined_dataset_do_not_limit_the_base_and_that_is_said(
+def test_rules_on_a_related_table_filter_it_so_nothing_needs_saying(
     client_for: ClientFor, lookups: dict[str, Any]
 ) -> None:
+    """v1 warned that a rule on a joined dataset did not limit the base dataset
+    (joined_rules_not_applied). In v2 it does (R2), and the warning is gone."""
     client = client_for()
     load_all(client, lookups)
     assert save(client, "donors", model_of("region", rls=REGION_RULE))["warnings"] == []
-
-    [warning] = validate(client, "gifts", gifts_model(TO_DONORS))["warnings"]
-    assert {
-        "code": "joined_rules_not_applied",
-        "path": "/joins/0",
-        "dataset": "donors",
-        "through": None,
-    }.items() <= warning.items()
-    for part in (
-        "'donors' has row-level security but 'gifts' has none",
-        "a query that uses no field from 'donors' returns all of them, even when the join is inner",
-        "add a rule to its model on one of its own columns",
-    ):
-        assert part in warning["message"]
-    assert save(client, "gifts", gifts_model(TO_DONORS))["warnings"] == [warning]
-    assert viewed(client, "gifts") == [warning]
-
-    # Why it matters: a viewer who may see no donor at all still sees every gift.
+    assert save(client, "gifts", gifts_model(TO_DONORS))["warnings"] == []
+    assert in_model_view(client) == []
+    # A viewer who may see no donor at all sees no gift either.
     seen = query(
         client,
         {"dataset": "gifts", "measures": ["gifts.row_count"]},
         previewAs={"role": "viewer", "attributes": {}},
     )
-    assert seen["rows"] == [[2000]]
-
-    # With a rule of its own the base model is not flagged.
-    assert validate(client, "gifts", gifts_model(TO_DONORS, rls=REGION_RULE))["warnings"] == []
-    # A join that queries cannot use does not protect this dataset either.
-    many = {**TO_DONORS, "relationship": "one_to_many"}
-    [flagged] = validate(client, "gifts", gifts_model(many))["warnings"]
-    assert flagged["code"] == "joined_rules_not_applied"
-
-    # Two joins away, behind a dataset that has no rules.
-    area_rule = [{"filter": "area = {{ user.attributes.area }}"}]
-    save(client, "categories", model_of("code", "area", rls=area_rule))
-    funds = model_of("fund", "code", joins=[FUNDS_TO_CATEGORIES])
-    [between] = save(client, "funds", funds)["warnings"]
-    assert between["dataset"] == "categories"
-    [far] = validate(client, "gifts", gifts_model(TO_FUNDS))["warnings"]
-    assert (far["path"], far["dataset"], far["through"]) == ("/joins/0", "categories", "funds")
-    assert "'categories' (reached through 'funds') has row-level security" in far["message"]
+    assert seen["rows"] == [[0]]
 
 
 def test_examples_are_hidden_from_people_who_may_not_see_the_data(
@@ -304,42 +308,44 @@ def test_examples_are_hidden_from_people_who_may_not_see_the_data(
     shown = [{"values": {"fund": "Library"}, "rows": 2}]
 
     def repeated(warnings: list[dict[str, Any]]) -> dict[str, Any]:
-        [found] = [w for w in warnings if w["code"] == "duplicate_join_key"]
+        [found] = [w for w in warnings if w["code"] in ("duplicate_join_key", "duplicate_key")]
         return found
 
-    def check_hidden() -> None:
-        """The editor, everywhere: the page, Check, Save and an agent."""
-        for warnings in (
-            viewed(editor, "gifts"),
-            validate(editor, "gifts", definition)["warnings"],
-            save(editor, "gifts", definition)["warnings"],
-            agent.call("get_semantic_model", dataset="gifts")["warnings"],
-            agent.call("validate_model", dataset="gifts", definition=definition)["warnings"],
-        ):
-            warning = repeated(warnings)
-            assert (warning["examples"], warning["examplesHidden"]) == ([], True)
-            assert warning["repeatedValues"] == 1
-            assert "Library" not in str(warning)
-            assert (
-                "Examples are hidden: you may not see all of the data in 'funds'."
-                in warning["message"]
-            )
-        # The admin sees them: exempt from the rule, and allowed any dataset.
-        assert repeated(viewed(admin, "gifts"))["examples"] == shown
-
-    assert repeated(viewed(editor, "gifts"))["examples"] == shown
-
     # Row-level security on the joined dataset that applies to editors.
+    assert repeated(viewed(editor, "gifts"))["examples"] == shown
     rules = [{"filter": "category IN {{ user.attributes.categories }}"}]
     save(admin, "funds", model_of("fund", rls=rules))
-    check_hidden()
+    for warnings in (  # the editor, everywhere: the pages, Check, Save and an agent
+        viewed(editor, "gifts"),
+        in_model_view(editor),
+        validate(editor, "gifts", definition)["warnings"],
+        save(editor, "gifts", definition)["warnings"],
+        agent.call("get_semantic_model", dataset="gifts")["warnings"],
+        agent.call("validate_model", dataset="gifts", definition=definition)["warnings"],
+        agent.call("get_workspace_model")["warnings"],
+    ):
+        warning = repeated(warnings)
+        assert (warning["examples"], warning["examplesHidden"]) == ([], True)
+        assert warning["repeatedValues"] == 1
+        assert "Library" not in str(warning)
+        assert (
+            "Examples are hidden: you may not see all of the data in 'funds'." in warning["message"]
+        )
+    # The admin sees them: exempt from the rule, and allowed any dataset.
+    assert repeated(viewed(admin, "gifts"))["examples"] == shown
 
-    # A restricted joined dataset that the editor may not use.
+    # A restricted table the editor may not use: they do not see the relationship at
+    # all, nor its warnings, and saving gifts without it keeps it.
     save(admin, "funds", model_of("fund"))
     assert repeated(viewed(editor, "gifts"))["examples"] == shown
     access = f"/api/datasets/{ids['funds']}/access"
     ok(admin.put(access, json={"restricted": True, "grants": []}))
-    check_hidden()
+    hidden = ok(editor.get("/api/models/gifts"))
+    assert hidden["definition"].get("joins", []) == [] and hidden["warnings"] == []
+    assert "funds" not in str(in_model_view(editor))
+    assert "funds" not in str(agent.call("get_workspace_model"))
+    save(editor, "gifts", model_of("fund", "region", label="Gifts"))
+    assert "gifts__funds" in ok(admin.get("/api/model"))["document"]["relationships"]
     ok(admin.put(access, json={"restricted": True, "grants": [f"user:{editor_id}"]}))
     assert repeated(viewed(editor, "gifts"))["examples"] == shown
 
@@ -397,7 +403,7 @@ def test_a_key_that_cannot_be_checked_is_said_and_never_blocks_a_save(
     saved = save(client, "gifts", gifts_model(TO_FUNDS))
     [warning] = saved["warnings"]
     assert (saved["version"], warning["code"], warning["key"]) == (
-        2,
+        1,
         "join_key_not_checked",
         ["fund"],
     )

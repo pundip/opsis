@@ -8,7 +8,7 @@ follow the same rules.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from datetime import date
 from typing import Any
 
@@ -19,10 +19,10 @@ from opsis.auth.principal import Principal
 from opsis.dashboards import patch as patches
 from opsis.dashboards import spec as specs
 from opsis.dashboards.manifests import Manifest, load_manifests
-from opsis.db.models import Dashboard, DashboardVersion, Dataset, User
+from opsis.db.models import Dashboard, DashboardVersion, User
 from opsis.errors import ApiError
-from opsis.semantic.compiler import Scan, UserContext
-from opsis.semantic.model import Model, Problem, schema_problems, schema_validator
+from opsis.semantic.compiler import Scan, UserContext, Workspace
+from opsis.semantic.model import Problem, schema_problems, schema_validator
 from opsis.services import access as acl
 from opsis.services import audit, events, schedules
 from opsis.services import query as queries
@@ -36,17 +36,20 @@ def manifests(settings: Settings) -> dict[str, Manifest]:
     return load_manifests(settings.visuals_dir, settings.spec_dir)
 
 
-def all_models(
-    db: Session, settings: Settings, principal: Principal | None = None
-) -> dict[str, Model]:
-    """The semantic model of every dataset that has data, and that `principal`
-    (when given) may use."""
-    names = set(db.scalars(select(Dataset.name)).all())
-    if principal is not None:
-        names -= acl.blocked_datasets(db, principal)
-    return {
-        name: source.model for name, source in queries.load_sources(db, settings, names).items()
-    }
+def tables_of(workspace: Workspace, blocked: Collection[str] = ()) -> specs.Tables:
+    """The workspace's tables as dashboards use them (but those in `blocked`)."""
+    return specs.Tables(
+        {name: s.model for name, s in workspace.sources.items() if name not in blocked},
+        workspace.relationships,
+        {name for name, s in workspace.sources.items() if s.restricted},
+    )
+
+
+def all_models(db: Session, settings: Settings, principal: Principal | None = None) -> specs.Tables:
+    """The table of every dataset that has data, and that `principal` (when given)
+    may use, with the relationships between them."""
+    blocked = acl.blocked_datasets(db, principal) if principal is not None else set()
+    return tables_of(queries.load_workspace(db, settings), blocked)
 
 
 def problems(
@@ -546,34 +549,18 @@ def data_for_spec(
     if manifest is None:
         raise ApiError(422, "invalid_spec", f"There is no visual called {item['visual']!r}.")
 
-    names = {item["dataset"]} if item.get("dataset") else set()
-    for control in spec.get("filters") or []:
-        names.add(control["field"].partition(".")[0])
-    for entries in (item.get("bindings") or {}).values():
-        for entry in entries:
-            ref = entry if isinstance(entry, str) else entry["field"]
-            names.add(ref.partition(".")[0])
-    for cross in (state or {}).get("cross") or []:
-        if isinstance(cross, dict) and isinstance(cross.get("field"), str):
-            names.add(cross["field"].partition(".")[0])
-    sources = queries.load_sources(db, settings, names)
-    # Filters and cross-filters may name a field of a dataset this item joins to.
-    base = sources.get(item.get("dataset") or "")
-    joined = {join.to for join in base.model.joins} - set(sources) if base else set()
-    if joined:
-        sources.update(queries.load_sources(db, settings, joined))
-    models = {name: source_.model for name, source_ in sources.items()}
+    workspace = queries.load_workspace(db, settings)
     db.rollback()
 
-    query = specs.item_query(spec, item, manifest, models, state)
+    query = specs.item_query(spec, item, manifest, tables_of(workspace), state)
     if query is None:
         return {"itemId": item_id, "empty": True}
-    if query["dataset"] not in sources:
+    if query["dataset"] not in workspace.sources:
         raise ApiError(
             409, "no_data", f"Dataset {query['dataset']!r} has no data yet. Refresh it first."
         )
     queries.check_query(settings, query)
-    _, body = queries.execute(settings, runtime, sources, user, query, today=today, scan=scan)
+    _, body = queries.execute(settings, runtime, workspace, user, query, today=today, scan=scan)
     body["itemId"] = item_id
 
     mode = (item.get("config") or {}).get("comparison")
@@ -581,7 +568,7 @@ def data_for_spec(
         compared = specs.comparison_query(query, mode, settings.calendar, today or settings.today())
         if compared is not None:
             _, previous = queries.execute(
-                settings, runtime, sources, user, compared[0], today=today, scan=scan
+                settings, runtime, workspace, user, compared[0], today=today, scan=scan
             )
             body["comparison"] = {"mode": mode, "range": compared[1], "rows": previous["rows"]}
     if include_query:
@@ -634,11 +621,11 @@ def options_for_spec(
     }
     if search:
         query["filters"] = [{"field": field, "op": "contains", "values": [search[:200]]}]
-    sources = queries.load_sources(db, settings, {dataset})
+    workspace = queries.load_workspace(db, settings)
     db.rollback()
-    if dataset not in sources:
+    if dataset not in workspace.sources:
         return {"values": [], "truncated": False}
     queries.check_query(settings, query)
-    _, body = queries.execute(settings, runtime, sources, user, query)
+    _, body = queries.execute(settings, runtime, workspace, user, query)
     values = [row[0] for row in body["rows"] if row[0] is not None]
     return {"values": values, "truncated": body["truncated"]}

@@ -12,6 +12,7 @@ import { Guide } from "../pages/Guide";
 import { Home } from "../pages/Home";
 import { Jobs } from "../pages/Jobs";
 import { ModelDetail } from "../pages/ModelDetail";
+import { ModelView } from "../pages/ModelView";
 import { Models } from "../pages/Models";
 import { Placeholder } from "../pages/Placeholder";
 import { Schedules } from "../pages/Schedules";
@@ -87,8 +88,8 @@ export function App() {
         return <Datasets />;
       case "/jobs":
         return <Jobs config={appConfig} />;
-      case "/models":
-        return <Models me={user} />;
+      case "/model":
+        return <ModelView me={user} />;
       case "/dashboards":
         return <Dashboards me={user} />;
       case "/users":
@@ -135,8 +136,11 @@ export function App() {
             <Route path="/dashboards/:id/edit" element={<DashboardEditor config={appConfig} />} />
           </>
         )}
-        {allowed("/models") && (
-          <Route path="/models/:dataset" element={<ModelDetail config={appConfig} me={user} />} />
+        {allowed("/model") && (
+          <>
+            <Route path="/models" element={<Models me={user} />} />
+            <Route path="/models/:dataset" element={<ModelDetail config={appConfig} me={user} />} />
+          </>
         )}
         <Route path="*" element={<Placeholder title="Page not found" missing />} />
       </Routes>

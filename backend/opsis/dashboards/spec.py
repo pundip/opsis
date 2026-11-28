@@ -13,7 +13,7 @@ the dashboard's filters, which keeps specs small and hard to get wrong.
 from __future__ import annotations
 
 import difflib
-from collections.abc import Mapping
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -27,13 +27,74 @@ from opsis.semantic.model import (
     Measure,
     Model,
     Problem,
-    reachable,
     schema_problems,
     schema_validator,
+)
+from opsis.semantic.relationships import (
+    Relationship,
+    from_v1_joins,
+    grouping_steps,
+    shortest_paths,
+    within_two_steps,
 )
 
 DEFAULT_LIMIT = 1000
 Field = tuple[str, Dimension | Measure]  # ("dimension" | "measure", definition)
+
+
+class Tables(Mapping[str, Model]):
+    """The tables a dashboard may use, by name, and which others each one reaches.
+
+    - An item's own fields (bindings, its filters) may be dimensions of any table its
+      dataset reaches through active many-to-one relationships, by one shortest
+      path and never through a restricted table, as queries group (`grouping`).
+    - The dashboard's filters and cross-filters keep v1's reach until V4 migrates
+      dashboards (V2_DESIGN 1.4): at most two steps (`filtering`).
+
+    Given plain v1 models, their joins are the relationships (the migration's rules).
+    """
+
+    def __init__(
+        self,
+        models: Mapping[str, Model],
+        relationships: Sequence[Relationship] | None = None,
+        restricted: Collection[str] = (),
+    ) -> None:
+        self._models = dict(models)
+        self.relationships = (
+            tuple(relationships)
+            if relationships is not None
+            else tuple(from_v1_joins(self._models))
+        )
+        self.restricted = frozenset(restricted)
+        self._grouping: dict[str, set[str]] = {}
+        self._filtering: dict[str, set[str]] = {}
+
+    def __getitem__(self, name: str) -> Model:
+        return self._models[name]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._models)
+
+    def __len__(self) -> int:
+        return len(self._models)
+
+    def grouping(self, base: str) -> set[str]:
+        if base not in self._grouping:
+            steps = grouping_steps(self.relationships)
+            reach = shortest_paths(base, steps, blocked=self.restricted)
+            self._grouping[base] = {t for t in reach.paths if t in self._models and t != base}
+        return self._grouping[base]
+
+    def filtering(self, base: str) -> set[str]:
+        if base not in self._filtering:
+            found = within_two_steps(self.relationships, base, self.restricted)
+            self._filtering[base] = {t for t in found if t in self._models and t != base}
+        return self._filtering[base]
+
+
+def tables_of(models: Mapping[str, Model]) -> Tables:
+    return models if isinstance(models, Tables) else Tables(models)
 
 
 def spec_datasets(spec: Mapping[str, Any]) -> set[str]:
@@ -96,15 +157,20 @@ def blank_spec(title: str) -> dict[str, Any]:
     }
 
 
-def resolve_field(models: Mapping[str, Model], base: str | None, ref: str) -> Field | None:
-    """Look up "dataset.field". With `base`, the field must be reachable from that
-    dataset: its own dimension or measure, or a dimension one or two safe joins away."""
+def resolve_field(
+    models: Mapping[str, Model], base: str | None, ref: str, *, dashboard_filter: bool = False
+) -> Field | None:
+    """Look up "table.field". With `base`, the field must be one that table can use:
+    its own dimension or measure, or a dimension of a table it reaches (see `Tables`:
+    a dashboard filter or cross-filter reaches less far)."""
     dataset, _, name = ref.partition(".")
     model = models.get(dataset)
     if model is None:
         return None
     if base is not None and dataset != base:
-        if dataset not in reachable(models, base):
+        tables = tables_of(models)
+        reach = tables.filtering(base) if dashboard_filter else tables.grouping(base)
+        if dataset not in reach:
             return None
         return ("dimension", model.dimensions[name]) if name in model.dimensions else None
     if name in model.dimensions:
@@ -125,6 +191,7 @@ def validate(
     models: Mapping[str, Model],
 ) -> list[Problem]:
     """Every problem in a dashboard spec. An empty list means it can be saved."""
+    models = tables_of(models)
     problems = schema_problems(schema_validator(spec_dir, "dashboard.schema.json"), spec)
     if problems:
         return problems  # the checks below assume the structure is right
@@ -186,7 +253,7 @@ def _unknown_field(models: Mapping[str, Model], dataset: str, ref: str, kind: st
     model = models[dataset]
     measures = [f"{dataset}.{name}" for name in model.measures]
     dimensions = [f"{dataset}.{name}" for name in model.dimensions]
-    for other in reachable(models, dataset):
+    for other in sorted(tables_of(models).grouping(dataset)):
         dimensions += [f"{other}.{name}" for name in models[other].dimensions]
     known = (
         measures
@@ -309,7 +376,9 @@ def _check_item(
 
 
 def _reachable(models: Mapping[str, Model], dataset: str, ref: str) -> bool:
-    return resolve_field(models, dataset, ref) is not None
+    """True when a dashboard filter or cross-filter on `ref` applies to an item on
+    `dataset`."""
+    return resolve_field(models, dataset, ref, dashboard_filter=True) is not None
 
 
 def filter_condition(control: Mapping[str, Any], value: Any) -> dict[str, Any] | None:
@@ -342,6 +411,7 @@ def item_query(
     "cross": [{"field", "values", "source"}], "grains": {item id: grain}}.
     A filter with no entry in the state uses its default from the spec.
     """
+    models = tables_of(models)
     state = state or {}
     dataset = item.get("dataset")
     if not manifest["roles"] or dataset is None:

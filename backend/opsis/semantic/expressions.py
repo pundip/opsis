@@ -51,7 +51,10 @@ ALLOWED_CAST_TYPES = {
     exp.DataType.Type.TIMESTAMP, exp.DataType.Type.DATETIME,
 }  # fmt: skip
 
-MEASURE_REF = re.compile(r"\{([a-z_][a-z0-9_]{0,62})\}")
+# {measure} or, for a measure of another table, {table.measure}.
+MEASURE_REF = re.compile(r"\{([a-z_][a-z0-9_]{0,62}(?:\.[a-z_][a-z0-9_]{0,62})?)\}")
+SEGMENT_REF = re.compile(r"\{([a-z_][a-z0-9_]{0,62})\}")
+_DOT = "__opsis_dot__"
 USER_REF = re.compile(r"\{\{\s*user\.(attributes\.[a-z_][a-z0-9_]{0,62}|email|role)\s*\}\}")
 _MEASURE_PREFIX = "__opsis_m_"
 _USER_PREFIX = "__opsis_u_"
@@ -115,23 +118,56 @@ def parse(text: str) -> exp.Expr:
     return tree
 
 
+# Another table a measure's filter may name, as table.column: its alias in the query
+# and its columns.
+Related = Mapping[str, tuple[str, Sequence[str]]]
+
+
 def _resolve_columns(
-    tree: exp.Expr, alias: str, columns: Sequence[str], skip_prefix: str | None = None
+    tree: exp.Expr,
+    alias: str,
+    columns: Sequence[str],
+    skip_prefix: str | None = None,
+    related: Related | None = None,
 ) -> exp.Expr:
-    """Point every column at `alias`, using the dataset's exact column names."""
+    """Point every column at `alias`, using the dataset's exact column names. With
+    `related`, a column may also be another table's, written table.column."""
     exact = {c.lower(): c for c in columns}
     for node in list(tree.find_all(exp.Column)):
         if skip_prefix and node.name.startswith(skip_prefix):
             continue
         if node.table:
-            raise ExpressionError(
-                f"Write column names without a table prefix (found {node.sql(dialect='duckdb')})."
-            )
+            if related is None:
+                raise ExpressionError(
+                    "Write column names without a table prefix "
+                    f"(found {node.sql(dialect='duckdb')})."
+                )
+            if node.table not in related:
+                raise ExpressionError(
+                    f"{node.table!r} is not a table this one reaches many-to-one through its "
+                    "relationships, so its columns cannot be used here."
+                )
+            other_alias, other_columns = related[node.table]
+            other = {c.lower(): c for c in other_columns}.get(node.name.lower())
+            if other is None:
+                raise ExpressionError(f"Table {node.table!r} has no column called {node.name!r}.")
+            node.replace(exp.column(other, table=other_alias, quoted=True))
+            continue
         actual = exact.get(node.name.lower())
         if actual is None:
             raise ExpressionError(f"There is no column called {node.name!r} in this dataset.")
         node.replace(exp.column(actual, table=alias, quoted=True))
     return tree
+
+
+def qualified_tables(text: str) -> set[str]:
+    """The other tables an expression names (table.column), unchecked."""
+    prepared = SEGMENT_REF.sub("NULL", text)
+    try:
+        tree = parse(prepared)
+    except ExpressionError:
+        return set()
+    return {str(node.table) for node in tree.find_all(exp.Column) if node.table}
 
 
 def column_expression(text: str, alias: str, columns: Sequence[str]) -> exp.Expr:
@@ -140,6 +176,7 @@ def column_expression(text: str, alias: str, columns: Sequence[str]) -> exp.Expr
 
 
 def measure_references(text: str) -> list[str]:
+    """The measures a formula uses: `name`, or `table.name` for another table's."""
     return MEASURE_REF.findall(text)
 
 
@@ -148,9 +185,9 @@ def measure_expression(text: str, resolve: Callable[[str], exp.Expr]) -> exp.Exp
 
     Raw columns are not allowed: a formula may only combine other measures.
     """
-    prepared = MEASURE_REF.sub(lambda m: f"{_MEASURE_PREFIX}{m.group(1)}", text)
+    prepared = MEASURE_REF.sub(lambda m: f"{_MEASURE_PREFIX}{m.group(1).replace('.', _DOT)}", text)
     if "{" in prepared or "}" in prepared:
-        raise ExpressionError("Reference measures as {measure_name}.")
+        raise ExpressionError("Reference measures as {measure_name} or {table.measure_name}.")
     tree = parse(prepared)
     for node in list(tree.find_all(exp.Column)):
         if node.table or not node.name.startswith(_MEASURE_PREFIX):
@@ -158,7 +195,8 @@ def measure_expression(text: str, resolve: Callable[[str], exp.Expr]) -> exp.Exp
                 f"A measure formula can only use other measures in braces, not the column "
                 f"{node.name!r}. Define a base measure with agg and column first."
             )
-        replacement = exp.Paren(this=resolve(node.name.removeprefix(_MEASURE_PREFIX)))
+        name = node.name.removeprefix(_MEASURE_PREFIX).replace(_DOT, ".")
+        replacement = exp.Paren(this=resolve(name))
         if node is tree:
             return replacement
         node.replace(replacement)
@@ -185,22 +223,29 @@ def _literal(value: Any) -> exp.Expr | None:
 
 
 def segment_references(text: str) -> list[str]:
-    return MEASURE_REF.findall(text)
+    return SEGMENT_REF.findall(text)
 
 
 def filter_expression(
-    text: str, alias: str, columns: Sequence[str], segments: Mapping[str, str]
+    text: str,
+    alias: str,
+    columns: Sequence[str],
+    segments: Mapping[str, str],
+    related: Related | None = None,
 ) -> exp.Expr:
     """The condition of a conditional measure.
 
     A boolean expression over the dataset's columns. A segment may be used by
-    name in braces: `{online} AND amount > 100`. Checked by the same
-    allow-list as every other model expression.
+    name in braces: `{online} AND amount > 100`. With `related`, columns of the
+    tables it lists may be named as table.column (`donors.tier = 'Major'`). Checked
+    by the same allow-list as every other model expression.
     """
-    prepared = MEASURE_REF.sub(lambda m: f"({_SEGMENT_PREFIX}{m.group(1)})", text)
+    prepared = SEGMENT_REF.sub(lambda m: f"({_SEGMENT_PREFIX}{m.group(1)})", text)
     if "{" in prepared or "}" in prepared:
         raise ExpressionError("Reference segments as {segment_name}.")
-    tree = _resolve_columns(parse(prepared), alias, columns, skip_prefix=_SEGMENT_PREFIX)
+    tree = _resolve_columns(
+        parse(prepared), alias, columns, skip_prefix=_SEGMENT_PREFIX, related=related
+    )
     for node in list(tree.find_all(exp.Column)):
         if not node.name.startswith(_SEGMENT_PREFIX):
             continue

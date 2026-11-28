@@ -139,9 +139,11 @@ class Connector(Protocol):
         """Receives the validated config with secrets already decrypted.
 
         Must not open network connections here: do that lazily. The host adds
-        one reserved key, "_uploads_dir": the directory that holds uploaded
+        reserved keys: "_uploads_dir", the directory that holds uploaded
         files, for connectors whose schema has fields marked "x-upload": true
-        (their value is a path relative to that directory).
+        (their value is a path relative to that directory), and "_calendar",
+        the workspace calendar (weekStart, fiscalYearStartMonth, fiscalYearLabel
+        and timezone).
         """
         ...
 

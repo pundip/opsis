@@ -509,43 +509,39 @@ def test_model_versions_record_every_save_and_can_be_restored(
     client = client_for()
     ids = load(client, source)
 
+    # A starter table is generated from the columns when it is read (V2): refreshes,
+    # with or without a column change, write no version.
     first = ok(client.get("/api/models/gifts"))
-    assert first["version"] == 1 and first["isStarter"]
-    assert [
-        (v["version"], v["authorType"], v["authorName"], v["current"])
-        for v in ok(client.get("/api/models/gifts/versions"))
-    ] == [(1, "system", "System", True)]
-    # Refreshing without a column change does not add a version; a column change does.
+    assert first["version"] == 0 and first["isStarter"]
+    assert ok(client.get("/api/models/gifts/versions")) == []
     refresh(client, ids["gifts"])
-    assert len(ok(client.get("/api/models/gifts/versions"))) == 1
     source["conn"].execute("ALTER TABLE src.gifts ADD COLUMN channel text")
     refresh(client, ids["gifts"], full=True)
-    regenerated = ok(client.get("/api/models/gifts/versions"))
-    assert [v["version"] for v in regenerated] == [2, 1] and "columns changed" in regenerated[0][
-        "message"
-    ]
+    regenerated = ok(client.get("/api/models/gifts"))
+    assert regenerated["version"] == 0 and "channel" in regenerated["definition"]["dimensions"]
+    assert ok(client.get("/api/models/gifts/versions")) == []
 
     saved = ok(
         client.put(
             "/api/models/gifts",
-            json={"yaml": MODEL_YAML, "baseVersion": 2, "message": "Add measures and RLS"},
+            json={"yaml": MODEL_YAML, "baseVersion": 0, "message": "Add measures and RLS"},
         )
     )
-    assert saved["version"] == 3 and not saved["isStarter"]
+    assert saved["version"] == 1 and not saved["isStarter"]
     edited = MODEL_YAML.replace("label: Gifts", "label: Gifts and pledges")
     assert (
-        ok(client.put("/api/models/gifts", json={"yaml": edited, "baseVersion": 3}))["version"] == 4
+        ok(client.put("/api/models/gifts", json={"yaml": edited, "baseVersion": 1}))["version"] == 2
     )
 
     versions = ok(client.get("/api/models/gifts/versions"))
     assert [
-        (v["version"], v["authorType"], v["authorName"], v["message"]) for v in versions[:2]
+        (v["version"], v["authorType"], v["authorName"], v["message"], v["current"])
+        for v in versions
     ] == [
-        (4, "user", "Local admin", None),
-        (3, "user", "Local admin", "Add measures and RLS"),
+        (2, "user", "Local admin", None, True),
+        (1, "user", "Local admin", "Add measures and RLS", False),
     ]
-    assert [v["current"] for v in versions] == [True, False, False, False]
-    old = ok(client.get("/api/models/gifts/versions/3"))
+    old = ok(client.get("/api/models/gifts/versions/1"))
     assert old["definition"]["label"] == "Gifts" and "label: Gifts\n" in old["yaml"]
     assert list(old["definition"]["measures"]) == [
         "total_amount",
@@ -555,35 +551,47 @@ def test_model_versions_record_every_save_and_can_be_restored(
     ]  # order kept
     assert client.get("/api/models/gifts/versions/99").status_code == 404
 
-    # A save based on a stale version is refused, and nothing changes.
-    stale = client.put("/api/models/gifts", json={"yaml": MODEL_YAML, "baseVersion": 3})
+    # A save from an older version is refused when someone changed the same place
+    # since, and changes nothing ...
+    renamed = MODEL_YAML.replace("label: Gifts", "label: Gift records")
+    stale = client.put("/api/models/gifts", json={"yaml": renamed, "baseVersion": 1})
     assert stale.status_code == 409 and stale.json()["error"]["code"] == "version_conflict"
-    assert "now version 4" in stale.json()["error"]["message"]
-    assert ok(client.get("/api/models/gifts"))["version"] == 4
-    # An invalid save adds no version either.
+    assert "now version 2" in stale.json()["error"]["message"]
+    assert ok(client.get("/api/models/gifts"))["version"] == 2
+    # ... and applied on top when nobody did.
+    counted = MODEL_YAML.replace(
+        "gift_count: { agg: count }", "gift_count: { agg: count, label: Gifts given }"
+    )
+    rebased = ok(client.put("/api/models/gifts", json={"yaml": counted, "baseVersion": 1}))
+    assert rebased["version"] == 3 and rebased["definition"]["label"] == "Gifts and pledges"
+    assert rebased["definition"]["measures"]["gift_count"]["label"] == "Gifts given"
+    # An invalid save adds no version.
     assert (
         client.put(
             "/api/models/gifts", json={"yaml": "dimensions: {x: {column: nope, type: string}}"}
         ).status_code
         == 422
     )
-    assert len(ok(client.get("/api/models/gifts/versions"))) == 4
+    assert len(ok(client.get("/api/models/gifts/versions"))) == 3
 
     # Restore makes a new version with the old content; history is never rewritten.
-    restored = ok(client.post("/api/models/gifts/versions/3/restore"))
-    assert restored["version"] == 5 and restored["definition"]["label"] == "Gifts"
+    restored = ok(client.post("/api/models/gifts/versions/1/restore"))
+    assert restored["version"] == 4 and restored["definition"]["label"] == "Gifts"
+    assert "label" not in restored["definition"]["measures"]["gift_count"]
     latest = ok(client.get("/api/models/gifts/versions"))[0]
-    assert (latest["version"], latest["message"]) == (5, "Restored version 3")
+    assert (latest["version"], latest["message"]) == (4, "Restored version 1 of gifts")
     assert (
-        ok(client.get("/api/models/gifts/versions/4"))["definition"]["label"] == "Gifts and pledges"
+        ok(client.get("/api/models/gifts/versions/2"))["definition"]["label"] == "Gifts and pledges"
     )
     # Restoring a version that no longer fits the data is refused with the reason.
     source["conn"].execute("ALTER TABLE src.gifts RENAME COLUMN fund TO fund_name")
     refresh(client, ids["gifts"], full=True)
-    broken = client.post("/api/models/gifts/versions/3/restore")
+    fixed = MODEL_YAML.replace("column: fund,", "column: fund_name,")
+    assert ok(client.put("/api/models/gifts", json={"yaml": fixed}))["version"] == 5
+    broken = client.post("/api/models/gifts/versions/1/restore")
     assert broken.status_code == 422
     assert any(d["path"] == "/dimensions/fund/column" for d in broken.json()["error"]["details"])
-    # An edited model is not regenerated by the refresh, so there is still no version 6.
+    # A refresh does not regenerate a written table, so there is still no version 6.
     assert ok(client.get("/api/models/gifts"))["version"] == 5
 
 

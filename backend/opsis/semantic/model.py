@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -28,7 +28,6 @@ ALL_GRAINS = (
     "day", "week", "month", "quarter", "year", "fiscal_month", "fiscal_quarter", "fiscal_year",
 )  # fmt: skip
 DEFAULT_RLS_ROLES = ("viewer", "editor")
-SAFE_JOINS = ("many_to_one", "one_to_one")
 # Logical column type (connectors) to dimension type.
 DIMENSION_TYPE = {
     "string": "string", "json": "string", "integer": "number", "float": "number",
@@ -50,6 +49,10 @@ class Dimension:
     # Time dimensions: the zone a naive timestamp was written in (IANA name).
     # None means the workspace timezone. Ignored for columns that hold instants.
     timezone: str | None = None
+    hidden: bool = False  # left out of field lists; still usable
+    description: str | None = None
+    format: str | None = None
+    data_category: str | None = None  # date, currency, postcode, ...
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,10 @@ class Measure:
     format: str | None
     label: str
     filter: str | None = None  # condition of a conditional measure
+    # A relationship this measure uses instead of the active path (USERELATIONSHIP).
+    relationship: str | None = None
+    hidden: bool = False
+    description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,13 +93,18 @@ class RlsRule:
 
 @dataclass(frozen=True)
 class Model:
-    dataset: str
+    """One table of the workspace model (a v1 model: one dataset's)."""
+
+    dataset: str  # the table's name, which is its dataset's
     label: str
     dimensions: Mapping[str, Dimension]
     measures: Mapping[str, Measure]
     segments: Mapping[str, Segment]
-    joins: tuple[Join, ...]
+    joins: tuple[Join, ...]  # v1 models only: a workspace table has relationships instead
     rls: tuple[RlsRule, ...]
+    hidden: bool = False
+    description: str | None = None
+    date_column: str | None = None  # set when this is the date table
 
 
 def humanize(name: str) -> str:
@@ -100,69 +112,10 @@ def humanize(name: str) -> str:
     return text[:1].upper() + text[1:]
 
 
-def reachable(
-    models: Mapping[str, Model], base: str, restricted: Collection[str] = ()
-) -> dict[str, str | None]:
-    """The datasets whose dimensions a query on `base` can use, each with the dataset
-    it is reached through (None when `base` joins to it directly). Every join on
-    the way is many_to_one or one_to_one. A dataset two joins away by two ways is
-    left out: the compiler asks for a direct join to say which. No path goes
-    through a dataset in `restricted` (restricted datasets, where the caller
-    knows them)."""
-    origin = models.get(base)
-    if origin is None:
-        return {}
-    joined = {j.to for j in origin.joins}
-    direct: dict[str, str | None] = {
-        j.to: None
-        for j in origin.joins
-        if j.relationship in SAFE_JOINS and j.to in models and j.to != base
-    }
-    farther: dict[str, list[str]] = {}
-    for middle in direct:
-        if middle in restricted:
-            continue
-        for join in models[middle].joins:
-            usable = join.relationship in SAFE_JOINS and join.to in models
-            if usable and join.to != base and join.to not in joined:
-                farther.setdefault(join.to, []).append(middle)
-    return {**direct, **{name: via[0] for name, via in farther.items() if len(via) == 1}}
-
-
-@dataclass(frozen=True)
-class JoinPath:
-    """One dataset that a model joins to, directly or through another dataset."""
-
-    index: int  # the model's own join that leads there: /joins/<index>
-    through: str | None  # the dataset in between, or None for a direct join
-    join: Join  # the join that reads the dataset, written in the model or in `through`'s
-
-
-def join_paths(
-    models: Mapping[str, Model], base: str, restricted: Collection[str] = ()
-) -> list[JoinPath]:
-    """The datasets in `models` that the model of `base` joins to: each of its own
-    joins, whatever the relationship, then those two joins away that queries can
-    reach (see `reachable`)."""
-    joins = models[base].joins
-    direct = [
-        JoinPath(index, None, join)
-        for index, join in enumerate(joins)
-        if join.to in models and join.to != base
-    ]
-    position = {join.to: index for index, join in enumerate(joins)}
-    farther = [
-        JoinPath(position[through], through, join)
-        for name, through in reachable(models, base, restricted).items()
-        if through is not None
-        for join in models[through].joins
-        if join.to == name
-    ]
-    return direct + sorted(farther, key=lambda path: (path.index, path.join.to))
-
-
 def parse_model(dataset: str, definition: Mapping[str, Any]) -> Model:
-    """Build a Model from a definition that has already passed `validate`."""
+    """Build a Model from a definition that has already passed validation: a v1
+    model, or a table of the workspace model."""
+    date_table = definition.get("dateTable")
     return Model(
         dataset=dataset,
         label=str(definition.get("label") or humanize(dataset)),
@@ -175,6 +128,10 @@ def parse_model(dataset: str, definition: Mapping[str, Any]) -> Model:
                 grains=tuple(d.get("grains") or ALL_GRAINS) if d["type"] == "time" else (),
                 label=str(d.get("label") or humanize(name)),
                 timezone=d.get("timezone"),
+                hidden=bool(d.get("hidden", False)),
+                description=d.get("description"),
+                format=d.get("format"),
+                data_category=d.get("dataCategory"),
             )
             for name, d in (definition.get("dimensions") or {}).items()
         },
@@ -187,6 +144,9 @@ def parse_model(dataset: str, definition: Mapping[str, Any]) -> Model:
                 format=m.get("format"),
                 label=str(m.get("label") or humanize(name)),
                 filter=m.get("filter"),
+                relationship=m.get("relationship"),
+                hidden=bool(m.get("hidden", False)),
+                description=m.get("description"),
             )
             for name, m in (definition.get("measures") or {}).items()
         },
@@ -209,10 +169,13 @@ def parse_model(dataset: str, definition: Mapping[str, Any]) -> Model:
             RlsRule(filter=r["filter"], roles=tuple(r.get("applies_to_roles") or DEFAULT_RLS_ROLES))
             for r in definition.get("rls") or []
         ),
+        hidden=bool(definition.get("hidden", False)),
+        description=definition.get("description"),
+        date_column=date_table.get("column") if isinstance(date_table, Mapping) else None,
     )
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=4)
 def schema_registry(spec_dir: Path) -> tuple[Registry[Any], dict[str, dict[str, Any]]]:
     """Every spec schema, by file name, in a registry that resolves their references."""
     schemas = [json.loads(p.read_text(encoding="utf-8")) for p in spec_dir.glob("*.schema.json")]
@@ -222,7 +185,7 @@ def schema_registry(spec_dir: Path) -> tuple[Registry[Any], dict[str, dict[str, 
     return registry, {s["$id"].rsplit("/", 1)[-1]: s for s in schemas}
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=16)
 def schema_validator(spec_dir: Path, name: str) -> Draft202012Validator:
     """A validator for one of the spec schemas, with cross-file references resolved."""
     registry, schemas = schema_registry(spec_dir)
@@ -234,13 +197,171 @@ def schema_problems(validator: Draft202012Validator, document: Any) -> list[Prob
     for error in sorted(validator.iter_errors(document), key=lambda e: list(e.absolute_path)):
         path = "/" + "/".join(str(p) for p in error.absolute_path)
         message = error.message
-        if error.validator == "oneOf" and path.startswith("/dimensions/"):
+        if error.validator == "oneOf" and "/dimensions/" in path:
             message = "A dimension needs exactly one of `column` or `expr`."
-        elif error.validator == "oneOf" and path.startswith("/measures/"):
+        elif error.validator == "oneOf" and "/measures/" in path:
             message = "A measure needs either `agg` (with `column`) or `expr`, not both."
         elif len(message) > 300:
             message = message[:300] + "..."
         problems.append({"path": path, "message": message})
+    return problems
+
+
+@dataclass(frozen=True)
+class TableContext:
+    """What one table's checks need to know about the rest of the workspace model."""
+
+    # Tables this one reaches many-to-one, with their columns: a measure's filter
+    # may name their columns as table.column.
+    related: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    # Every other table's measures, for {table.measure} in a formula.
+    other_measures: Mapping[str, Collection[str]] = field(default_factory=dict)
+    # The relationships a measure may name, with the tables at their ends.
+    relationships: Mapping[str, tuple[str, str]] = field(default_factory=dict)
+    v2: bool = False  # a workspace table rather than a v1 model
+
+
+def table_problems(
+    table: str,
+    definition: Mapping[str, Any],
+    columns: Mapping[str, str],
+    *,
+    prefix: str = "",
+    context: TableContext | None = None,
+) -> list[Problem]:
+    """Every problem in one table's dimensions, measures, segments and rules, after
+    the schema has passed. Paths start with `prefix` (`/tables/<name>` in the
+    workspace model)."""
+    context = context or TableContext()
+    problems: list[Problem] = []
+    names = list(columns)
+    exact = {c.lower(): c for c in names}
+
+    def add(path: str, message: str) -> None:
+        problems.append({"path": f"{prefix}{path}", "message": message})
+
+    def check_column(path: str, column: str) -> str | None:
+        if column not in columns:
+            hint = f" Did you mean {exact[column.lower()]!r}?" if column.lower() in exact else ""
+            add(path, f"There is no column called {column!r}.{hint}")
+            return None
+        return columns[column]
+
+    def check_expression(path: str, action: Any) -> None:
+        try:
+            action()
+        except ExpressionError as exc:
+            add(path, str(exc))
+
+    dimensions = definition.get("dimensions") or {}
+    measures = definition.get("measures") or {}
+    for name, dim in dimensions.items():
+        base = f"/dimensions/{name}"
+        if name in measures:
+            add(base, "A dimension and a measure cannot share a name.")
+        if "column" in dim:
+            actual = check_column(f"{base}/column", dim["column"])
+            if dim["type"] == "time" and actual and DIMENSION_TYPE[actual] != "time":
+                add(
+                    f"{base}/type",
+                    f"Column {dim['column']!r} is {actual}, not a date or timestamp.",
+                )
+        else:
+            check_expression(
+                f"{base}/expr", lambda d=dim: expressions.column_expression(d["expr"], "t", names)
+            )
+        if "grains" in dim and dim["type"] != "time":
+            add(f"{base}/grains", "Only time dimensions have grains.")
+        if "timezone" in dim:
+            if dim["type"] != "time":
+                add(f"{base}/timezone", "Only time dimensions have a timezone.")
+            else:
+                try:
+                    ZoneInfo(dim["timezone"])
+                except (ZoneInfoNotFoundError, ValueError):
+                    add(
+                        f"{base}/timezone",
+                        f"{dim['timezone']!r} is not a timezone name. "
+                        "Use one such as UTC or Australia/Melbourne.",
+                    )
+
+    related = {name: (name, list(cols)) for name, cols in context.related.items()}
+    for name, measure in measures.items():
+        base = f"/measures/{name}"
+        if "relationship" in measure:
+            ends = context.relationships.get(measure["relationship"])
+            if "expr" in measure:
+                add(
+                    f"{base}/relationship",
+                    "Only an aggregation can name a relationship. Name it on the measures "
+                    "this formula uses.",
+                )
+            elif ends is None:
+                add(
+                    f"{base}/relationship",
+                    f"There is no relationship with the id {measure['relationship']!r}.",
+                )
+        if "agg" in measure:
+            if "filter" in measure:
+                segment_filters = {
+                    n: s["filter"] for n, s in (definition.get("segments") or {}).items()
+                }
+                check_expression(
+                    f"{base}/filter",
+                    lambda m=measure, s=segment_filters: expressions.filter_expression(
+                        m["filter"], "t", names, s, related if context.v2 else None
+                    ),
+                )
+            agg, column = measure["agg"], measure.get("column")
+            if column is None:
+                if agg != "count":
+                    add(base, f"{agg} needs a `column`.")
+                continue
+            actual = check_column(f"{base}/column", column)
+            if actual and agg in ("sum", "avg") and actual not in NUMERIC:
+                add(f"{base}/column", f"{agg} needs a numeric column; {column!r} is {actual}.")
+        else:
+            for reference in expressions.measure_references(measure["expr"]):
+                owner, dot, other = reference.partition(".")
+                if not dot:
+                    if reference not in measures:
+                        add(f"{base}/expr", f"There is no measure called {reference!r}.")
+                elif not context.v2:
+                    add(
+                        f"{base}/expr",
+                        f"A v1 model cannot use another dataset's measure ({reference!r}).",
+                    )
+                elif owner == table:
+                    if other not in measures:
+                        add(f"{base}/expr", f"There is no measure called {other!r}.")
+                elif other not in context.other_measures.get(owner, ()):
+                    add(f"{base}/expr", f"There is no measure called {reference!r}.")
+            check_expression(
+                f"{base}/expr",
+                lambda m=measure: expressions.measure_expression(m["expr"], lambda _: exp.null()),
+            )
+    for found in _cycle_problems(table, measures):
+        add(found["path"], found["message"])
+
+    for name, segment in (definition.get("segments") or {}).items():
+        check_expression(
+            f"/segments/{name}/filter",
+            lambda s=segment: expressions.column_expression(s["filter"], "t", names),
+        )
+
+    for index, rule in enumerate(definition.get("rls") or []):
+        check_expression(
+            f"/rls/{index}/filter",
+            lambda r=rule: expressions.rls_expression(r["filter"], "t", names, None),
+        )
+    date_table = definition.get("dateTable")
+    if isinstance(date_table, Mapping):
+        actual = check_column("/dateTable/column", date_table["column"])
+        if actual and actual not in ("date", "timestamp"):
+            add(
+                "/dateTable/column",
+                f"A date table's column must be a date; {date_table['column']!r} is {actual}.",
+            )
     return problems
 
 
@@ -251,7 +372,8 @@ def validate(
     columns: Mapping[str, str],
     other_datasets: Mapping[str, Mapping[str, str]],
 ) -> list[Problem]:
-    """Every problem in a model definition. An empty list means it can be saved.
+    """Every problem in a v1 model definition (semantic-model.schema.json, still read
+    to import v1 files). An empty list means it can be saved.
 
     `columns` maps this dataset's column names to logical types.
     `other_datasets` maps every other dataset name to its columns, for joins.
@@ -266,113 +388,7 @@ def validate(
         problems.append(
             {"path": "/dataset", "message": f"This model belongs to {dataset!r}, not {declared!r}."}
         )
-    names = list(columns)
-    exact = {c.lower(): c for c in names}
-
-    def check_column(path: str, column: str) -> str | None:
-        if column not in columns:
-            hint = f" Did you mean {exact[column.lower()]!r}?" if column.lower() in exact else ""
-            problems.append(
-                {"path": path, "message": f"There is no column called {column!r}.{hint}"}
-            )
-            return None
-        return columns[column]
-
-    def check_expression(path: str, action: Any) -> None:
-        try:
-            action()
-        except ExpressionError as exc:
-            problems.append({"path": path, "message": str(exc)})
-
-    dimensions = definition.get("dimensions") or {}
-    measures = definition.get("measures") or {}
-    for name, dim in dimensions.items():
-        base = f"/dimensions/{name}"
-        if name in measures:
-            problems.append(
-                {"path": base, "message": "A dimension and a measure cannot share a name."}
-            )
-        if "column" in dim:
-            actual = check_column(f"{base}/column", dim["column"])
-            if dim["type"] == "time" and actual and DIMENSION_TYPE[actual] != "time":
-                problems.append(
-                    {
-                        "path": f"{base}/type",
-                        "message": f"Column {dim['column']!r} is {actual}, "
-                        "not a date or timestamp.",
-                    }
-                )
-        else:
-            check_expression(
-                f"{base}/expr", lambda d=dim: expressions.column_expression(d["expr"], "t", names)
-            )
-        if "grains" in dim and dim["type"] != "time":
-            problems.append(
-                {"path": f"{base}/grains", "message": "Only time dimensions have grains."}
-            )
-        if "timezone" in dim:
-            if dim["type"] != "time":
-                problems.append(
-                    {"path": f"{base}/timezone", "message": "Only time dimensions have a timezone."}
-                )
-            else:
-                try:
-                    ZoneInfo(dim["timezone"])
-                except (ZoneInfoNotFoundError, ValueError):
-                    problems.append(
-                        {
-                            "path": f"{base}/timezone",
-                            "message": f"{dim['timezone']!r} is not a timezone name. "
-                            "Use one such as UTC or Australia/Melbourne.",
-                        }
-                    )
-
-    for name, measure in measures.items():
-        base = f"/measures/{name}"
-        if "agg" in measure:
-            if "filter" in measure:
-                segment_filters = {
-                    n: s["filter"] for n, s in (definition.get("segments") or {}).items()
-                }
-                check_expression(
-                    f"{base}/filter",
-                    lambda m=measure, s=segment_filters: expressions.filter_expression(
-                        m["filter"], "t", names, s
-                    ),
-                )
-            agg, column = measure["agg"], measure.get("column")
-            if column is None:
-                if agg != "count":
-                    problems.append({"path": base, "message": f"{agg} needs a `column`."})
-                continue
-            actual = check_column(f"{base}/column", column)
-            if actual and agg in ("sum", "avg") and actual not in NUMERIC:
-                problems.append(
-                    {
-                        "path": f"{base}/column",
-                        "message": f"{agg} needs a numeric column; {column!r} is {actual}.",
-                    }
-                )
-        else:
-            for reference in expressions.measure_references(measure["expr"]):
-                if reference not in measures:
-                    problems.append(
-                        {
-                            "path": f"{base}/expr",
-                            "message": f"There is no measure called {reference!r}.",
-                        }
-                    )
-            check_expression(
-                f"{base}/expr",
-                lambda m=measure: expressions.measure_expression(m["expr"], lambda _: exp.null()),
-            )
-    problems.extend(_cycle_problems(measures))
-
-    for name, segment in (definition.get("segments") or {}).items():
-        check_expression(
-            f"/segments/{name}/filter",
-            lambda s=segment: expressions.column_expression(s["filter"], "t", names),
-        )
+    problems += table_problems(dataset, definition, columns)
 
     seen_targets: set[str] = set()
     for index, join in enumerate(definition.get("joins") or []):
@@ -392,7 +408,15 @@ def validate(
             )
             continue
         for local, remote in join["on"].items():
-            check_column(f"{base}/on/{local}", local)
+            if local not in columns:
+                exact = {c.lower(): c for c in columns}
+                hint = f" Did you mean {exact[local.lower()]!r}?" if local.lower() in exact else ""
+                problems.append(
+                    {
+                        "path": f"{base}/on/{local}",
+                        "message": f"There is no column called {local!r}.{hint}",
+                    }
+                )
             if remote not in other_datasets[target]:
                 problems.append(
                     {
@@ -400,21 +424,22 @@ def validate(
                         "message": f"Dataset {target!r} has no column called {remote!r}.",
                     }
                 )
-
-    for index, rule in enumerate(definition.get("rls") or []):
-        check_expression(
-            f"/rls/{index}/filter",
-            lambda r=rule: expressions.rls_expression(r["filter"], "t", names, None),
-        )
     return problems
 
 
-def _cycle_problems(measures: Mapping[str, Any]) -> list[Problem]:
+def _cycle_problems(table: str, measures: Mapping[str, Any]) -> list[Problem]:
+    """Formulas that use themselves, directly or through other measures of this table.
+    (A formula that reaches another table's measure ends there: that table's own check
+    covers its formulas.)"""
     graph = {
-        name: [r for r in expressions.measure_references(m["expr"]) if r in measures]
+        name: [
+            r.partition(".")[2] if r.startswith(f"{table}.") else r
+            for r in expressions.measure_references(m["expr"])
+        ]
         for name, m in measures.items()
         if "expr" in m
     }
+    graph = {name: [r for r in refs if r in measures] for name, refs in graph.items()}
     problems: list[Problem] = []
     state: dict[str, int] = {}
 

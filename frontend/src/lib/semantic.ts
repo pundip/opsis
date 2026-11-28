@@ -32,7 +32,12 @@ export interface Field {
 
 /** Something a model saves with, but that may give surprising numbers or access. */
 export interface ModelWarning {
-  code: "duplicate_join_key" | "join_key_not_checked" | "joined_rules_not_applied";
+  code:
+    | "duplicate_key"
+    | "key_not_checked"
+    | "ambiguous_path"
+    | "key_types_differ"
+    | "relationship_to_restricted";
   path: string;
   message: string;
 }

@@ -105,8 +105,17 @@ export function Models({ me }: { me: Me }) {
   return (
     <div className="mx-auto max-w-5xl">
       <PageHeader
-        title="Semantic models"
-        description="Each dataset has a model that names its dimensions and measures once, so every dashboard and the assistant use the same definitions."
+        title="Model tables"
+        description={
+          <>
+            Each table of the{" "}
+            <Link to="/model" className="text-brand underline">
+              model
+            </Link>{" "}
+            on its own: its dimensions and measures as one file, and queries to try. Relationships are on the Model
+            view.
+          </>
+        }
         actions={
           <>
             <a

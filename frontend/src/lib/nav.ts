@@ -14,7 +14,7 @@ interface NavRule extends NavItem {
 const RULES: NavRule[] = [
   { path: "/dashboards", label: "Dashboards", group: "Build", permission: "dashboards:view" },
   { path: "/datasets", label: "Datasets", group: "Build", permission: "datasets:edit" },
-  { path: "/models", label: "Semantic models", group: "Build", permission: "models:edit" },
+  { path: "/model", label: "Model", group: "Build", permission: "models:edit" },
   { path: "/connections", label: "Connections", group: "Admin", permission: "datasets:edit" },
   { path: "/jobs", label: "Jobs", group: "Admin", permission: "datasets:edit" },
   {

@@ -13,8 +13,8 @@ Written in Python, not shell, so it behaves the same on every platform.
   restore FILE     replace the database and data with a backup (api and worker stopped)
   seed-demo        load the demo datasets and dashboard (made-up giving data)
   results-digest [--out FILE] [--compare FILE] [--today YYYY-MM-DD]
-                   the upgrade check for v2: what every dashboard shows each viewer,
-                   and the report of who will see fewer rows (changes nothing)
+                   what every dashboard shows each viewer (changes nothing); with
+                   --compare, every result that changed since an earlier digest
 """
 
 from __future__ import annotations
@@ -162,7 +162,7 @@ def _seed_demo(settings: Settings) -> None:
 
 
 def _results_digest(settings: Settings, args: list[str]) -> None:
-    """Write what every dashboard shows each viewer (hashes) and the upgrade report, or
+    """Write what every dashboard shows each viewer (hashes) and a short report, or
     with --compare, what changed since an earlier digest. Reads only."""
     import json
     from datetime import UTC, date, datetime
@@ -203,7 +203,6 @@ def _results_digest(settings: Settings, args: list[str]) -> None:
                 settings,
                 runtime,
                 today=today,
-                simulate=previous is None,
                 progress=lambda line: print(line, file=sys.stderr),
             )
             db.rollback()

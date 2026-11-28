@@ -12,6 +12,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Identity,
@@ -231,6 +232,49 @@ class SemanticModelVersion(Base):
         ForeignKey("datasets.id", ondelete="CASCADE"), index=True
     )
     version: Mapped[int] = mapped_column(Integer)
+    definition: Mapped[dict[str, Any]] = mapped_column(JSON)
+    author_type: Mapped[str] = mapped_column(String(20))  # user | agent | system
+    author_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    message: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WorkspaceModel(Base):
+    """The workspace model (ADR-031, spec/workspace-model.schema.json): one row.
+
+    `definition` holds the tables someone wrote and the relationships; a dataset with
+    data and no table entry is a starter table, generated from its columns when read.
+    `layout` is where the Model view draws the tables: saved beside the model, not
+    versioned. The v1 tables (semantic_models and their versions) are kept as they
+    were at the migration, read only.
+    """
+
+    __tablename__ = "workspace_model"
+    __table_args__ = (CheckConstraint("id = 1", name="one_row"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False, default=1)
+    # JSON, not JSONB: the author's key order is kept (ADR-019).
+    definition: Mapped[dict[str, Any]] = mapped_column(JSON)
+    layout: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Number of the newest row in workspace_model_versions.
+    version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class WorkspaceModelVersion(Base):
+    """An immutable copy of the workspace model, written on every save (the layout is
+    not in it). Restoring makes a new version."""
+
+    __tablename__ = "workspace_model_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    version: Mapped[int] = mapped_column(Integer, unique=True)
     definition: Mapped[dict[str, Any]] = mapped_column(JSON)
     author_type: Mapped[str] = mapped_column(String(20))  # user | agent | system
     author_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))

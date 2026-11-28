@@ -36,6 +36,7 @@ from opsis.api import (
     system,
     tokens,
     user_guide,
+    workspace_model,
 )
 from opsis.api.errors import ApiError, install_error_handlers
 from opsis.assistant.runs import Runs
@@ -176,6 +177,7 @@ def register_feature_routers(api: APIRouter, settings: Settings) -> None:
     api.include_router(ingestion.router)
     api.include_router(connection_auth.router)
     api.include_router(semantic.router)
+    api.include_router(workspace_model.router)
     api.include_router(dashboards.router)
     api.include_router(tokens.router)
     api.include_router(admin.audit_router)

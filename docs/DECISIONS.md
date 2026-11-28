@@ -637,3 +637,43 @@ ADR-031 and the V0 review ask for a report of who will see fewer rows before the
 - **Files:** `/data/upgrade/results-digest-<time>.json` (the digest, for `--compare`) and the report beside it (`.md`), or where `--out` says. People's names and email addresses are in both, as on the Users page.
 - **`--compare <file>`** runs again, counting relative dates from the day the file was made, and lists every result that changed since, with who saw it and whether the report predicted it (the result now is the one it simulated). Datasets refreshed since are named, as new data changes results too. Run after the migration, the migration counts as checked when every change was predicted.
 - **Tests** (`tests/test_results_digest.py`, 16): the relationships match the planned migration's for the demo models and four more cases; loops; the six v1 join patterns on real data (direct, two steps, inner, `one_to_many` declared, a restricted dataset in between, two ways to one dataset); viewers, versions, admins and share links; the command, `--compare` and that nothing in the database changes; the comparison report.
+
+## ADR-039: The workspace model as built in V2
+- **Status:** proposed (V2), for the V2 review.
+
+V2 builds ADR-031 (one workspace model) and R2 of ADR-032 (row-level security through relationships). These are the choices made while building it that the design left open, and the places it differs from the plan.
+
+**Saving the model**
+- **A save that changes nothing writes nothing:** no version, no audit row, and a stale `baseVersion` is then no conflict (200 with the model as it is).
+- **A starter table saved unchanged stays a starter**, generated from its dataset's columns, so it keeps following new columns. It becomes a written table once it differs from its starter.
+- **Only new problems stop a save.** Problems the stored model already has are listed ("Problems the model already has") but do not block, so one broken table never stops work on the others. Restoring a version is a save of the part of it the person may use, under the same rule; tables whose datasets are gone stay out, and the version's note says so.
+- **Someone who may not use a table** never names it in a save: a change that names it is refused as if the table did not exist, and the relationships they cannot see are kept as they are.
+- **The v1 routes and MCP tools for one table** (`/api/models/{dataset}`, `get_semantic_model`, `patch_semantic_model`) are a view of the workspace model: a table's v1 `joins` are its relationships. `patch_semantic_model` applies its operations to the table as it was at `base_version`, then saves that like a stale change: refused with `version_conflict` only when the same part changed since, or when the operations no longer fit.
+- **A table's history** on its page is the workspace versions in which that table changed. The v1 per-dataset history (`semantic_model_versions`) is kept in the database, unchanged, but the app no longer shows it (a read-only view of it is on the backlog).
+
+**Relationships and warnings**
+- **Warnings are per relationship:** a repeated key on the one side (`duplicate_key`, or `key_not_checked` when the check could not run), key columns of different types, two paths as short as each other, and a relationship into a restricted table. v1's warning that a joined table's rules do not apply is gone, as R2 applies them. Inactive relationships are key-checked too, as a measure can name them.
+- **Uniqueness is counted over every row** (counts only, no values): a relationship's cardinality is the same for everyone. Examples of repeated values are left out for people who may not see all of that table. Value overlap for suggestions is read as the person, through their rules.
+- **Dragging a field onto a field** checks the keys first: which side is the one side (swapped when needed), the cardinality, one filter direction, and active unless it would make two paths as short as each other or close a loop a rule could travel round, in which case it is offered inactive with the reason. Nothing is saved until the person confirms.
+- **Suggestions** come from names, types and value overlap, each with a confidence and the evidence, and leave out restricted datasets (no path may go through them). Nothing is applied: the person ticks the ones to add.
+- **A query that names a field of a restricted dataset** the person may not use gets 403 `dataset_forbidden`. That dataset's rules still filter the tables related to it (R2), read without an access check.
+
+**Date tables**
+- **A built-in `date` connector** makes one row per day with calendar and financial-year columns from the workspace calendar, which the app passes in as `_calendar`. It reads nothing outside Opsis and holds no secrets.
+- **"Generate a date table" needs `datasets:edit` and `models:edit`.** The app makes the date connection for the person even when they may not create connections (editors), since it holds nothing secret.
+- **Its range** runs from the start of the financial year of the earliest date in the model that the person may see (a note says so when rules hid rows from them) to the end of the next financial year. It is refreshed daily at 00:05 in the workspace timezone when scheduled refreshes are on (`FEATURE_SCHEDULED_REFRESH`; otherwise a note says so). Its only measure is `days`. Relationships from date columns are offered, not made.
+- **A timestamp relates to a date** on its day in the workspace timezone, in queries and in R2 alike (one shared key expression).
+
+**MCP and the assistant**
+- **MCP gains** `get_workspace_model`, `patch_workspace_model`, `validate_workspace_model` and `suggest_relationships`, each permission-checked, with compact results and an example input in its description.
+- **The in-app assistant** gains `get_workspace_model` and `suggest_relationships`, not `patch_workspace_model`. It keeps v1's `get_semantic_model` and `patch_semantic_model` for one table, as before, acting with the person's permissions.
+
+**The Model view**
+- **At `/model`** ("Model" in the navigation, for people with `models:edit`). The per-table pages stay at `/models` as "Model tables", for trying queries and importing model files.
+- **The canvas** is React Flow, loaded only on this page (a 304 kB chunk), with dagre for "Auto layout". The whole field row is the drag handle; every handle is a source and the connection mode is loose, so a relationship can be dragged either way and the key check finds the one side. "Add a relationship" opens the same form, for keyboard users. Positions and collapsed cards are saved beside the model, not in its history.
+- **The YAML tab** is Monaco with YAML highlighting only: Check runs the server's validation, which also knows the data, so no YAML language worker or schema is bundled. Text the page puts in the editor (a saved version, a discard) does not count as an edit.
+
+**results-digest after the upgrade**
+- **`--compare` also lists results the report predicted would change and did not** (`missed`), so a rule that should reach a table but does not cannot pass unnoticed.
+
+**Left for later:** choosing a path explicitly through a loop that a rule could travel round (backlog, agreed at the V2 step 1 review); dashboards keep v1's reach for filters until V4; many-to-many stays on the backlog (ADR-031).

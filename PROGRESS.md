@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-11-28 (v2: V2 step 1 approved and its report on your stack clean, so the rest of V2 is under way)
+Last updated: 2026-11-28 (v2: V2 done and stopped for review; your stack is not migrated yet)
 
 Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2.md` (v2, milestones V0 to V7). A fresh session resumes v2 from this file, `BUILD_BRIEF_V2.md` and `docs/V2_DESIGN.md`.
 
@@ -10,14 +10,16 @@ Two briefs: `BUILD_BRIEF.md` (v1, milestones M0 to M8, done) and `BUILD_BRIEF_V2
 |---|---|
 | V0 Plan | Done, reviewed |
 | V1 BYO agent | Done, reviewed; the review's follow-ups done |
-| V2 Workspace model and Model view | In progress: step 1 (the upgrade check) approved, and its report on your stack is clean; the rest of V2 is under way |
+| V2 Workspace model and Model view | Done, for review (ADR-039); your stack is migrated at your go-ahead |
 | V3 Data prep | Not started |
 | V4 Slicers | Not started |
 | V5 Visual SDK | Not started |
 | V6 Mobile | Not started |
 | V7 Export | Not started |
 
-## v2, V2: workspace model and Model view (in progress)
+## v2, V2: workspace model and Model view (done, for review)
+
+One workspace model replaces the models per dataset: tables, and relationships between them, as in Power BI. Row-level security now travels through relationships (rule R2 of ADR-032). The choices made while building it are in ADR-039, proposed for this review. Your stack is not migrated yet: that waits for your go-ahead (see "Exact next step").
 
 ### Step 1: the upgrade check (ADR-038)
 
@@ -41,6 +43,30 @@ V2's first step, alone, as ADR-031 and the V0 review ask: nothing the app does c
 - **`python -m opsis results-digest`:** "Nobody will see fewer rows. Every result stays the same." It checked 5 dashboards: 23 items that show data, in 4 versions (Test1's draft has none), as an admin. Your stack has no other people and no share links (local mode, the one built-in admin), so the admin is everyone there is to check. No loop to resolve, and no item that cannot be shown now. The migration will make three relationships, all active: gifts (donor_id) to donors (id), demo_donors (state_code) to demo_regions (code), demo_gifts (donor_id) to demo_donors (donor_id).
 - **Kept:** `/data/upgrade/results-digest-20261128-040111.json` (the digest, for `--compare` after the migration) and the report beside it (`.md`), in the api container's data volume (`opsis_opsisdata`), which a rebuild keeps.
 - **The three old worktrees** under `.claude/worktrees` held nothing uncommitted or unpushed (each branch was pushed and merged into main), so they were removed with `git worktree remove` and their local branches deleted. The branches on origin are kept.
+
+### Steps 2 to 8: what was built
+
+- **The workspace model, stored** (`semantic/workspace.py`, `services/workspace_model.py`, migration 0014): one document (the tables someone wrote, and relationships keyed by id) and an immutable version per save, with its author and note. A dataset with data and no table entry is a starter table, generated from its columns. People read and change only the tables they may use; the rest is kept as it is. A save takes a whole document (`PUT`) or JSON Patch (`PATCH`); a stale `baseVersion` is applied anyway when nobody changed the same places since, and refused with 409 otherwise. A save is refused only for problems it adds. Versions, diff, and restore as a new version. The Model view's layout is saved beside the model, not versioned. `spec/workspace-model.schema.json` and the v2 `spec/semantic-query.schema.json` were promoted from the drafts.
+- **The migration** (0014, metadata only): edited v1 models become tables, starter ones stay implicit, and each v1 join becomes a relationship by the planned rules (`many_to_one` and `one_to_one` active, `one_to_many` turned round and inactive, a join declared on both sides kept once). The model starts at version 1, "Migrated from the v1 models". The v1 tables are kept as they were.
+- **The compiler over relationships** (`semantic/compiler.py`, `semantic/relationships.py`, `semantic/security.py`): fields of any table that the measures' table reaches along active many-to-one relationships, any number of steps (the shortest path wins, two as short are an error that names both, never through a restricted table, and after a left join the rest stay left); filters through relationships as semi-joins in their filter direction (`crossFilter: both` included); measures of several tables in one query; a measure's `relationship`, which may be inactive (Power BI's USERELATIONSHIP); `{table.measure}` in formulas. Every read applies R1 and R2: queries, dashboards, previews, profiles, filter options, the data quality report and the samples MCP returns. A loop that a rule could travel round is refused.
+- **Every caller moved to the workspace model:** dashboards, previews, profiles, filter options, the data quality report, model warnings (one per relationship), model files (`models/<table>.yml` and `models/workspace-model.yml`; v1 files still import, their joins as relationships), the demo data, dataset deletion (its table and relationships leave the model, as a version by the system), backups, and `results-digest` (it now runs queries as the app does, and `--compare` also lists predicted changes that did not happen). The v1 routes and MCP tools for one table are a view of the workspace model.
+- **REST:** `/api/model` (GET, PUT, PATCH, `/validate`, `/layout`, `/versions`, `/diff`, `/versions/{n}/restore`, `/export`, `/key-check`, `/suggestions`, `/date-table`).
+- **MCP:** `get_workspace_model`, `patch_workspace_model`, `validate_workspace_model` and `suggest_relationships`, and the guide. The in-app assistant reads the model and may suggest relationships, but does not get `patch_workspace_model`.
+- **Help with relationships** (`services/model_suggestions.py`): a key check for a dragged pair (which side is the one side, the cardinality, and active unless it would make two equally short paths or close a refused loop), and suggestions from names, types and value overlap, each with a confidence and the evidence, read as the person.
+- **Date tables** (`connectors/date`, `services/date_table.py`): a built-in date connector, and "Generate a date table": from the start of the financial year of the earliest date in the model to the end of the next one, with financial-year columns from the workspace calendar, refreshed daily, marked as the model's date table, and relationships from date columns offered.
+- **The Model view** (`/model`, "Model" in the navigation): a canvas of table cards (keys and related fields always shown; date table, restricted, hidden and starter badges; collapse to the keys), relationships drawn with 1 and *, arrows in the filter direction, dashed when inactive. Drag a field onto a field of another table, check the keys and confirm in a side panel with the guessed settings; edit and remove; Auto layout (dagre) and saved positions. A table panel (label, description, hidden, date table, the fields' settings, and measures with a form for aggregations and arithmetic over measures, including "Through relationship"); a list of the relationships; a YAML tab (Monaco, Check, Save, a note when the model changed meanwhile, download); History (the changes against the version before, restore); Suggest relationships; Generate a date table; "Add a relationship" for keyboard users. The per-table pages stay at `/models` as "Model tables".
+
+### How V2 was checked
+
+- **Backend:** 425 pytest tests pass (396 after step 1). New: `tests/test_row_security.py` (9, the R2 tests of `V2_DESIGN.md` section 3.5: a direct rule, two steps, `securityFilter: both`, inactive relationships, admins and share links, previews and MCP samples and filter options, a restricted table whose rules still filter what is related to it, loops, and a rule on a date table), `tests/test_workspace_model.py` (8: the migration on the demo models and the v1 join patterns, against the app's own conversion, the planned rules and the schema, and the data step on a database at revision 0013), `tests/test_relationships.py` (5: fields of two tables with left and inner joins, keys of two columns, a measure on an inactive relationship, filters one way and both ways, two steps, each against hand-written SQL), `tests/test_relationship_help.py` (5: the date connector, a dragged pair guessed from its keys, suggestions read as the person, the agent getting suggestions and applying nothing, a date table generated and offered), and changes in the existing tests where v1 behaviour moved (MCP, model files, model warnings, queries, the semantic layer, the drafts). `ruff check`, `ruff format --check` and `mypy --strict` pass.
+- **Frontend:** typecheck, lint, 60 unit tests (8 new, for the canvas's cards, layout and edges) and the production build. The canvas is a 304 kB chunk loaded only on the Model page; the main chunk is 962 kB (289 kB gzipped).
+- **Smoke tests in all three places** (`npm run smoke`): at the root 13 passed (3 skipped), under `/opsis` 13 passed (3 skipped), in server mode 15 passed (1 skipped), one more in each than after step 1. New: `e2e/tests/model-view.spec.ts` drags gifts.donor_id onto donors.id on the canvas, sees the key check name the many side, adds the relationship, builds a table visual on the gifts dataset with the donors' region and the gifts' total (VIC 700, NSW 300), saves it, and edits a table's label in the YAML tab, which the canvas then shows. `e2e/tests/model-warnings.spec.ts` now expects one warning (the repeated key) instead of two, and checks that the lookup's rule filters the gifts for someone it applies to.
+- **Found by the smoke test and fixed:** "Saved as version N." never showed on the YAML tab, because the editor reported the saved text as an edit.
+- **Benchmark, 10 million rows** (`node scripts/benchmark.mjs --rows 10000000 --rule`, run twice in its own test stack on the laptop M8 used; `--rule` is new):
+  - **Without a rule, as in M8:** a typical dashboard opens in 486 ms cold and 71 ms warm (M8: 492 and 81 ms), 426 ms after a filter change and 87 ms warm again; single queries take 55 to 398 ms cold and 10 to 13 ms warm; ingestion 31.3 s (325,000 rows/s). The first run was slower cold (the dashboard in 609 ms, the join query 463 ms against M8's 296 ms), the second was not, and the SQL without a rule has v1's shape, so that was variation between runs.
+  - **With a rule on donors that applies to admins too** (`tier <> 'lapsed'`: 7.5 of the 10 million gifts are visible, each read through its donor): the dashboard opens in 1.11 s cold and 96 ms warm, 1.09 s after a filter change and 82 ms warm again; single queries take 165 to 488 ms cold and 11 to 15 ms warm. R2 about doubles a dashboard's cold time (an `EXISTS` on 200,000 donors for 10 million gifts) and leaves warm times as they were. **The brief's target, under 1.5 s warm on 10 million rows, is met with and without the rule.**
+  - **Ten uncached queries at once** finished in 3.0 and 3.7 s while `/healthz` answered in a median of 9 and 19 ms. Peak api memory: 1,529 MB during the queries and the burst without the rule, 714 and 749 MB during the pass with the rule (which has no burst). M8 measured 422 MB and M3.5 1,138 MB (on 5 million rows): the peak depends on how the queries overlap, up to four at once with 1 GB each (`QUERY_MAX_CONCURRENT`, `QUERY_MEMORY_LIMIT_MB`).
+- **Your stack was not touched:** no test reached the project `opsis` or port 8080 (ADR-037).
 
 ## v2, V1: bring your own agent
 
@@ -107,7 +133,7 @@ The in-app guide (`docs/guide`) is not edited in v2 runs (brief v2, rule 7). Wha
 
 - **V0:** nothing (no behaviour changed).
 - **V1:** chapter 8 (the providers table: the workspace's Claude key only for people an admin allows, your own Anthropic and OpenAI keys, Ollama with `OLLAMA_ENABLED`; the picker and its "add a key" message; a revoke stopping a request at its next step); chapter 1 (the Account page's AI providers section and its usage table); chapter 7 (admins: the Users page's AI assistant tab, per person and per group, personal keys on or off, deactivating deletes keys); chapter 9 (settings: `ANTHROPIC_API_KEY` optional, `OLLAMA_ENABLED`, the upgrade note). After the review: chapter 1 (the Account page's "Send a test message", which costs a fraction of a cent and shows whether the key's account can pay, and which needs a default model for an OpenAI key); chapter 7 (personal keys switched off: kept, not used or tested, and their owners can still delete them).
-- **V2:** chapter 4 (one workspace model, the Model view, measures, date tables, YAML); chapter 5 (relationships instead of joins: direction, active, paths; row-level security through relationships, which removes the warning section); chapters 7 and 8 (security, MCP tools); chapter 9 (current limits, and the upgrade: `results-digest` and its report before, `--compare` after).
+- **V2:** chapter 4 (one workspace model; the Model page: the canvas, dragging a field onto a field and the key check, the table panel with fields and the measures form, "Through relationship", the YAML tab with Check and Save, History and restore; starter tables; "Generate a date table"; the "Model tables" pages at `/models`; model files, `models/workspace-model.yml` beside `models/<table>.yml`); chapter 5 (relationships instead of joins: many to one or one to one, filter direction, security filter, active and inactive, a measure that names a relationship, left or inner, paths of any length and ties, Suggest relationships; the warnings are now per relationship, and the one about rules that do not carry over is gone); chapter 7 (row-level security through relationships: what a rule on a lookup hides in related tables, `securityFilter: both`, inactive relationships carry nothing, loops a rule could travel round are refused, a restricted table's rules still filter related tables, and asking for its fields gives 403); chapter 8 (MCP: `get_workspace_model`, `patch_workspace_model`, `validate_workspace_model`, `suggest_relationships`; the assistant's new tools); chapter 9 (the upgrade: back up, `results-digest` before, the migration, `--compare` after; the date table's daily refresh needs `FEATURE_SCHEDULED_REFRESH`; current limits). New screenshots of the Model page.
 - **V3:** chapter 3 (the Table view, transforms), a new chapter on data prep and SQL Lab, chapter 7 (inherited rules and restrictions), chapter 8 (MCP tools).
 - **V4:** chapter 6 (pages, slicers, Edit interactions, links with slicer state).
 - **V5:** a new chapter on imported visuals and the playground; chapter 6 (the visual picker).
@@ -315,8 +341,12 @@ Run: `copy .env.local.example .env`, `docker compose up -d`, open http://localho
 **v2 plan (V0)**
 - `docs/V2_DESIGN.md`, ADR-030 to ADR-035, and the draft schemas with examples in `spec/drafts/v2` (not read by the app), checked by `backend/tests/test_spec_drafts.py`.
 
-**Workspace model (V2, in progress)**
-- The upgrade check: `python -m opsis results-digest` (`services/results_digest.py`, ADR-038), with the relationships from v1 joins and R2 simulated in `semantic/relationships.py`, through the compiler's optional `scan` hook.
+**Workspace model (V2)**
+- One workspace model (ADR-031, ADR-039): `semantic/workspace.py` (the document, starter tables, checks), `services/workspace_model.py` (read the part a person may use, save, JSON Patch, versions, diff, restore), migration 0014, `spec/workspace-model.schema.json`, REST `/api/model` (`api/workspace_model.py`). The v1 per-table routes and MCP tools are a view of it (`services/models.py`).
+- Relationships in queries: `semantic/relationships.py` (paths, loops), `semantic/compiler.py` (fields and measures of several tables, filters as semi-joins, a measure's `relationship`), `semantic/security.py` (R1 and R2 for every read).
+- Help with relationships (`services/model_suggestions.py`), date tables (`connectors/date`, `services/date_table.py`), model warnings per relationship (`services/model_warnings.py`), YAML (`services/model_yaml.py`).
+- The Model view: `pages/ModelView.tsx`, `components/model/` (the React Flow canvas, side panels, YAML, history), `lib/workspaceModel.ts` and `lib/modelGraph.ts`.
+- The upgrade check: `python -m opsis results-digest` (`services/results_digest.py`, ADR-038), and `--compare` after an upgrade.
 
 **Platform (M1 and catch-up)**
 - `compose.yml` profiles: `server` (worker), `caddy`, `tunnel`, `ollama`, `proxytest`, `sample`. A one-shot `config-check` service gates `api` and `worker`.
@@ -465,6 +495,7 @@ Not verified:
 - **v2, proposed in V0:** the draft schemas are in `spec/drafts/v2`, not edited in place in `spec/` (the app reads `spec/`, and V0 changes no behaviour); ADR-035: PDF and PNG from an optional renderer container rather than the worker container (local mode has no worker).
 - **v2, proposed in V1 (ADR-036):** "deleting a user deletes their keys" happens when someone is deactivated, since Opsis deactivates people rather than deleting them (the foreign key cascades as well); in local mode the one built-in admin may always use the workspace key, as there is nobody to grant it to; the key's Test lists its models rather than sending a message, which is free but cannot tell whether the account has credit (kept as the default at the review, with an optional "Send a test message" beside it).
 - **v2, agreed at the V2 step 1 review (ADR-038):** the upgrade check runs as every active person and every live share link, not only the people who have attributes (`V2_DESIGN.md` section 1.4), since a rule can also use the role or the email; a loop of relationships is refused when a rule is on it or reachable from it (V2-Q1).
+- **v2, proposed in V2 (ADR-039):** a table's page shows the workspace versions in which that table changed; the v1 per-dataset history stays in the database, unchanged, but is no longer shown (the drafts README said it would stay readable; V2-Q2). The in-app assistant gets `get_workspace_model` and `suggest_relationships` but not `patch_workspace_model`, and keeps v1's `patch_semantic_model` for one table. The per-table pages stay, at `/models`, beside the Model view. The YAML tab highlights YAML but leaves checking to the server's Check (no YAML language worker).
 
 ## Open issues and notes
 
@@ -476,8 +507,8 @@ Not verified:
 - The MCP SDK is on 2.3, a new major version, used through its low-level API.
 - The live event hub lives in the single api process; several processes would need Postgres LISTEN/NOTIFY (R5).
 - A right-hand axis showing counts can have decimal tick labels.
-- Bundle size: main chunk 914 kB (about 280 kB gzipped): 839 kB after M8, 855 kB before the data router, which added 56 kB; ECharts (562 kB) and Monaco (3.4 MB) are lazy.
-- Joins reach two hops at most. The query builder has one filter row.
+- Bundle size: main chunk 962 kB (about 289 kB gzipped): 914 kB before V2, whose Model page panels added 48 kB; ECharts (562 kB), Monaco (3.4 MB) and the Model view's canvas (React Flow and dagre, 304 kB) are lazy.
+- Queries reach related tables in any number of steps, but a dashboard's filters keep v1's reach (at most two relationships from an item's table) until V4 migrates dashboards. The query builder has one filter row.
 - A repeated join key is found by comparing the values as stored: two that differ only after the join casts one side's type are not seen.
 - Merge refresh does not remove rows deleted in the source (Salesforce included) until a full rebuild. One job runs at a time, so a long refresh delays a scheduled backup or email. Datasets cannot be edited after creation.
 - Google Sheets refresh in full only (a sheet has no change marker). Dates in sheets must be formatted as dates to be read as dates. With an OAuth app in Testing status, Google ends the sign-in after 7 days (reconnect, or publish the app). Picking a spreadsheet from the list needs the Google Drive API enabled in the OAuth client's project.
@@ -494,6 +525,7 @@ Not verified:
 - **M8:** bulk export and import of a `models/` folder; two-hop joins; the 10 million row check; drag-and-drop of fields into wells; email for invitations, resets and snapshots; a clean-up job for ended sessions and links. (All done.)
 - **Post-v1 (decided at M8):** SQL Lab, the admin-only read-only SQL page (`FEATURE_SQL_LAB` in the brief).
 - **Later (decided at V2 step 1):** explicit path selection for a loop of relationships that a rule could travel round: the model's author says which path the security filter takes, instead of the loop being refused.
+- **Proposed in V2, for the review:** a read-only view of a table's v1 history (`semantic_model_versions`), if you want it back (V2-Q2).
 - **Later (decided at V1):** estimated cost per provider beside the tokens on the Account page (prices differ per model and change, so they need a table to keep up to date).
 - **Later (brief):** OAuth for the MCP server so it can be a claude.ai connector; TOTP second factor.
 
@@ -503,13 +535,18 @@ The V1 questions were answered at its review (see "Review outcomes so far").
 
 V2-Q1 was answered at the step 1 review (see "Review outcomes so far").
 
+From V2:
+
+- **V2-Q2. The v1 history of each table is no longer shown.** A table's page now lists the workspace model's versions in which that table changed, from version 1 ("Migrated from the v1 models"). The v1 rows stay in the database, unchanged. Is that enough, or should the old history be shown read-only (on the backlog as proposed)?
+- **V2-Q3. Migrate your stack now?** At your go-ahead: back up (`python -m opsis backup` in the api container, into its `backups` volume), rebuild your stack with V2 (the migration runs as the api starts), then `python -m opsis results-digest --compare /data/upgrade/results-digest-20261128-040111.json`, and I show you its summary. The report before predicted no change on your stack.
+
 From v1, still open:
 
 - **Q1. Emailed dashboards carry numbers, not pictures of charts** (ADR-026): a KPI's value and its comparison, the first 10 rows of each other visual with a bar beside a chart's first measure, and a link to the dashboard. Pictures would need a headless browser in the image (a few hundred MB more, and a browser to keep patched), while tables show reliably in every mail client. Is that enough for v1? (V7's renderer service, if you approve it, could later add them.)
 
 ## Exact next step
 
-1. **The rest of V2 is under way** (the report on your stack was clean): the migration to one workspace model, the relationships compiler with row-level security through relationships, the Model view, measures, date tables, YAML both ways, model versions, "Suggest relationships" and the MCP tools. It stops for your review at the end. Your stack stays on V2 step 1 until then: the migration runs on it only when you say, and `results-digest --compare /data/upgrade/results-digest-20261128-040111.json` checks it afterwards.
+1. **The V2 review:** ADR-039, and questions V2-Q2 and V2-Q3. Your stack is still on V2 step 1. At your go-ahead I back it up, rebuild it with V2 (the migration runs as the api starts) and run `results-digest --compare /data/upgrade/results-digest-20261128-040111.json` on it, then show you the summary. After the review: V3 (data prep).
 2. **Still yours from M8**, unchanged: the three steps below.
 
 Your part of M8, then the M8 review:

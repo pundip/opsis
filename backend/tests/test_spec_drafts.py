@@ -1,10 +1,11 @@
 """The v2 draft schemas in spec/drafts/v2 (milestone V0 of BUILD_BRIEF_V2.md).
 
-Nothing in the app reads the drafts yet. These checks keep them honest until each
-one moves into spec/ with its milestone: every draft is a valid JSON Schema whose
-references resolve, every example validates, documents made by today's code (the
-demo data) survive the migrations planned in spec/drafts/v2/README.md, and the
-drafts refuse what the designs say they refuse.
+Nothing in the app reads the drafts. These checks keep them honest until each one
+moves into spec/ with its milestone (the workspace model and the semantic query moved
+in V2): every draft is a valid JSON Schema whose references resolve, every example
+validates, documents made by today's code (the demo data) survive the migrations
+planned in spec/drafts/v2/README.md, and the drafts refuse what the designs say they
+refuse.
 """
 
 from __future__ import annotations
@@ -28,12 +29,12 @@ EXAMPLES = DRAFTS / "examples"
 VISUALS_DIR = Path("/app/visuals")
 DRAFT_NAMES = {
     "dashboard.schema.json",
-    "semantic-query.schema.json",
     "transform.schema.json",
     "visual-manifest.schema.json",
     "visual-package.schema.json",
-    "workspace-model.schema.json",
 }
+# Promoted into spec/ in V2; their examples stay with the drafts' examples.
+PROMOTED = {"semantic-query.schema.json", "workspace-model.schema.json"}
 
 
 def _load(path: Path) -> Any:
@@ -85,13 +86,13 @@ def test_every_draft_is_a_valid_schema_whose_references_resolve() -> None:
 @pytest.mark.parametrize("path", sorted(EXAMPLES.glob("*.json")), ids=lambda p: p.name)
 def test_every_example_validates(path: Path) -> None:
     schema = f"{path.name.split('.')[0]}.schema.json"
-    assert schema in DRAFT_NAMES
+    assert schema in DRAFT_NAMES | PROMOTED
     assert problems(schema, _load(path)) == []
 
 
 def test_examples_cover_every_draft() -> None:
     covered = {f"{path.name.split('.')[0]}.schema.json" for path in EXAMPLES.glob("*.json")}
-    assert covered == DRAFT_NAMES - {"visual-manifest.schema.json"}  # via visual-package
+    assert covered == (DRAFT_NAMES | PROMOTED) - {"visual-manifest.schema.json"}  # via package
 
 
 def test_queries_the_v1_demo_dashboard_makes_are_valid_v2_queries() -> None:

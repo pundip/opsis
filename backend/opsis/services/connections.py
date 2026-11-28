@@ -125,7 +125,15 @@ def _build(
     settings: Settings, connector_id: str, public: dict[str, Any], secrets: dict[str, Any]
 ) -> Any:
     cls = connector_class(settings, connector_id)
-    internal = {"_uploads_dir": str(uploads_dir(settings))}
+    internal: dict[str, Any] = {
+        "_uploads_dir": str(uploads_dir(settings)),
+        "_calendar": {
+            "weekStart": settings.week_start,
+            "fiscalYearStartMonth": settings.fiscal_year_start_month,
+            "fiscalYearLabel": settings.fiscal_year_label,
+            "timezone": settings.workspace_timezone,
+        },
+    }
     if settings.google_api_base_url:
         internal["_google_api_base"] = settings.google_api_base_url  # tests only
     return cls({**public, **secrets, **internal})

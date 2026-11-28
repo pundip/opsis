@@ -1,37 +1,36 @@
-"""Relationships from v1 joins, and row-level security through them (ADR-031, ADR-032).
+"""Relationships between tables, and the paths queries and security take along them
+(ADR-031, ADR-032).
 
-v2 turns each dataset's joins into relationships between tables (ADR-031). A
-`many_to_one` or `one_to_one` join becomes an active relationship from the table
-that declares it (the many side) to the table it joins to. A `one_to_many` join is
-turned round and made inactive, as v1 never used it in a query. A join declared on
-both sides becomes one relationship, active if either side was. The planned
-migration in `tests/test_spec_drafts.py` writes the same rules out, and a test checks
-that the two agree.
+A relationship goes from the many side (`from_table`) to the one side (`to_table`), as
+in Power BI. Queries use the active ones:
 
-Rule R2 (ADR-032): a table keeps only rows related to visible rows of each table that
-filters it for security. For each active relationship from T (many) to S (one) where
-S's rows are restricted for this person, T keeps the rows whose key is among S's
-visible rows, so a row with an empty or unmatched key is hidden. It is transitive: S's
-visible rows are those its own relationships leave. S is read only to filter T: there
-is no access check on S, and none of its rows are returned. A loop of active
-relationships that a rule could travel round (a table with rules on the loop, or
-reachable from it) is refused, since the rows it would leave depend on themselves.
+- **Grouping:** a query may group by a field of any table its base table reaches by
+  following active relationships from the many side to the one side, any number of
+  steps. The shortest path wins; two shortest paths are ambiguous, and the query is
+  refused with both named. A path never goes through a restricted table (it may end
+  at one).
+- **Filtering:** a filter on a table that is not on such a path still applies when a
+  filter path leads from it to the base table: each step goes from the one side to
+  the many side, or the other way along a relationship with `crossFilter: both`.
+- **Security (R2):** see `opsis.semantic.security`.
 
-Until V2's compiler applies R2 itself, `relationship_scan` gives the compiler a scan
-(`compiler.Scan`) that does. The upgrade check (`services.results_digest`) runs every
-dashboard with it, to show who will see fewer rows.
+v1's joins become relationships by the migration's rules (`from_v1_joins`): a
+`many_to_one` or `one_to_one` join is an active relationship from the table that
+declares it, a `one_to_many` join is turned round and made inactive (v1 never used it
+in a query), and a join declared on both sides is one relationship, active if either
+was. The migration (0014) and `tests/test_spec_drafts.py` write the same rules out.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-
-from sqlglot import exp
+from typing import Any
 
 from opsis.errors import ApiError
-from opsis.semantic.compiler import Scan, Source, UserContext, secured_scan
 from opsis.semantic.model import Model
+
+CARDINALITIES = ("many_to_one", "one_to_one")
 
 
 @dataclass(frozen=True)
@@ -43,15 +42,58 @@ class Relationship:
     from_columns: tuple[str, ...]
     to_table: str
     to_columns: tuple[str, ...]
-    cardinality: str  # many_to_one | one_to_one
-    active: bool
-    join_type: str  # left | inner
+    cardinality: str = "many_to_one"  # many_to_one | one_to_one
+    active: bool = True
+    join_type: str = "left"  # left | inner
+    cross_filter: str = "single"  # single | both
+    security_filter: str = "single"  # single | both
 
     def describe(self) -> str:
         return (
             f"{self.from_table} ({', '.join(self.from_columns)}) to "
             f"{self.to_table} ({', '.join(self.to_columns)})"
         )
+
+    def ends(self) -> frozenset[str]:
+        return frozenset((self.from_table, self.to_table))
+
+
+def parse_relationship(rid: str, entry: Mapping[str, Any]) -> Relationship:
+    """A relationship from its document form (workspace-model.schema.json)."""
+    return Relationship(
+        id=rid,
+        from_table=str(entry["from"]["table"]),
+        from_columns=tuple(entry["from"]["columns"]),
+        to_table=str(entry["to"]["table"]),
+        to_columns=tuple(entry["to"]["columns"]),
+        cardinality=str(entry.get("cardinality", "many_to_one")),
+        active=bool(entry.get("active", True)),
+        join_type=str(entry.get("joinType", "left")),
+        cross_filter=str(entry.get("crossFilter", "single")),
+        security_filter=str(entry.get("securityFilter", "single")),
+    )
+
+
+def relationship_entry(rel: Relationship) -> dict[str, Any]:
+    """The document form of a relationship, every property written out."""
+    return {
+        "from": {"table": rel.from_table, "columns": list(rel.from_columns)},
+        "to": {"table": rel.to_table, "columns": list(rel.to_columns)},
+        "cardinality": rel.cardinality,
+        "crossFilter": rel.cross_filter,
+        "securityFilter": rel.security_filter,
+        "active": rel.active,
+        "joinType": rel.join_type,
+    }
+
+
+def new_id(taken: Collection[str], from_table: str, to_table: str) -> str:
+    """`<from>__<to>`, then `_2`, `_3` for another between the same tables."""
+    base = rid = f"{from_table}__{to_table}"
+    number = 2
+    while rid in taken:
+        rid, number = f"{base}_{number}", number + 1
+    return rid
 
 
 def from_v1_joins(models: Mapping[str, Model]) -> list[Relationship]:
@@ -88,19 +130,28 @@ def from_v1_joins(models: Mapping[str, Model]) -> list[Relationship]:
                 kept = found[same]
                 found[same] = replace(kept, active=kept.active or active)
                 continue
-            base = rid = f"{many[0]}__{one[0]}"
-            number = 2
-            while rid in found:
-                rid, number = f"{base}_{number}", number + 1
+            rid = new_id(found, many[0], one[0])
             found[rid] = Relationship(
                 rid, many[0], many[1], one[0], one[1], cardinality, active, join.type
             )
     return list(found.values())
 
 
+# ---- the graph ----------------------------------------------------------------------
+
+
+def active_edges(relationships: Iterable[Relationship]) -> dict[str, list[str]]:
+    """For each table, the tables its active relationships lead to (many to one)."""
+    edges: dict[str, list[str]] = {}
+    for rel in relationships:
+        if rel.active:
+            edges.setdefault(rel.from_table, []).append(rel.to_table)
+    return edges
+
+
 def reachable(start: str, edges: Mapping[str, Sequence[str]]) -> set[str]:
-    """Every table reachable from `start` along active relationships (not itself, unless
-    a loop leads back)."""
+    """Every table reachable from `start` along the edges (not itself, unless a loop
+    leads back)."""
     seen: set[str] = set()
     todo = list(edges.get(start, ()))
     while todo:
@@ -130,11 +181,10 @@ def refused_loops(
     relationships: Iterable[Relationship], models: Mapping[str, Model]
 ) -> list[tuple[str, ...]]:
     """The loops of active relationships that a row-level security rule could travel
-    round, which v2 refuses: each as the tables it passes, first and last the same."""
-    edges: dict[str, list[str]] = {}
-    for rel in relationships:
-        if rel.active:
-            edges.setdefault(rel.from_table, []).append(rel.to_table)
+    round, which v2 refuses (ADR-032, made precise in ADR-038): a table with rules on
+    the loop, or reachable from it. Each as the tables it passes, first and last the
+    same."""
+    edges = active_edges(relationships)
     loops: list[tuple[str, ...]] = []
     covered: set[str] = set()
     for table in sorted(edges):
@@ -155,88 +205,151 @@ class LoopError(ApiError):
             409,
             "relationship_loop",
             f"The active relationships {' → '.join(loop)} form a loop that row-level security "
-            "would travel round, which v2 refuses. One of them must be made inactive.",
+            "would travel round, which is refused. Make one of them inactive.",
         )
         self.loop = loop
 
 
-def relationship_scan(sources: Mapping[str, Source], relationships: Sequence[Relationship]) -> Scan:
-    """A scan that applies each table's own rules (R1, as v1 does) and R2 through the
-    active relationships. `sources` must hold every table a relationship may reach."""
-    outgoing: dict[str, list[Relationship]] = {}
+@dataclass(frozen=True)
+class Step:
+    """One relationship on a path, and which way it is walked."""
+
+    rel: Relationship
+    forward: bool  # from the many side to the one side
+
+    @property
+    def start(self) -> str:
+        return self.rel.from_table if self.forward else self.rel.to_table
+
+    @property
+    def end(self) -> str:
+        return self.rel.to_table if self.forward else self.rel.from_table
+
+    @property
+    def start_columns(self) -> tuple[str, ...]:
+        return self.rel.from_columns if self.forward else self.rel.to_columns
+
+    @property
+    def end_columns(self) -> tuple[str, ...]:
+        return self.rel.to_columns if self.forward else self.rel.from_columns
+
+
+Path = tuple[Step, ...]
+
+
+@dataclass(frozen=True)
+class Reach:
+    """The shortest paths from one table: to each table reached, its path, or the two
+    shortest paths when there is more than one."""
+
+    paths: Mapping[str, Path]
+    ambiguous: Mapping[str, tuple[Path, Path]]
+
+
+def describe_path(path: Path) -> str:
+    if not path:
+        return "(the table itself)"
+    tables = [path[0].start, *(step.end for step in path)]
+    return " → ".join(tables)
+
+
+def shortest_paths(
+    start: str,
+    steps: Mapping[str, Sequence[Step]],
+    *,
+    through: Collection[str] | None = None,
+    blocked: Collection[str] = (),
+) -> Reach:
+    """Breadth first from `start` over `steps` (the steps leaving each table). A table
+    in `blocked` may end a path but is never walked through; `through`, when given,
+    is the only tables a path may pass (and end at)."""
+    paths: dict[str, Path] = {start: ()}
+    count: dict[str, int] = {start: 1}
+    second: dict[str, Path] = {}
+    frontier = [start]
+    while frontier:
+        level: dict[str, list[Path]] = {}
+        for table in frontier:
+            if table in blocked and table != start:
+                continue
+            for step in steps.get(table, ()):
+                end = step.end
+                if end in paths and end not in level:
+                    continue  # reached at a shorter distance already
+                if through is not None and end not in through:
+                    continue
+                level.setdefault(end, []).append((*paths[table], step))
+        frontier = []
+        for table, found in sorted(level.items()):
+            total = sum(count.get(path[-1].start, 1) for path in found)
+            paths[table] = found[0]
+            count[table] = total
+            if total > 1:
+                if len(found) > 1:
+                    second[table] = found[1]
+                else:  # one way in, from a table reached two ways
+                    previous = found[0][-1].start
+                    other = second.get(previous)
+                    if other is not None:
+                        second[table] = (*other, found[0][-1])
+            frontier.append(table)
+    del paths[start]
+    ambiguous = {t: (paths[t], second[t]) for t in second if t in paths}
+    return Reach(
+        {t: p for t, p in paths.items() if t not in ambiguous},
+        ambiguous,
+    )
+
+
+def grouping_steps(relationships: Iterable[Relationship]) -> dict[str, list[Step]]:
+    """The steps a query may take to group by another table's fields: along active
+    relationships from the many side to the one side."""
+    steps: dict[str, list[Step]] = {}
     for rel in relationships:
-        if rel.active:
-            outgoing.setdefault(rel.from_table, []).append(rel)
-    edges = {name: [rel.to_table for rel in rels] for name, rels in outgoing.items()}
-    models = {name: source.model for name, source in sources.items()}
-    loops = refused_loops(relationships, models)
-    blocked: dict[str, tuple[str, ...]] = {}
-    for loop in loops:
-        for table in sorted(sources):
-            if table in loop or set(loop) & reachable(table, edges):
-                blocked.setdefault(table, loop)
+        if rel.active and rel.from_table != rel.to_table:
+            steps.setdefault(rel.from_table, []).append(Step(rel, True))
+    return steps
 
-    def visible(
-        source: Source, user: UserContext, path: tuple[str, ...]
-    ) -> tuple[exp.Select, bool, bool]:
-        """The table's rows this person may see, whether a rule was passed over, and
-        whether anything restricts them."""
-        name = source.model.dataset
-        scan, bypassed = secured_scan(source, user)
-        restricted = scan.args.get("where") is not None
-        conditions: list[exp.Expr] = []
-        for rel in outgoing.get(name, []):
-            target = sources.get(rel.to_table)
-            if target is None or rel.to_table in path or rel.to_table == name:
-                # No data to filter by; or a loop no rule travels round (a refused one
-                # stops the scan before it gets here).
-                continue
-            inner, inner_bypassed, inner_restricted = visible(target, user, (*path, name))
-            bypassed = bypassed or inner_bypassed
-            if not inner_restricted:
-                continue
-            alias = f"_opsis_r2_{len(path)}"
-            for column in rel.from_columns:
-                if column not in source.columns:
-                    raise ApiError(
-                        409,
-                        "relationship_column",
-                        f"The relationship {rel.describe()} uses {column!r}, which {name!r} "
-                        "does not have.",
-                    )
-            for column in rel.to_columns:
-                if column not in target.columns:
-                    raise ApiError(
-                        409,
-                        "relationship_column",
-                        f"The relationship {rel.describe()} uses {column!r}, which "
-                        f"{rel.to_table!r} does not have.",
-                    )
-            match = exp.and_(
-                *[
-                    exp.EQ(
-                        this=exp.column(remote, table=alias, quoted=True),
-                        expression=exp.column(local, table=name, quoted=True),
-                    )
-                    for local, remote in zip(rel.from_columns, rel.to_columns, strict=True)
-                ]
-            )
-            found = (
-                exp.select(exp.Literal.number(1))
-                .from_(inner.subquery(exp.to_identifier(alias, quoted=True)))
-                .where(match)
-            )
-            conditions.append(exp.Exists(this=found))
-        if conditions:
-            scan = scan.where(exp.and_(*conditions))
-            restricted = True
-        return scan, bypassed, restricted
 
-    def scan(source: Source, user: UserContext) -> tuple[exp.Select, bool]:
-        loop = blocked.get(source.model.dataset)
-        if loop is not None:
-            raise LoopError(loop)
-        select, bypassed, _ = visible(source, user, ())
-        return select, bypassed
+def filter_steps(relationships: Iterable[Relationship]) -> dict[str, list[Step]]:
+    """The steps a filter takes: from the one side to the many side of each active
+    relationship, and from the many side to the one side where `crossFilter: both`."""
+    steps: dict[str, list[Step]] = {}
+    for rel in relationships:
+        if not rel.active or rel.from_table == rel.to_table:
+            continue
+        steps.setdefault(rel.to_table, []).append(Step(rel, False))
+        if rel.cross_filter == "both":
+            steps.setdefault(rel.from_table, []).append(Step(rel, True))
+    return steps
 
-    return scan
+
+def with_override(
+    relationships: Sequence[Relationship], override: Relationship | None
+) -> tuple[Relationship, ...]:
+    """The relationships a measure that names `override` uses (Power BI's
+    USERELATIONSHIP): it is active, and the others between the same two tables are
+    not."""
+    if override is None:
+        return tuple(relationships)
+    kept = [rel for rel in relationships if rel.id != override.id and rel.ends() != override.ends()]
+    return (*kept, replace(override, active=True))
+
+
+def within_two_steps(
+    relationships: Sequence[Relationship], base: str, restricted: Collection[str] = ()
+) -> dict[str, str | None]:
+    """v1's reach, which dashboards keep for their filters until V4 (ADR-031): the
+    tables `base` reaches in at most two many-to-one steps, each with the table it is
+    reached through (None when it is one step away). A table two steps away by two
+    ways is left out, and no path goes through a restricted table."""
+    steps = grouping_steps(relationships)
+    direct: dict[str, str | None] = {s.end: None for s in steps.get(base, ()) if s.end != base}
+    farther: dict[str, list[str]] = {}
+    for middle in direct:
+        if middle in restricted:
+            continue
+        for step in steps.get(middle, ()):
+            if step.end != base and step.end not in direct:
+                farther.setdefault(step.end, []).append(middle)
+    return {**direct, **{name: via[0] for name, via in farther.items() if len(set(via)) == 1}}

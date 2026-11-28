@@ -1,23 +1,43 @@
-"""Compile a semantic query into one DuckDB SELECT, as a sqlglot syntax tree.
+"""Compile a semantic query into DuckDB SQL, as a sqlglot syntax tree.
 
-Rules (brief section 6):
+Rules (brief section 6, ADR-031 and ADR-032):
 - User input is never concatenated into SQL. Field references are looked up in
   the model, values become literals in the tree, and sqlglot renders the text.
-- Row-level security is always applied, inside the subquery that reads each
-  dataset, so no join or filter can widen what a user sees.
-- A field may come from a dataset the query's dataset joins to, or from one two
-  joins away (gifts -> donors -> regions). Every join on the way must be
-  many_to_one or one_to_one, so measures are never counted twice, and a path
-  never goes through a restricted dataset.
+- Every table is read through its secured rows (`Security.scan`): its own rules
+  (R1) and the rules that reach it through relationships (R2), inside the
+  subquery that reads it, so no join or filter can widen what a person sees.
+- **Grouping:** a query may group by fields of any table its base table reaches
+  along active relationships from the many side to the one side, any number of
+  steps. The shortest path wins, two shortest paths are refused with both named,
+  a path never goes through a restricted table, and after a left join the rest
+  of the path stays left. Grouping by a table on the many side is refused, as it
+  would count the base's rows more than once.
+- **Filtering:** a filter on a table the base reaches that way is a condition on
+  the joined table, as in v1. Otherwise it applies along relationships in their
+  filter direction, as a semi-join (`EXISTS`), which never multiplies rows. The
+  conditions on one table are applied together, as Power BI filters a table and
+  then the tables it filters.
+- **Measures** may come from several tables. The measures of each table (and of
+  each relationship a measure names, as USERELATIONSHIP) are computed in a block
+  of their own, every block grouped by the same fields, and the blocks are joined
+  on them.
 - Every query has a row cap and a timeout.
 
-Shape of the result:
+One block, which is v1's shape:
 
     SELECT <dimensions>, <time grain>, <measures>
-    FROM (SELECT * FROM read_parquet('<snapshot>') WHERE <rls>) AS "gifts"
-    LEFT JOIN (SELECT * FROM read_parquet('<snapshot>') WHERE <rls>) AS "donors" ON ...
+    FROM (SELECT * FROM read_parquet('<snapshot>') WHERE <security>) AS "gifts"
+    LEFT JOIN (SELECT * FROM read_parquet('<snapshot>') WHERE <security>) AS "donors" ON ...
     WHERE <dimension filters, segments, time range>
     GROUP BY <dimensions> HAVING <measure filters> ORDER BY ... LIMIT n
+
+Several blocks:
+
+    WITH "_b1" AS (SELECT <fields> AS "_g0", <aggregates> AS "_m0" FROM ... GROUP BY ...),
+         "_b2" AS (...)
+    SELECT COALESCE("_b1"."_g0", "_b2"."_g0") AS "<field>", <measures of the aggregates>
+    FROM "_b1" FULL OUTER JOIN "_b2" ON "_b1"."_g0" IS NOT DISTINCT FROM "_b2"."_g0"
+    WHERE <measure filters> ORDER BY ... LIMIT n
 """
 
 from __future__ import annotations
@@ -29,16 +49,46 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
-import sqlglot
 from sqlglot import exp
 
 from opsis.connectors.base import ColumnType
 from opsis.errors import ApiError
-from opsis.query.engine import CompiledQuery, ResultColumn, TableRef
+from opsis.query.engine import CompiledQuery, ResultColumn
 from opsis.semantic import expressions
 from opsis.semantic.calendar import CalendarConfig, resolve_relative_range
 from opsis.semantic.expressions import ExpressionError
-from opsis.semantic.model import SAFE_JOINS, Dimension, Join, Measure, Model
+from opsis.semantic.model import Dimension, Measure, Segment
+from opsis.semantic.relationships import (
+    Path,
+    Reach,
+    Relationship,
+    Step,
+    describe_path,
+    filter_steps,
+    grouping_steps,
+    shortest_paths,
+    with_override,
+)
+from opsis.semantic.security import (
+    Scan,
+    Source,
+    UserContext,
+    key_value,
+    own_rules_scan,
+    snapshot_scan,
+)
+from opsis.semantic.workspace import Workspace
+
+__all__ = [
+    "Scan",
+    "Source",
+    "UserContext",
+    "Workspace",
+    "compile_query",
+    "grain_expression",
+    "own_rules_scan",
+    "repeated_keys",
+]
 
 DIALECT = "duckdb"
 DEFAULT_LIMIT = 500
@@ -61,41 +111,10 @@ AGGREGATES: dict[str, type[exp.Func]] = {
     "min": exp.Min,
     "max": exp.Max,
 }
-
-
-@dataclass(frozen=True)
-class Source:
-    """One dataset as the compiler sees it: its model, columns and current snapshot."""
-
-    model: Model
-    columns: Mapping[str, str]  # column name -> logical type
-    table: TableRef
-    # Timestamp columns that hold instants, and the zone they are stored in (UTC).
-    timezones: Mapping[str, str] = field(default_factory=dict)
-    # A restricted dataset (an access list): a two-join path may not go through it.
-    restricted: bool = False
-
-
-@dataclass(frozen=True)
-class UserContext:
-    role: str
-    email: str = ""
-    attributes: Mapping[str, Any] | None = None
-    # False for share links and any anonymous access: every RLS rule then
-    # applies whatever its role list says, even if the link's owner is an admin.
-    may_be_exempt: bool = True
-
-    def values(self) -> dict[str, Any]:
-        values: dict[str, Any] = {"role": self.role, "email": self.email}
-        for name, value in (self.attributes or {}).items():
-            values[f"attributes.{name}"] = value
-        return values
-
-
-# How a dataset's rows are read for a user: `SELECT * FROM <snapshot> WHERE <security>`,
-# and whether a rule was passed over (the badge). secured_scan is the default; the
-# upgrade check (opsis.semantic.relationships) passes one that adds v2's rule R2.
-Scan = Callable[[Source, UserContext], tuple[exp.Select, bool]]
+FILTER_DIRECTION = (
+    "along active relationships in their filter direction (from the one side to the many "
+    "side, and back where crossFilter is both)"
+)
 
 
 class _Problems:
@@ -103,7 +122,8 @@ class _Problems:
         self.items: list[dict[str, str]] = []
 
     def add(self, path: str, message: str) -> None:
-        self.items.append({"path": path, "message": message})
+        if not any(i["path"] == path and i["message"] == message for i in self.items):
+            self.items.append({"path": path, "message": message})
 
     def raise_if_any(self) -> None:
         if self.items:
@@ -175,117 +195,121 @@ def grain_expression(value: exp.Expr, grain: str, calendar: CalendarConfig) -> e
     return exp.Cast(this=result, to=exp.DataType.build("DATE"))
 
 
+def _turned(steps: Mapping[str, Sequence[Step]]) -> dict[str, list[Step]]:
+    """Steps turned round: from the table filtered to the table that filters it."""
+    result: dict[str, list[Step]] = {}
+    for leaving in steps.values():
+        for step in leaving:
+            result.setdefault(step.end, []).append(Step(step.rel, not step.forward))
+    return result
+
+
+def _towards_base(path: Path) -> str:
+    """A path found from the base, described from its far end to the base."""
+    tables = [path[0].start, *(step.end for step in path)]
+    return " → ".join(reversed(tables))
+
+
+# ---- what a query is made of ---------------------------------------------------------
+
+
+@dataclass
+class _Block:
+    """The measures of one table (with one relationship named, or none), read with
+    the tables joined to group and filter them."""
+
+    base: str
+    override: str | None
+    relationships: tuple[Relationship, ...]
+    reach: Reach  # the tables the base reaches many-to-one
+    joins: dict[str, tuple[Step, str]] = field(default_factory=dict)  # table: (step, join type)
+    where: list[exp.Expr] = field(default_factory=list)
+    aggregates: dict[tuple[str, str], str] = field(default_factory=dict)  # (table, measure): column
+    filtered_by: Reach | None = None  # the tables that filter the base, found from it
+
+    def reaches(self, table: str) -> bool:
+        return table == self.base or table in self.joins or table in self.reach.paths
+
+
+@dataclass(frozen=True)
+class _Group:
+    """A grouped field: a dimension, or the time dimension at a grain."""
+
+    ref: str
+    path: str
+    source: Source
+    dimension: Dimension
+    grain: str | None = None
+
+    @property
+    def table(self) -> str:
+        return self.source.model.dataset
+
+
+@dataclass(frozen=True)
+class _Condition:
+    """A condition on dimensions (a filter, an `or` group, a segment or the time range),
+    built for each block once it is known where each of its tables is read there."""
+
+    path: str  # where a problem about reaching it is reported
+    refs: tuple[str, ...]  # its fields, for messages
+    tables: tuple[str, ...]
+    build: Callable[[Mapping[str, str]], list[exp.Expr] | None]  # from each table's alias
+
+
+@dataclass
+class _Node:
+    """A table read in a semi-join to filter a block, and the tables that filter it."""
+
+    table: str
+    alias: str
+    step: Step  # from the table nearer the base to this one
+    conditions: list[exp.Expr] = field(default_factory=list)
+    children: list[str] = field(default_factory=list)
+
+
 class _Compiler:
     def __init__(
         self,
         query: Mapping[str, Any],
-        sources: Mapping[str, Source],
+        workspace: Workspace,
         user: UserContext,
         calendar: CalendarConfig,
         today: date,
         scan: Scan | None = None,
     ) -> None:
         self.query = query
-        self.sources = sources
+        self.sources = workspace.sources
+        self.relationships = workspace.relationships
+        self.by_id = {rel.id: rel for rel in workspace.relationships}
+        self.restricted = frozenset(name for name, s in self.sources.items() if s.restricted)
         self.user = user
-        self.scan: Scan = scan or secured_scan
+        self.scan: Scan = scan or workspace.security.scan
         self.calendar = calendar
         self.today = today
         self.problems = _Problems()
-        base_name = str(query["dataset"])
-        if base_name not in sources:
-            raise _fail(
-                "/dataset", f"There is no dataset called {base_name!r} with a model and data."
-            )
-        self.base = sources[base_name]
-        self.used: list[str] = [base_name]
-        # How each joined dataset is reached: (the dataset it joins from, the join).
-        self.hops: dict[str, tuple[str, Join]] = {}
+        self.used: list[str] = []
         self.rls_bypassed = False
+        self._aliases = 0
+        named = query.get("dataset")
+        if named is not None and str(named) not in self.sources:
+            raise _fail("/dataset", f"There is no dataset called {named!r} with a model and data.")
+        self.named = None if named is None else str(named)
 
     # ---- field lookup --------------------------------------------------------------
 
-    def _source(self, path: str, ref: str) -> tuple[Source, str] | None:
-        dataset, _, name = ref.partition(".")
-        if dataset != self.base.model.dataset and dataset not in self.hops:
-            route = self._route(path, ref, dataset)
-            if route is None:
-                return None
-            for start, join in route:
-                if join.to not in self.hops:
-                    self.hops[join.to] = (start, join)
-                    self.used.append(join.to)
-        return self.sources[dataset], name
-
-    def _unsafe(self, path: str, start: str, join: Join) -> bool:
-        if join.relationship in SAFE_JOINS:
-            return False
-        self.problems.add(
-            path,
-            f"The join from {start!r} to {join.to!r} is {join.relationship}, which would "
-            "double-count measures. Query from the other dataset instead.",
-        )
-        return True
-
-    def _route(self, path: str, ref: str, dataset: str) -> list[tuple[str, Join]] | None:
-        """The joins from the query's dataset to `dataset`: one, or two through a
-        dataset in between. None (with a problem) when there is no safe way."""
-        base = self.base.model
-        direct = next((j for j in base.joins if j.to == dataset), None)
-        if direct is not None and dataset in self.sources:
-            return None if self._unsafe(path, base.dataset, direct) else [(base.dataset, direct)]
-        routes = []
-        if dataset in self.sources:
-            for first in base.joins:
-                middle = self.sources.get(first.to)
-                if middle is None or first.to == base.dataset:
-                    continue
-                second = next((j for j in middle.model.joins if j.to == dataset), None)
-                if second is not None:
-                    routes.append((first, middle, second))
-        if not routes:
+    def _field(self, path: str, ref: str) -> tuple[Source, str] | None:
+        table, _, name = ref.partition(".")
+        source = self.sources.get(table)
+        if source is None:
             self.problems.add(
-                path,
-                f"{ref!r} is in dataset {dataset!r}, which {base.dataset!r} has no join to, "
-                f"directly or through a dataset it joins to. Add a join in the {base.dataset} "
-                "model.",
+                path, f"{ref!r} is in {table!r}, which is not a table of the model with data."
             )
             return None
-        usable = [
-            (first, middle, second)
-            for first, middle, second in routes
-            if first.relationship in SAFE_JOINS
-            and second.relationship in SAFE_JOINS
-            and not middle.restricted
-        ]
-        if len(usable) > 1:
-            through = " and through ".join(repr(first.to) for first, _, _ in usable)
-            self.problems.add(
-                path,
-                f"{ref!r} can be reached from {base.dataset!r} through {through}. Add a "
-                f"direct join from {base.dataset} to {dataset} to say which way.",
-            )
-            return None
-        if not usable:
-            first, _, second = routes[0]
-            if not (
-                self._unsafe(path, base.dataset, first) or self._unsafe(path, first.to, second)
-            ):
-                self.problems.add(
-                    path,
-                    f"{ref!r} is two joins away, through {first.to!r}, which is a restricted "
-                    "dataset, and a path never goes through one. Add a direct join from "
-                    f"{base.dataset} to {dataset} instead.",
-                )
-            return None
-        first, _, second = usable[0]
-        # After a left join, the next one must keep every row too.
-        then = Join(second.to, "left" if first.type == "left" else second.type, second.on,
-                    second.relationship)  # fmt: skip
-        return [(base.dataset, first), (first.to, then)]
+        return source, name
 
     def dimension(self, path: str, ref: str) -> tuple[Source, Dimension] | None:
-        found = self._source(path, ref)
+        found = self._field(path, ref)
         if found is None:
             return None
         source, name = found
@@ -297,24 +321,88 @@ class _Compiler:
         return source, dim
 
     def measure(self, path: str, ref: str) -> tuple[Source, Measure] | None:
-        dataset, _, name = ref.partition(".")
-        if dataset != self.base.model.dataset:
-            self.problems.add(
-                path,
-                f"Measures must come from the query's own dataset ({self.base.model.dataset}).",
-            )
-            return None
-        found = self.base.model.measures.get(name)
+        found = self._field(path, ref)
         if found is None:
-            kind = "a dimension" if name in self.base.model.dimensions else "not defined"
+            return None
+        source, name = found
+        measure = source.model.measures.get(name)
+        if measure is None:
+            kind = "a dimension" if name in source.model.dimensions else "not defined"
             self.problems.add(path, f"{ref!r} is {kind}, so it cannot be used as a measure here.")
             return None
-        return self.base, found
+        return source, measure
+
+    def _is_measure(self, ref: str) -> bool:
+        table, _, name = ref.partition(".")
+        source = self.sources.get(table)
+        return source is not None and name in source.model.measures
+
+    # ---- blocks and joins ----------------------------------------------------------
+
+    def _block(self, base: str, override: str | None) -> _Block:
+        named = self.by_id.get(override) if override else None
+        relationships = with_override(self.relationships, named)
+        reach = shortest_paths(base, grouping_steps(relationships), blocked=self.restricted)
+        return _Block(base, override, relationships, reach)
+
+    def _join(self, block: _Block, table: str) -> None:
+        """Join `table`, which the block reaches, and the tables on the way to it."""
+        if table == block.base or table in block.joins:
+            return
+        kept_left = False
+        for step in block.reach.paths[table]:
+            kind = "left" if kept_left else step.rel.join_type  # after a left join, left
+            kept_left = kept_left or kind == "left"
+            if step.end not in block.joins:
+                block.joins[step.end] = (step, kind)
+                self._use(step.end)
+
+    def _use(self, table: str) -> None:
+        if table not in self.used:
+            self.used.append(table)
+
+    def _two_ways(self, ref: str, table: str, base: str, one: Path, other: Path) -> str:
+        return (
+            f"{ref!r} is in {table!r}, which {base!r} reaches by two paths as short as each "
+            f"other ({describe_path(one)}, and {describe_path(other)}). Make one of the "
+            "relationships inactive, or name one in a measure's `relationship`."
+        )
+
+    def _not_grouped(self, block: _Block, group: _Group, several: bool) -> str:
+        """Why a block cannot group by a field."""
+        table, base, ref = group.table, block.base, group.ref
+        if table in block.reach.ambiguous:
+            return self._two_ways(ref, table, base, *block.reach.ambiguous[table])
+        steps = grouping_steps(block.relationships)
+        free = shortest_paths(base, steps)
+        if table in free.paths or table in free.ambiguous:
+            return (
+                f"{ref!r} is in {table!r}, which {base!r} reaches only through a restricted "
+                "dataset, and a path never goes through one."
+            )
+        back = shortest_paths(table, steps)
+        if base in back.paths or base in back.ambiguous:
+            return (
+                f"{ref!r} is on the many side of {base!r}: grouping by it would count rows "
+                f"of {base!r} more than once. Group by fields of the tables {base!r} "
+                f"reaches many-to-one, or use measures of {table!r}."
+            )
+        if several:
+            return (
+                f"{ref!r} cannot be used with the measures of {base!r}, which does not reach "
+                f"{table!r} through active many-to-one relationships: every grouped field "
+                "must reach the table of every measure."
+            )
+        return (
+            f"{ref!r} is in {table!r}, which {base!r} does not reach through active "
+            f"many-to-one relationships. Add a relationship from {base} to {table} in the "
+            "Model view."
+        )
 
     # ---- expressions ---------------------------------------------------------------
 
-    def dimension_sql(self, source: Source, dim: Dimension) -> exp.Expr:
-        alias = source.model.dataset
+    def dimension_sql(self, source: Source, dim: Dimension, alias: str | None = None) -> exp.Expr:
+        alias = alias or source.model.dataset
         if dim.column is not None:
             value: exp.Expr = _col(alias, dim.column)
         else:
@@ -352,19 +440,44 @@ class _Compiler:
             return to_local(as_instant)
         return value
 
-    def measure_sql(
-        self, source: Source, measure: Measure, stack: tuple[str, ...] = ()
+    def _key(
+        self, source: Source, column: str, alias: str, other: Source, other_column: str
     ) -> exp.Expr:
+        """One column of a relationship's key (`security.key_value`)."""
+        return key_value(source, column, alias, other, other_column, self.calendar.timezone)
+
+    def _match(self, step: Step, start_alias: str, end_alias: str) -> exp.Expr:
+        """The condition a step's two tables meet on."""
+        start, end = self.sources[step.start], self.sources[step.end]
+        return exp.and_(
+            *[
+                exp.EQ(
+                    this=self._key(start, a, start_alias, end, b),
+                    expression=self._key(end, b, end_alias, start, a),
+                )
+                for a, b in zip(step.start_columns, step.end_columns, strict=True)
+            ]
+        )
+
+    def measure_sql(
+        self, block: _Block, source: Source, measure: Measure, stack: tuple[str, ...] = ()
+    ) -> exp.Expr:
+        """A measure in a block of its own table: an aggregate, or a formula (which may
+        use other tables' measures when they are in the same block)."""
         alias = source.model.dataset
-        if measure.name in stack:
+        key = f"{alias}.{measure.name}"
+        if key in stack:
             raise ExpressionError(f"Measure {measure.name!r} refers to itself.")
         if measure.expr is not None:
 
             def resolve(name: str) -> exp.Expr:
-                other = source.model.measures.get(name)
-                if other is None:
+                owner, dot, other_name = name.partition(".")
+                table, wanted = (owner, other_name) if dot else (alias, name)
+                owner_source = self.sources.get(table)
+                other = owner_source.model.measures.get(wanted) if owner_source else None
+                if owner_source is None or other is None:
                     raise ExpressionError(f"There is no measure called {name!r}.")
-                return self.measure_sql(source, other, (*stack, measure.name))
+                return self.measure_sql(block, owner_source, other, (*stack, key))
 
             return expressions.measure_expression(measure.expr, resolve)
         aggregate: exp.Expr
@@ -381,12 +494,19 @@ class _Compiler:
                 aggregate = AGGREGATES[str(measure.agg)](this=column)
         if measure.filter is None:
             return aggregate
-        # A conditional measure: agg(...) FILTER (WHERE condition).
+        # A conditional measure: agg(...) FILTER (WHERE condition). The condition may
+        # name columns of tables the block reaches many-to-one, as table.column.
+        related: dict[str, tuple[str, Sequence[str]]] = {}
+        for table in sorted(expressions.qualified_tables(measure.filter)):
+            if table in self.sources and table != alias and block.reaches(table):
+                self._join(block, table)
+                related[table] = (table, list(self.sources[table].columns))
         condition = expressions.filter_expression(
             measure.filter,
             alias,
             list(source.columns),
             {name: segment.filter for name, segment in source.model.segments.items()},
+            related,
         )
         return exp.Filter(this=aggregate, expression=exp.Where(this=condition))
 
@@ -453,85 +573,282 @@ class _Compiler:
             conditions.append(exp.LT(this=target.copy(), expression=_date(end + timedelta(days=1))))
         return conditions
 
-    def _filter(self, index: int, spec: Mapping[str, Any]) -> tuple[exp.Expr | None, bool]:
-        """Returns (condition, is_measure_filter)."""
-        path = f"/filters/{index}"
-        ref, op = str(spec["field"]), str(spec["op"])
-        name = ref.partition(".")[2]
-        is_measure = (
-            ref.partition(".")[0] == self.base.model.dataset and name in self.base.model.measures
-        )
-        if is_measure:
-            found_measure = self.measure(f"{path}/field", ref)
-            if found_measure is None:
-                return None, True
-            if op not in MEASURE_OPS:
-                self.problems.add(f"{path}/op", f"{op} cannot be used on a measure.")
-                return None, True
-            target, kind = self._measure_or_problem(path, *found_measure), "number"
-            if target is None:
-                return None, True
-        else:
-            found = self.dimension(f"{path}/field", ref)
-            if found is None:
-                return None, False
-            source, dim = found
-            target, kind = self._dimension_or_problem(f"{path}/field", source, dim), dim.type
-            if target is None:
-                return None, False
-
+    def _test(
+        self, path: str, spec: Mapping[str, Any], target: exp.Expr, kind: str
+    ) -> exp.Expr | None:
+        """The condition a filter puts on `target`, a dimension or measure of `kind`."""
+        op = str(spec["op"])
         if op in ("is_null", "is_not_null"):
             test: exp.Expr = exp.Is(this=target, expression=exp.null())
-            return (exp.Not(this=test) if op == "is_not_null" else test), is_measure
+            return exp.Not(this=test) if op == "is_not_null" else test
         if op == "in_range":
             if kind != "time":
                 self.problems.add(f"{path}/op", "in_range needs a time dimension.")
-                return None, is_measure
+                return None
             conditions = self._range(f"{path}/range", target, spec["range"])
-            return (exp.and_(*conditions) if conditions else exp.true()), is_measure
-
+            return exp.and_(*conditions) if conditions else exp.true()
         if op in TEXT_MATCH and kind != "string":
             self.problems.add(f"{path}/op", f"{op} needs a text dimension.")
-            return None, is_measure
+            return None
         raw = spec.get("values") or []
         values = [self._value(f"{path}/values/{i}", v, kind) for i, v in enumerate(raw)]
         if any(v is None for v in values):
-            return None, is_measure
+            return None
         literals = [v for v in values if v is not None]
         if op in COMPARISONS:
-            return COMPARISONS[op](this=target, expression=literals[0]), is_measure
+            return COMPARISONS[op](this=target, expression=literals[0])
         if op in ("in", "not_in"):
             test = exp.In(this=target, expressions=literals)
-            return (exp.Not(this=test) if op == "not_in" else test), is_measure
+            return exp.Not(this=test) if op == "not_in" else test
         if op == "between":
-            return exp.Between(this=target, low=literals[0], high=literals[1]), is_measure
+            return exp.Between(this=target, low=literals[0], high=literals[1])
         # Case-insensitive text match, with the value as a literal (no LIKE wildcards).
         haystack = exp.Lower(this=exp.Cast(this=target, to=exp.DataType.build("VARCHAR")))
         needle = exp.Lower(this=literals[0])
-        return exp.Anonymous(this=TEXT_MATCH[op], expressions=[haystack, needle]), is_measure
+        return exp.Anonymous(this=TEXT_MATCH[op], expressions=[haystack, needle])
 
-    def _dimension_or_problem(self, path: str, source: Source, dim: Dimension) -> exp.Expr | None:
+    def _dimension_or_problem(
+        self, path: str, source: Source, dim: Dimension, alias: str | None = None
+    ) -> exp.Expr | None:
         try:
-            return self.dimension_sql(source, dim)
+            return self.dimension_sql(source, dim, alias)
         except ExpressionError as exc:
             self.problems.add(path, f"Dimension {dim.name!r} has an invalid expression: {exc}")
             return None
 
-    def _measure_or_problem(self, path: str, source: Source, measure: Measure) -> exp.Expr | None:
+    def _measure_or_problem(
+        self, path: str, block: _Block, source: Source, measure: Measure
+    ) -> exp.Expr | None:
         try:
-            return self.measure_sql(source, measure)
+            return self.measure_sql(block, source, measure)
         except ExpressionError as exc:
             self.problems.add(path, f"Measure {measure.name!r} has an invalid expression: {exc}")
             return None
 
-    # ---- FROM ----------------------------------------------------------------------
+    def _aggregates(
+        self, path: str, source: Source, measure: Measure, stack: tuple[str, ...] = ()
+    ) -> list[tuple[str, Measure]]:
+        """The aggregates a measure is made of (itself, or those its formula uses, in
+        any table), each with its table."""
+        table = source.model.dataset
+        key = f"{table}.{measure.name}"
+        if key in stack:
+            self.problems.add(path, f"Measure {measure.name!r} refers to itself.")
+            return []
+        if measure.expr is None:
+            if measure.relationship and measure.relationship not in self.by_id:
+                self.problems.add(
+                    path,
+                    f"Measure {measure.name!r} names the relationship "
+                    f"{measure.relationship!r}, which does not exist.",
+                )
+                return []
+            return [(table, measure)]
+        found: list[tuple[str, Measure]] = []
+        for reference in expressions.measure_references(measure.expr):
+            owner, dot, name = reference.partition(".")
+            other_table, other_name = (owner, name) if dot else (table, reference)
+            other_source = self.sources.get(other_table)
+            other = other_source.model.measures.get(other_name) if other_source else None
+            if other_source is None or other is None:
+                self.problems.add(
+                    path, f"Measure {measure.name!r} uses {reference!r}, which does not exist."
+                )
+                continue
+            found += self._aggregates(path, other_source, other, (*stack, key))
+        return found
 
-    def _table(self, source: Source) -> exp.Expr:
-        """A dataset's snapshot, with its row-level security applied inside."""
+    # ---- reading tables ------------------------------------------------------------
+
+    def _read(self, source: Source, alias: str | None = None) -> exp.Expr:
+        """A table's rows as this person may see them, as a FROM item."""
         scan, bypassed = self.scan(source, self.user)
         if bypassed:
             self.rls_bypassed = True  # reported to the user, never silent
-        return scan.subquery(exp.to_identifier(source.model.dataset, quoted=True))
+        return scan.subquery(exp.to_identifier(alias or source.model.dataset, quoted=True))
+
+    def _alias(self) -> str:
+        self._aliases += 1
+        return f"_opsis_f{self._aliases}"
+
+    # ---- conditions ----------------------------------------------------------------
+
+    def _filter_condition(self, path: str, spec: Mapping[str, Any]) -> _Condition | None:
+        field_path = f"{path}/field"
+        ref = str(spec["field"])
+        found = self.dimension(field_path, ref)
+        if found is None:
+            return None
+        source, dim = found
+        table = source.model.dataset
+
+        def build(aliases: Mapping[str, str]) -> list[exp.Expr] | None:
+            target = self._dimension_or_problem(field_path, source, dim, aliases[table])
+            test = None if target is None else self._test(path, spec, target, dim.type)
+            return None if test is None else [test]
+
+        return _Condition(field_path, (ref,), (table,), build)
+
+    def _or_condition(self, path: str, spec: Mapping[str, Any]) -> _Condition | None:
+        alternatives: list[list[_Condition]] = []
+        for i, alternative in enumerate(spec["or"]):
+            options: list[_Condition] = []
+            for j, inner in enumerate(alternative):
+                inner_path = f"{path}/or/{i}/{j}"
+                if self._is_measure(str(inner["field"])):
+                    self.problems.add(
+                        f"{inner_path}/field", "Inside an `or` group, filter on dimensions only."
+                    )
+                    continue
+                made = self._filter_condition(inner_path, inner)
+                if made is not None:
+                    options.append(made)
+            if len(options) < len(alternative):
+                return None  # the problems are reported
+            alternatives.append(options)
+        everything = [option for options in alternatives for option in options]
+        tables = tuple(dict.fromkeys(t for option in everything for t in option.tables))
+        refs = tuple(dict.fromkeys(r for option in everything for r in option.refs))
+
+        def build(aliases: Mapping[str, str]) -> list[exp.Expr] | None:
+            parts: list[exp.Expr] = []
+            for options in alternatives:
+                built = [option.build(aliases) for option in options]
+                if any(b is None for b in built):
+                    return None
+                tests = [test for b in built if b is not None for test in b]
+                parts.append(exp.and_(*tests) if len(tests) > 1 else tests[0])
+            return [exp.Paren(this=exp.or_(*parts)) if len(parts) > 1 else parts[0]]
+
+        return _Condition(path, refs, tables, build)
+
+    def _time_condition(
+        self, spec: Mapping[str, Any], source: Source, dim: Dimension
+    ) -> _Condition:
+        table = source.model.dataset
+
+        def build(aliases: Mapping[str, str]) -> list[exp.Expr] | None:
+            target = self._dimension_or_problem("/timeDimension/field", source, dim, aliases[table])
+            if target is None:
+                return None
+            return self._range("/timeDimension/range", target, spec["range"])
+
+        return _Condition("/timeDimension/field", (str(spec["field"]),), (table,), build)
+
+    def _segment_condition(
+        self, path: str, ref: str, source: Source, segment: Segment
+    ) -> _Condition:
+        table = source.model.dataset
+
+        def build(aliases: Mapping[str, str]) -> list[exp.Expr] | None:
+            try:
+                condition = expressions.column_expression(
+                    segment.filter, aliases[table], list(source.columns)
+                )
+            except ExpressionError as exc:
+                self.problems.add(path, f"Segment {segment.name!r} has an invalid filter: {exc}")
+                return None
+            return [exp.Paren(this=condition)]
+
+        return _Condition(path, (ref,), (table,), build)
+
+    def _filtered_by(self, block: _Block) -> Reach:
+        """The tables whose filters reach the block's base, each with its path from
+        the base."""
+        if block.filtered_by is None:
+            turned = _turned(filter_steps(block.relationships))
+            block.filtered_by = shortest_paths(block.base, turned, blocked=self.restricted)
+        return block.filtered_by
+
+    def _place(self, block: _Block, conditions: Sequence[_Condition]) -> list[bool]:
+        """Add each condition to the block: on the joined tables when the base reaches
+        all of its tables many-to-one, or else in a semi-join on the one table it is on.
+        Returns, for each, False when it does not reach the block (a condition that
+        cannot be placed for another reason has a problem reported)."""
+        nodes: dict[str, _Node] = {}
+        roots: list[str] = []
+        reached: list[bool] = []
+        for condition in conditions:
+            reached.append(True)
+            if all(block.reaches(table) for table in condition.tables):
+                for table in condition.tables:
+                    self._join(block, table)
+                block.where.extend(condition.build({t: t for t in condition.tables}) or [])
+                continue
+            two_ways = next((t for t in condition.tables if t in block.reach.ambiguous), None)
+            if two_ways is not None:
+                self.problems.add(
+                    condition.path,
+                    self._two_ways(
+                        condition.refs[0], two_ways, block.base, *block.reach.ambiguous[two_ways]
+                    ),
+                )
+                continue
+            if len(condition.tables) > 1:
+                self.problems.add(
+                    condition.path,
+                    "The fields of an `or` group must all be in one table, or in tables "
+                    f"{block.base!r} reaches through many-to-one relationships.",
+                )
+                continue
+            table = condition.tables[0]
+            found = self._filtered_by(block)
+            if table in found.ambiguous:
+                one, other = found.ambiguous[table]
+                self.problems.add(
+                    condition.path,
+                    f"{condition.refs[0]!r} filters {block.base!r} along two paths as short as "
+                    f"each other ({_towards_base(one)}, and {_towards_base(other)}). Make one "
+                    "of the relationships inactive.",
+                )
+                continue
+            path = found.paths.get(table)
+            if path is None:
+                reached[-1] = False
+                continue
+            for step in path:
+                if step.end not in nodes:
+                    nodes[step.end] = _Node(step.end, self._alias(), step)
+                    parent = roots if step.start == block.base else nodes[step.start].children
+                    parent.append(step.end)
+            nodes[table].conditions.extend(condition.build({table: nodes[table].alias}) or [])
+        for table in roots:
+            block.where.append(self._exists(nodes, table, block.base))
+        return reached
+
+    def _exists(self, nodes: Mapping[str, _Node], table: str, outer: str) -> exp.Expr:
+        """`EXISTS (SELECT 1 FROM <table's rows> WHERE <it matches the outer row> AND
+        <its conditions> AND <the semi-joins of the tables that filter it>)`."""
+        node = nodes[table]
+        self._use(table)
+        conditions = [self._match(node.step, outer, node.alias), *node.conditions]
+        conditions += [self._exists(nodes, child, node.alias) for child in node.children]
+        rows = (
+            exp.select(exp.Literal.number(1))
+            .from_(self._read(self.sources[table], node.alias))
+            .where(exp.and_(*conditions))
+        )
+        return exp.Exists(this=rows)
+
+    def _unreached(self, condition: _Condition, blocks: Sequence[_Block]) -> str:
+        table, ref = condition.tables[0], condition.refs[0]
+        restricted = ""
+        for block in blocks:
+            free_filters = shortest_paths(block.base, _turned(filter_steps(block.relationships)))
+            free_groups = shortest_paths(block.base, grouping_steps(block.relationships))
+            if table in free_filters.paths or table in free_groups.paths:
+                restricted = " (a path never goes through a restricted dataset)"
+        if len(blocks) == 1:
+            base = blocks[0].base
+            return (
+                f"{ref!r} does not filter {base!r}: no path leads from {table!r} to {base!r} "
+                f"{FILTER_DIRECTION}{restricted}."
+            )
+        names = ", ".join(dict.fromkeys(repr(b.base) for b in blocks))
+        return (
+            f"{ref!r} filters none of the measures' tables ({names}): no path leads from "
+            f"{table!r} to any of them {FILTER_DIRECTION}{restricted}."
+        )
 
     # ---- the whole query -----------------------------------------------------------
 
@@ -539,32 +856,14 @@ class _Compiler:
         self, max_rows: int, timeout_s: float
     ) -> tuple[CompiledQuery, tuple[ResultColumn, ...]]:
         query = self.query
-        projections: list[exp.Expr] = []
-        columns: list[ResultColumn] = []
-        group_count = 0
 
-        def select(ref: str, expression: exp.Expr, column: ResultColumn) -> None:
-            if any(c.name == ref for c in columns):
-                self.problems.add("/", f"{ref!r} is selected more than once.")
-                return
-            projections.append(exp.alias_(expression, ref, quoted=True))
-            columns.append(column)
-
+        groups: list[_Group] = []
         for index, ref in enumerate(query.get("dimensions") or []):
-            found = self.dimension(f"/dimensions/{index}", ref)
-            if found is None:
-                continue
-            source, dim = found
-            sql = self._dimension_or_problem(f"/dimensions/{index}", source, dim)
-            if sql is not None:
-                select(
-                    ref,
-                    sql,
-                    ResultColumn(ref, _dimension_type(source, dim), "dimension", label=dim.label),
-                )
-                group_count += 1
-
-        where: list[exp.Expr] = []
+            path = f"/dimensions/{index}"
+            found = self.dimension(path, ref)
+            if found is not None:
+                groups.append(_Group(ref, path, *found))
+        conditions: list[_Condition] = []
         time_spec = query.get("timeDimension")
         if time_spec:
             ref = str(time_spec["field"])
@@ -572,76 +871,159 @@ class _Compiler:
             if found is not None:
                 source, dim = found
                 grain = time_spec.get("grain")
-                sql = self._dimension_or_problem("/timeDimension/field", source, dim)
                 if dim.type != "time":
                     self.problems.add("/timeDimension/field", f"{ref!r} is not a time dimension.")
-                elif sql is not None:
+                else:
                     if grain and grain not in dim.grains:
                         self.problems.add(
                             "/timeDimension/grain",
                             f"{ref!r} allows these grains: {', '.join(dim.grains)}.",
                         )
                     elif grain:
-                        select(
-                            ref,
-                            grain_expression(sql, grain, self.calendar),
-                            ResultColumn(
-                                ref, ColumnType.DATE, "time", label=dim.label, grain=grain
-                            ),
-                        )
-                        group_count += 1
+                        groups.append(_Group(ref, "/timeDimension/field", source, dim, grain))
                     if "range" in time_spec:
-                        where.extend(self._range("/timeDimension/range", sql, time_spec["range"]))
+                        conditions.append(self._time_condition(time_spec, source, dim))
 
+        selected: list[tuple[str, str, Source, Measure]] = []
         for index, ref in enumerate(query.get("measures") or []):
-            found_measure = self.measure(f"/measures/{index}", ref)
-            if found_measure is None:
-                continue
-            source, measure = found_measure
-            sql = self._measure_or_problem(f"/measures/{index}", source, measure)
-            if sql is not None:
-                select(
-                    ref,
-                    sql,
-                    ResultColumn(
-                        ref,
-                        _measure_type(source, measure),
-                        "measure",
-                        format=measure.format,
-                        label=measure.label,
-                    ),
-                )
-
-        having: list[exp.Expr] = []
+            path = f"/measures/{index}"
+            found_measure = self.measure(path, ref)
+            if found_measure is not None:
+                selected.append((ref, path, *found_measure))
+        measure_filters: list[tuple[int, Mapping[str, Any], Source, Measure]] = []
         for index, spec in enumerate(query.get("filters") or []):
-            condition, is_measure = self._filter(index, spec)
-            if condition is not None:
-                (having if is_measure else where).append(condition)
-
+            path = f"/filters/{index}"
+            if "or" in spec:
+                made = self._or_condition(path, spec)
+            elif self._is_measure(str(spec["field"])):
+                found_measure = self.measure(f"{path}/field", str(spec["field"]))
+                if found_measure is None:
+                    continue
+                if str(spec["op"]) not in MEASURE_OPS:
+                    self.problems.add(f"{path}/op", f"{spec['op']} cannot be used on a measure.")
+                else:
+                    measure_filters.append((index, spec, *found_measure))
+                continue
+            else:
+                made = self._filter_condition(path, spec)
+            if made is not None:
+                conditions.append(made)
         for index, ref in enumerate(query.get("segments") or []):
             path = f"/segments/{index}"
-            found_source = self._source(path, ref)
-            if found_source is None:
+            found_field = self._field(path, ref)
+            if found_field is None:
                 continue
-            source, name = found_source
+            source, name = found_field
             segment = source.model.segments.get(name)
             if segment is None:
                 self.problems.add(path, f"There is no segment called {ref!r}.")
                 continue
-            try:
-                where.append(
-                    exp.Paren(
-                        this=expressions.column_expression(
-                            segment.filter, source.model.dataset, list(source.columns)
-                        )
-                    )
-                )
-            except ExpressionError as exc:
-                self.problems.add(path, f"Segment {name!r} has an invalid filter: {exc}")
+            conditions.append(self._segment_condition(path, ref, source, segment))
 
+        # One block for each table (and relationship named) whose aggregates are used.
+        keys: list[tuple[str, str | None]] = []
+        wanted = [(path, source, measure) for _, path, source, measure in selected] + [
+            (f"/filters/{index}", source, measure) for index, _, source, measure in measure_filters
+        ]
+        for path, source, measure in wanted:
+            for table, aggregate in self._aggregates(path, source, measure):
+                if (table, aggregate.relationship) not in keys:
+                    keys.append((table, aggregate.relationship))
+        if not keys:
+            asked = bool(query.get("measures")) or any(
+                "field" in spec and self._is_measure(str(spec["field"]))
+                for spec in query.get("filters") or []
+            )
+            base = self.named or (None if asked else self._infer_base(groups))
+            if base is not None:
+                keys.append((base, None))
+        if not keys:
+            if not self.problems.items:
+                self.problems.add("/", "Select at least one dimension, measure or time grain.")
+            self.problems.raise_if_any()
+
+        blocks = [self._block(table, override) for table, override in keys]
+        for block in blocks:
+            self._use(block.base)
+        for block in blocks:
+            for group in groups:
+                if block.reaches(group.table):
+                    self._join(block, group.table)
+                else:
+                    self.problems.add(group.path, self._not_grouped(block, group, len(blocks) > 1))
+        placed = [self._place(block, conditions) for block in blocks]
+        for index, condition in enumerate(conditions):
+            if not any(reached[index] for reached in placed):
+                self.problems.add(condition.path, self._unreached(condition, blocks))
+
+        if len(blocks) == 1:
+            return self._single(blocks[0], groups, selected, measure_filters, max_rows, timeout_s)
+        return self._several(blocks, groups, selected, measure_filters, max_rows, timeout_s)
+
+    def _infer_base(self, groups: Sequence[_Group]) -> str | None:
+        """With no measures and no `dataset`: the first grouped field's table that
+        reaches all the others."""
+        tables = list(dict.fromkeys(group.table for group in groups))
+        if not tables:
+            return None
+        steps = grouping_steps(self.relationships)
+        for candidate in tables:
+            reach = shortest_paths(candidate, steps, blocked=self.restricted)
+            if all(table == candidate or table in reach.paths for table in tables):
+                return candidate
+        self.problems.add(
+            "/dimensions",
+            f"None of {', '.join(repr(t) for t in tables)} reaches all the others through "
+            "many-to-one relationships, so there is no table to list them from. Add a "
+            "measure, or name the table to list them from in `dataset`.",
+        )
+        return None
+
+    def _group_projections(
+        self, block: _Block, groups: Sequence[_Group], positional: bool
+    ) -> tuple[list[exp.Expr], list[ResultColumn]]:
+        projections: list[exp.Expr] = []
+        columns: list[ResultColumn] = []
+        for index, group in enumerate(groups):
+            if not block.reaches(group.table):
+                continue  # reported
+            sql = self._dimension_or_problem(group.path, group.source, group.dimension)
+            if sql is None:
+                continue
+            if group.grain:
+                sql = grain_expression(sql, group.grain, self.calendar)
+                column = ResultColumn(
+                    group.ref, ColumnType.DATE, "time", label=group.dimension.label,
+                    grain=group.grain,
+                )  # fmt: skip
+            else:
+                column = ResultColumn(
+                    group.ref,
+                    _dimension_type(group.source, group.dimension),
+                    "dimension",
+                    label=group.dimension.label,
+                )
+            alias = f"_g{index}" if positional else group.ref
+            projections.append(exp.alias_(sql, alias, quoted=True))
+            columns.append(column)
+        return projections, columns
+
+    def _from(self, block: _Block, projections: Sequence[exp.Expr]) -> exp.Select:
+        statement = exp.select(*projections).from_(self._read(self.sources[block.base]))
+        for table, (step, kind) in block.joins.items():
+            statement = statement.join(
+                self._read(self.sources[table]),
+                on=self._match(step, step.start, step.end),
+                join_type=kind,
+            )
+        if block.where:
+            statement = statement.where(exp.and_(*block.where))
+        return statement
+
+    def _order(self, columns: Sequence[ResultColumn]) -> list[exp.Expr]:
         selected = {c.name for c in columns}
         order: list[exp.Expr] = []
-        for index, spec in enumerate(query.get("sort") or []):
+        for index, spec in enumerate(self.query.get("sort") or []):
             if spec["field"] not in selected:
                 self.problems.add(
                     f"/sort/{index}/field", "Sort by a field that is selected in the query."
@@ -664,41 +1046,200 @@ class _Compiler:
                         nulls_first=False,
                     )
                 )
+        return order
 
-        if not projections and not self.problems.items:
-            self.problems.add("/", "Select at least one dimension, measure or time grain.")
-        self.problems.raise_if_any()
+    def _repeated(self, columns: Sequence[ResultColumn]) -> None:
+        names = [c.name for c in columns]
+        for name in dict.fromkeys(names):
+            if names.count(name) > 1:
+                self.problems.add("/", f"{name!r} is selected more than once.")
 
-        limit = min(int(query.get("limit") or DEFAULT_LIMIT), max_rows)
-        statement = exp.select(*projections).from_(self._table(self.base))
-        for name in self.used[1:]:
-            start, join = self.hops[name]
-            condition = exp.and_(
-                *[
-                    exp.EQ(this=_col(start, local), expression=_col(name, remote))
-                    for local, remote in join.on
-                ]
-            )
-            statement = statement.join(
-                self._table(self.sources[name]), on=condition, join_type=join.type
-            )
-        if where:
-            statement = statement.where(exp.and_(*where))
-        if group_count:
-            statement = statement.group_by(*[exp.Literal.number(i + 1) for i in range(group_count)])
-        if having:
-            statement = statement.having(exp.and_(*having))
+    def _finish(
+        self,
+        statement: exp.Select,
+        order: list[exp.Expr],
+        columns: list[ResultColumn],
+        timeout_s: float,
+        max_rows: int,
+    ) -> tuple[CompiledQuery, tuple[ResultColumn, ...]]:
+        limit = min(int(self.query.get("limit") or DEFAULT_LIMIT), max_rows)
         if order:
             statement = statement.order_by(*order)
         # One extra row tells the engine whether the result was cut off.
         statement = statement.limit(limit + 1)
-        if query.get("offset"):
-            statement = statement.offset(int(query["offset"]))
-
+        if self.query.get("offset"):
+            statement = statement.offset(int(self.query["offset"]))
         text = statement.sql(dialect=DIALECT, comments=False)
         tables = tuple(self.sources[name].table for name in self.used)
         compiled = CompiledQuery(text, (), tables, limit, timeout_s, self.rls_bypassed)
         return compiled, tuple(columns)
+
+    def _single(
+        self,
+        block: _Block,
+        groups: Sequence[_Group],
+        selected: Sequence[tuple[str, str, Source, Measure]],
+        measure_filters: Sequence[tuple[int, Mapping[str, Any], Source, Measure]],
+        max_rows: int,
+        timeout_s: float,
+    ) -> tuple[CompiledQuery, tuple[ResultColumn, ...]]:
+        projections, columns = self._group_projections(block, groups, positional=False)
+        group_count = len(projections)
+        for ref, path, source, measure in selected:
+            sql = self._measure_or_problem(path, block, source, measure)
+            if sql is not None:
+                projections.append(exp.alias_(sql, ref, quoted=True))
+                columns.append(_measure_column(ref, source, measure))
+        self._repeated(columns)
+        having: list[exp.Expr] = []
+        for index, spec, source, measure in measure_filters:
+            path = f"/filters/{index}"
+            target = self._measure_or_problem(path, block, source, measure)
+            test = None if target is None else self._test(path, spec, target, "number")
+            if test is not None:
+                having.append(test)
+        order = self._order(columns)
+        if not projections and not self.problems.items:
+            self.problems.add("/", "Select at least one dimension, measure or time grain.")
+        self.problems.raise_if_any()
+
+        statement = self._from(block, projections)
+        if group_count:
+            statement = statement.group_by(*[exp.Literal.number(i + 1) for i in range(group_count)])
+        if having:
+            statement = statement.having(exp.and_(*having))
+        return self._finish(statement, order, columns, timeout_s, max_rows)
+
+    def _several(
+        self,
+        blocks: Sequence[_Block],
+        groups: Sequence[_Group],
+        selected: Sequence[tuple[str, str, Source, Measure]],
+        measure_filters: Sequence[tuple[int, Mapping[str, Any], Source, Measure]],
+        max_rows: int,
+        timeout_s: float,
+    ) -> tuple[CompiledQuery, tuple[ResultColumn, ...]]:
+        """Each block grouped by the same fields, as a CTE, and the CTEs joined on
+        them (null-safe, so an empty field value matches)."""
+        names = [f"_b{i + 1}" for i in range(len(blocks))]
+        by_key = {(b.base, b.override): (b, n) for b, n in zip(blocks, names, strict=True)}
+        wanted = [(path, source, measure) for _, path, source, measure in selected] + [
+            (f"/filters/{index}", source, measure) for index, _, source, measure in measure_filters
+        ]
+        ctes: list[tuple[str, exp.Select]] = []
+        columns: list[ResultColumn] = []
+        fields: list[str] = []
+        for block, name in zip(blocks, names, strict=True):
+            aggregates: list[exp.Expr] = []
+            for path, source, measure in wanted:
+                for table, aggregate in self._aggregates(path, source, measure):
+                    key = (table, aggregate.name)
+                    if (table, aggregate.relationship) != (block.base, block.override):
+                        continue
+                    if key in block.aggregates:
+                        continue
+                    sql = self._measure_or_problem(path, block, self.sources[table], aggregate)
+                    if sql is None:
+                        continue
+                    block.aggregates[key] = f"_m{len(block.aggregates)}"
+                    aggregates.append(exp.alias_(sql, block.aggregates[key], quoted=True))
+            projections, block_columns = self._group_projections(block, groups, positional=True)
+            if not ctes:
+                columns, fields = block_columns, [p.alias for p in projections]
+            statement = self._from(block, [*projections, *aggregates])
+            if projections:
+                statement = statement.group_by(
+                    *[exp.Literal.number(i + 1) for i in range(len(projections))]
+                )
+            ctes.append((name, statement))
+
+        def value(
+            path: str, source: Source, measure: Measure, stack: tuple[str, ...] = ()
+        ) -> exp.Expr | None:
+            """A measure from the blocks' aggregates."""
+            table = source.model.dataset
+            key = f"{table}.{measure.name}"
+            if key in stack:
+                return None  # reported by _aggregates
+            if measure.expr is None:
+                found = by_key.get((table, measure.relationship))
+                if found is None or (table, measure.name) not in found[0].aggregates:
+                    return None
+                return _col(found[1], found[0].aggregates[(table, measure.name)])
+
+            def resolve(ref: str) -> exp.Expr:
+                owner, dot, other_name = ref.partition(".")
+                other_table, wanted_name = (owner, other_name) if dot else (table, ref)
+                other_source = self.sources.get(other_table)
+                other = other_source.model.measures.get(wanted_name) if other_source else None
+                result = None
+                if other_source is not None and other is not None:
+                    result = value(path, other_source, other, (*stack, key))
+                if result is None:
+                    raise ExpressionError(f"{ref!r} could not be computed.")
+                return result
+
+            try:
+                return expressions.measure_expression(measure.expr, resolve)
+            except ExpressionError as exc:
+                self.problems.add(
+                    path, f"Measure {measure.name!r} has an invalid expression: {exc}"
+                )
+                return None
+
+        def first_of(column: str, among: Sequence[str]) -> exp.Expr:
+            values = [_col(name, column) for name in among]
+            return values[0] if len(values) == 1 else exp.Coalesce(
+                this=values[0], expressions=values[1:]
+            )  # fmt: skip
+
+        projections = [
+            exp.alias_(first_of(column, names), columns[position].name, quoted=True)
+            for position, column in enumerate(fields)
+        ]
+        for ref, path, source, measure in selected:
+            sql = value(path, source, measure)
+            if sql is not None:
+                projections.append(exp.alias_(sql, ref, quoted=True))
+                columns.append(_measure_column(ref, source, measure))
+        self._repeated(columns)
+        where: list[exp.Expr] = []
+        for index, spec, source, measure in measure_filters:
+            path = f"/filters/{index}"
+            target = value(path, source, measure)
+            test = None if target is None else self._test(path, spec, target, "number")
+            if test is not None:
+                where.append(test)
+        order = self._order(columns)
+        self.problems.raise_if_any()
+
+        statement = exp.select(*projections).from_(exp.table_(names[0], quoted=True))
+        for position in range(1, len(names)):
+            right = exp.table_(names[position], quoted=True)
+            if fields:
+                on = exp.and_(
+                    *[
+                        exp.NullSafeEQ(
+                            this=first_of(column, names[:position]),
+                            expression=_col(names[position], column),
+                        )
+                        for column in fields
+                    ]
+                )
+                statement = statement.join(right, on=on, join_type="full outer")
+            else:
+                statement = statement.join(right, join_type="cross")
+        for name, cte in ctes:
+            statement = statement.with_(exp.to_identifier(name, quoted=True), as_=cte)
+        if where:
+            statement = statement.where(exp.and_(*where))
+        return self._finish(statement, order, columns, timeout_s, max_rows)
+
+
+def _measure_column(ref: str, source: Source, measure: Measure) -> ResultColumn:
+    return ResultColumn(
+        ref, _measure_type(source, measure), "measure", format=measure.format, label=measure.label
+    )
 
 
 def _dimension_type(source: Source, dim: Dimension) -> ColumnType:
@@ -719,55 +1260,11 @@ def _measure_type(source: Source, measure: Measure) -> ColumnType:
     return ColumnType.FLOAT
 
 
-def _snapshot_scan(source: Source) -> exp.Select:
-    """`SELECT * FROM <snapshot>`: every row, with no row-level security."""
-    scan = sqlglot.parse_one("SELECT * FROM read_parquet('x')", read=DIALECT)
-    literal, table = scan.find(exp.Literal), scan.find(exp.Table)
-    assert isinstance(scan, exp.Select) and literal is not None and table is not None
-    # The path is ours (a snapshot directory), and still goes in as a literal.
-    literal.replace(exp.Literal.string(f"{source.table.path}/part-*.parquet"))
-    table.set("alias", exp.TableAlias(this=exp.to_identifier(source.model.dataset, quoted=True)))
-    return scan
-
-
-def secured_scan(source: Source, user: UserContext) -> tuple[exp.Select, bool]:
-    """`SELECT * FROM <snapshot> WHERE <row-level security>` for one dataset.
-
-    This is the only way rows are read from a snapshot on behalf of a user:
-    semantic queries build on it, and so do previews and column profiles, so
-    nothing can show a row that a rule hides. The second value is True when a
-    rule exists but does not apply to this user's role.
-    """
-    alias = source.model.dataset
-    scan = _snapshot_scan(source)
-    conditions = []
-    bypassed = False
-    for index, rule in enumerate(source.model.rls):
-        if user.role not in rule.roles and user.may_be_exempt:
-            bypassed = True
-            continue
-        try:
-            conditions.append(
-                expressions.rls_expression(rule.filter, alias, list(source.columns), user.values())
-            )
-        except ExpressionError as exc:
-            # A broken rule must never fail open.
-            raise ApiError(
-                409,
-                "invalid_model",
-                f"A row-level security rule of {alias!r} is invalid, so its data cannot be "
-                f"queried until the model is fixed (rule {index + 1}: {exc})",
-            ) from exc
-    if conditions:
-        scan = scan.where(exp.and_(*[exp.Paren(this=c) for c in conditions]))
-    return scan, bypassed
-
-
 def repeated_keys(source: Source, columns: Sequence[str], examples: int) -> exp.Select:
-    """The values of `columns` (a join's key on this dataset) that are on more than
-    one row, the most repeated first. Each result row holds the key's values, how
+    """The values of `columns` (a relationship's key on its one side) that are on more
+    than one row, the most repeated first. Each result row holds the key's values, how
     many rows have them, and how many such values there are in all. A row with an
-    empty key column matches nothing in a join, so it is left out.
+    empty key column matches nothing, so it is left out.
 
     It reads every row, whoever asks: the caller shows the values only to people
     who may see all of the dataset (see services.model_warnings).
@@ -781,7 +1278,7 @@ def repeated_keys(source: Source, columns: Sequence[str], examples: int) -> exp.
             # A window runs after HAVING, so this counts the repeated values.
             exp.alias_(exp.Window(this=rows.copy()), "_opsis_values", quoted=True),
         )
-        .from_(_snapshot_scan(source).subquery(exp.to_identifier("keys", quoted=True)))
+        .from_(snapshot_scan(source).subquery(exp.to_identifier("keys", quoted=True)))
         .where(
             exp.and_(
                 *[exp.Not(this=exp.Is(this=key.copy(), expression=exp.null())) for key in keys]
@@ -799,7 +1296,7 @@ def repeated_keys(source: Source, columns: Sequence[str], examples: int) -> exp.
 
 def compile_query(
     query: Mapping[str, Any],
-    sources: Mapping[str, Source],
+    workspace: Workspace | Mapping[str, Source],
     user: UserContext,
     calendar: CalendarConfig,
     today: date,
@@ -810,6 +1307,10 @@ def compile_query(
 ) -> tuple[CompiledQuery, tuple[ResultColumn, ...]]:
     """Compile a schema-valid semantic query. Raises ApiError(422) with paths on problems.
 
-    `scan` reads each dataset's rows for the user. The default, secured_scan, applies
-    the dataset's own row-level security rules, as v1 does."""
-    return _Compiler(query, sources, user, calendar, today, scan).compile(max_rows, timeout_s)
+    `workspace` holds the workspace model's tables with data and its relationships. A
+    plain mapping of sources is read as v1 models, whose joins become relationships by
+    the migration's rules. `scan` reads each table for the person: the default applies
+    R1 and R2 (`Security.scan`)."""
+    if not isinstance(workspace, Workspace):
+        workspace = Workspace.from_v1(workspace)
+    return _Compiler(query, workspace, user, calendar, today, scan).compile(max_rows, timeout_s)

@@ -8,10 +8,10 @@ from typing import Any
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from opsis.db.models import AuditLog, SemanticModel
+from opsis.db.models import AuditLog
 from opsis.services import models
 from opsis.settings import Settings
 from tests.test_ingestion import connect, make_dataset, ok, refresh, run_jobs, upload
@@ -102,13 +102,14 @@ def as_dicts(result: dict[str, Any]) -> list[dict[str, Any]]:
     return [dict(zip(names, row, strict=True)) for row in result["rows"]]
 
 
-def test_starter_models_are_created_with_the_first_refresh(
+def test_starter_tables_are_generated_from_the_columns(
     client_for: ClientFor, source: dict[str, Any]
 ) -> None:
     client = client_for()
     load(client, source)
     listed = {m["dataset"]: m for m in ok(client.get("/api/models"))}
-    assert listed["gifts"]["saved"] and listed["gifts"]["isStarter"]
+    # Nothing is written: a table nobody edited is generated when it is read (V2).
+    assert listed["gifts"]["saved"] is False and listed["gifts"]["isStarter"]
     assert listed["gifts"]["dimensions"] == 6 and listed["gifts"]["measures"] == 2
 
     model = ok(client.get("/api/models/gifts"))
@@ -148,22 +149,24 @@ def test_starter_models_are_created_with_the_first_refresh(
     assert "email" in ok(client.get("/api/models/donors/starter"))["definition"]["dimensions"]
 
 
-def test_datasets_refreshed_before_models_existed_still_work(
-    client_for: ClientFor, source: dict[str, Any], db: Session
+def test_a_starter_saved_unchanged_stays_a_starter_and_an_edit_is_written(
+    client_for: ClientFor, source: dict[str, Any]
 ) -> None:
     client = client_for()
     load(client, source)
-    db.execute(delete(SemanticModel))  # as after upgrading from a version without models
-    db.commit()
-
     listed = {m["dataset"]: m for m in ok(client.get("/api/models"))}
     assert listed["gifts"]["saved"] is False and listed["gifts"]["isStarter"] is True
     assert (listed["gifts"]["dimensions"], listed["gifts"]["measures"]) == (6, 2)
     model = ok(client.get("/api/models/gifts"))
     assert model["saved"] is False and "total_amount" in model["definition"]["measures"]
     assert query(client, {"dataset": "gifts", "measures": ["gifts.row_count"]})["rows"] == [[2000]]
-    # Saving it makes it a normal, edited model.
-    assert ok(client.put("/api/models/gifts", json={"yaml": model["yaml"]}))["saved"] is True
+    # Saving it as it is writes nothing (it keeps following the columns); an edit is
+    # written, and from then on a refresh leaves it alone.
+    unchanged = ok(client.put("/api/models/gifts", json={"yaml": model["yaml"]}))
+    assert (unchanged["saved"], unchanged["isStarter"], unchanged["version"]) == (False, True, 0)
+    labelled = {**model["definition"], "label": "All gifts"}
+    edited = ok(client.put("/api/models/gifts", json={"definition": labelled}))
+    assert (edited["saved"], edited["isStarter"], edited["version"]) == (True, False, 1)
 
 
 def test_query_results_match_hand_written_sql(
@@ -381,9 +384,10 @@ def test_model_yaml_round_trip_and_validation(
     # Importing the export changes nothing.
     again = ok(client.put("/api/models/gifts", json={"yaml": exported.text}))
     assert models.from_yaml(again["yaml"]) == models.from_yaml(MODEL_YAML)
+    # Four saves, and the last changed nothing, so wrote no version and no audit row.
     assert (
         db.scalars(select(AuditLog.action).where(AuditLog.action == "model.updated")).all()
-        == ["model.updated"] * 4
+        == ["model.updated"] * 3
     )
 
     bad = MODEL_YAML.replace("column: amount", "column: Amount").replace(

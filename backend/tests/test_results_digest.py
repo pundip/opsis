@@ -1,10 +1,14 @@
-"""The upgrade check for v2 (`python -m opsis results-digest`, V2_DESIGN section 1.4):
-what every dashboard shows each viewer now, and who will see fewer rows once
-row-level security travels through relationships (rule R2 of ADR-032).
+"""The results check (`python -m opsis results-digest`, V2_DESIGN section 1.4), after
+the workspace model's migration: what every dashboard shows each viewer, and with
+`--compare`, every result that changed since an earlier digest, and whether the
+upgrade report made before the migration predicted it.
 
-The fixtures cover every v1 join pattern: direct, two steps, inner, one_to_many
-declared, a restricted dataset in between, and two ways to one dataset; plus loops,
-admins, share links, drafts, --compare, and that the check changes nothing."""
+The fixtures cover every v1 join pattern, now relationships: direct, two steps,
+inner, one_to_many declared, a restricted dataset in between, and two ways to one
+dataset. Each checks that people now see what the upgrade report predicted (row-level
+security travels through relationships, rule R2 of ADR-032), against SQL on the
+source. Plus loops, admins, share links, drafts, --compare, and that the check
+changes nothing."""
 
 from __future__ import annotations
 
@@ -20,7 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from opsis import __main__ as cli
-from opsis.db.models import AuditLog, Dashboard, DashboardVersion, SemanticModel, ShareLink
+from opsis.db.models import AuditLog, Dashboard, DashboardVersion, ShareLink, WorkspaceModelVersion
 from opsis.semantic import relationships as rels
 from opsis.semantic.model import parse_model
 from opsis.services import demo, results_digest
@@ -179,6 +183,8 @@ class World:
         return f"user:{ok(made, 201)['user']['id']}"
 
     def models(self, **definitions: dict[str, Any]) -> None:
+        """Written through the v1 routes, one table at a time, as a migrated model is:
+        each join becomes a relationship by the migration's rules."""
         for dataset, definition in definitions.items():
             ok(self.admin.put(f"/api/models/{dataset}", json={"definition": definition}))
 
@@ -223,10 +229,6 @@ def total(outcome: dict[str, Any]) -> float:
     return float(outcome["totals"]["gifts.row_count"])
 
 
-def changed_viewers(found: dict[str, Any]) -> set[str]:
-    return {e["viewer"] for e in found["items"] if not results_digest.same(e["now"], e["after"])}
-
-
 @pytest.fixture
 def world(client_for: ClientFor, source: dict[str, Any], db: Session) -> World:  # noqa: F811
     return World(client_for, source, db)
@@ -240,40 +242,22 @@ def test_direct_a_rule_on_donors_hides_other_donors_gifts(world: World) -> None:
     world.dashboard(KPI, BY_TIER, NOTE)
     found = world.digest()
 
+    # As the upgrade report predicted: gifts of other donors, and of unknown ones, are gone.
     kpi = entry(found, "v_gifts", world.ann)
-    assert total(kpi["now"]) == world.count(ALL) == 2000  # v1: the rule does not reach gifts
-    assert total(kpi["after"]) == world.count(VIC_DONORS)  # and gifts of unknown donors go too
+    assert total(kpi["now"]) == world.count(VIC_DONORS) < world.count(ALL)
     by_tier = entry(found, "v_by_tier", world.ann)
-    # v1 shows the other gifts under an empty tier; after the upgrade they are gone.
-    assert (by_tier["now"]["rows"], by_tier["after"]["rows"]) == (3, 2)
-    assert total(by_tier["now"]) == 2000 and total(by_tier["after"]) == world.count(VIC_DONORS)
+    # v1 showed the other gifts under an empty tier; now there is no such row.
+    assert by_tier["now"]["rows"] == 2 and total(by_tier["now"]) == world.count(VIC_DONORS)
     assert not any(e["item"] == "v_note" for e in found["items"])  # text shows no data
-    # Admins are exempt, so nothing changes for them.
-    assert changed_viewers(found) == {world.ann}
-    assert results_digest.same(
-        entry(found, "v_gifts", "admin")["now"], entry(found, "v_gifts", "admin")["after"]
-    )
+    # Admins are exempt.
+    assert total(entry(found, "v_gifts", "admin")["now"]) == world.count(ALL) == 2000
 
-    [table] = [t for t in found["tables"] if t["viewer"] == world.ann and t["table"] == "gifts"]
-    assert (table["now"], table["after"], table["by"]) == (
-        2000,
-        world.count(VIC_DONORS),
-        ["donors"],
-    )
     text = results_digest.report(found)
-    label = found["viewers"][world.ann]
-    assert (
-        f"**1 of {len(found['viewers'])} viewers will see fewer rows, in 2 items of 1 dashboards.**"
-        in text
-    )
-    assert (
-        f"- **{label}**\n  - kpi v_gifts: 1 rows, with other values; gifts.row_count 2,000, then {world.count(VIC_DONORS):,}"
-        in text
-    )
-    assert "  - bar v_by_tier: 3 rows, then 2;" in text
-    assert f"| {label} | gifts | 2,000 | {world.count(VIC_DONORS):,} | donors |" in text
-    assert "- gifts (donor_id) to donors (id): active" in text
-    assert "## To resolve" not in text and "## Not checked" not in text
+    assert text.startswith("# Results digest\n")
+    assert "Recorded 1 dashboard at their default filters, as an admin" in text
+    assert "2 items that show data, in 1 dashboard version, " in text
+    assert "no item that shows data" not in text
+    assert "## Not checked" not in text
 
 
 def test_two_steps_a_rule_on_regions_reaches_gifts_through_donors(world: World) -> None:
@@ -284,20 +268,11 @@ def test_two_steps_a_rule_on_regions_reaches_gifts_through_donors(world: World) 
     )
     world.dashboard(KPI, BY_TIER)
     found = world.digest()
-    assert total(entry(found, "v_gifts", world.ann)["after"]) == world.count(VIC_DONORS)
-    counts = {
-        t["table"]: (t["now"], t["after"], t["by"])
-        for t in found["tables"]
-        if t["viewer"] == world.ann
-    }
-    vic_donors = world.count("SELECT count(*) FROM src.donors WHERE region = 'VIC'")
-    assert counts == {
-        "donors": (40, vic_donors, ["regions"]),
-        "gifts": (2000, world.count(VIC_DONORS), ["regions"]),
-    }
+    assert total(entry(found, "v_gifts", world.ann)["now"]) == world.count(VIC_DONORS)
+    assert total(entry(found, "v_by_tier", world.ann)["now"]) == world.count(VIC_DONORS)
 
 
-def test_inner_a_query_that_already_joins_does_not_change(world: World) -> None:
+def test_inner_a_query_that_already_joined_and_one_that_did_not(world: World) -> None:
     inner = {**TO_DONORS, "type": "inner"}
     world.models(
         gifts=model("fund", "region", joins=[inner]),
@@ -305,27 +280,22 @@ def test_inner_a_query_that_already_joins_does_not_change(world: World) -> None:
     )
     world.dashboard(KPI, BY_TIER)
     found = world.digest()
-    # v1's inner join with the donors rule already hid the other donors' gifts ...
-    by_tier = entry(found, "v_by_tier", world.ann)
-    assert results_digest.same(by_tier["now"], by_tier["after"])
-    assert total(by_tier["now"]) == world.count(VIC_DONORS)
-    # ... but a query of gifts alone did not join, and changes.
-    kpi = entry(found, "v_gifts", world.ann)
-    assert (total(kpi["now"]), total(kpi["after"])) == (2000, world.count(VIC_DONORS))
-    assert "bar v_by_tier" not in results_digest.report(found)
+    # v1's inner join with the donors rule already hid the other donors' gifts, and a
+    # query of gifts alone (which v1 did not join) now hides them too.
+    for item in ("v_by_tier", "v_gifts"):
+        assert total(entry(found, item, world.ann)["now"]) == world.count(VIC_DONORS)
 
 
-def test_one_to_many_declared_becomes_inactive_and_changes_nothing(world: World) -> None:
+def test_one_to_many_declared_becomes_inactive_and_carries_nothing(world: World) -> None:
     back = {"to": "gifts", "on": {"id": "donor_id"}, "relationship": "one_to_many"}
     world.models(
         gifts=model("fund", "region"), donors=model("tier", "region", joins=[back], rls=DONORS_RULE)
     )
+    relationships = ok(world.admin.get("/api/model"))["document"]["relationships"]
+    assert relationships["gifts__donors"]["active"] is False
     world.dashboard(KPI)
     found = world.digest()
-    assert changed_viewers(found) == set() and found["tables"] == []
-    text = results_digest.report(found)
-    assert "**Nobody will see fewer rows.**" in text
-    assert "- gifts (donor_id) to donors (id): inactive (carries no security filter)" in text
+    assert total(entry(found, "v_gifts", world.ann)["now"]) == world.count(ALL)
 
 
 def test_a_restricted_dataset_in_between_still_filters(world: World) -> None:
@@ -334,13 +304,11 @@ def test_a_restricted_dataset_in_between_still_filters(world: World) -> None:
         donors=model("tier", "region", joins=[TO_REGIONS]),
         regions=model("code", "manager", rls=REGIONS_RULE),
     )
-    # Ann may not use donors: v1 never takes a path through it, and R2 reads it only to
-    # filter, with no access check.
+    # Ann may not use donors: R2 reads it only to filter, with no access check.
     ok(world.admin.put(f"/api/datasets/{world.ids['donors']}/access", json={"restricted": True}))
     world.dashboard(KPI)
     found = world.digest()
-    kpi = entry(found, "v_gifts", world.ann)
-    assert (total(kpi["now"]), total(kpi["after"])) == (2000, world.count(VIC_DONORS))
+    assert total(entry(found, "v_gifts", world.ann)["now"]) == world.count(VIC_DONORS)
 
 
 def test_two_ways_to_one_dataset_both_filter(world: World) -> None:
@@ -356,32 +324,33 @@ def test_two_ways_to_one_dataset_both_filter(world: World) -> None:
     found = world.digest()
     # A gift stays when its own region and its donor's region are both visible. In this
     # data the two always differ, so Ann (VIC only) keeps no gift at all.
-    assert total(entry(found, "v_gifts", world.ann)["after"]) == world.count(VIC_BOTH) == 0
+    assert total(entry(found, "v_gifts", world.ann)["now"]) == world.count(VIC_BOTH) == 0
     two = ("'VIC'", "('VIC','NSW')")
     either = world.count(VIC_DONORS.replace("= " + two[0], "IN " + two[1]))
     both = world.count(VIC_BOTH.replace("= " + two[0], "IN " + two[1]))
-    assert total(entry(found, "v_gifts", ben)["after"]) == both
+    assert total(entry(found, "v_gifts", ben)["now"]) == both
     assert 0 < both < either
 
 
-def test_a_loop_is_listed_to_resolve_first(world: World) -> None:
-    back = {"to": "donors", "on": {"manager": "region"}}
+def test_a_loop_through_a_table_with_rules_cannot_be_saved(world: World) -> None:
     world.models(
         gifts=model("fund", "region", joins=[TO_DONORS]),
         donors=model("tier", "region", joins=[TO_REGIONS]),
-        regions=model("code", "manager", joins=[back], rls=REGIONS_RULE),
     )
-    world.dashboard(KPI)
-    found = world.digest()
-    assert found["loops"] == [["donors", "regions", "donors"]]
-    kpi = entry(found, "v_gifts", world.ann)
-    assert "relationship_loop" in kpi["after"]["error"]
-    text = results_digest.report(found)
-    assert (
-        "## To resolve before the migration\n\n- The relationships donors → regions → donors"
-        in text
+    back = {"to": "donors", "on": {"manager": "region"}}
+    refused = world.admin.put(
+        "/api/models/regions",
+        json={"definition": model("code", "manager", joins=[back], rls=REGIONS_RULE)},
     )
-    assert "kpi v_gifts: cannot be shown after the upgrade: relationship_loop:" in text
+    assert refused.status_code == 422
+    [problem] = refused.json()["error"]["details"]
+    assert "donors → regions → donors form a loop that row-level security" in problem["message"]
+    # Without the rule the loop is allowed.
+    ok(
+        world.admin.put(
+            "/api/models/regions", json={"definition": model("code", "manager", joins=[back])}
+        )
+    )
 
 
 def test_viewers_versions_and_share_links(
@@ -433,10 +402,12 @@ def test_viewers_versions_and_share_links(
         if key == "admin" or label.endswith("(admin)")
     }
     assert {v for t, _, _, v in seen if t == "Not shared"} == admins
-    # Admins are exempt (the badge shows it); a link never is, whoever made it.
-    assert changed_viewers(found) == {world.ann, cat, board}
-    after = entry(found, "v_gifts", board, "published")["after"]
-    assert total(after) == world.count(VIC_DONORS.replace("'VIC'", "'QLD'"))
+    # Admins are exempt; a link never is, whoever made it.
+    viewers = {v for t, w, i, v in seen if (t, w, i) == ("Gifts", "published", "v_gifts")}
+    counts = {v: total(entry(found, "v_gifts", v, "published")["now"]) for v in viewers}
+    assert {v for v, n in counts.items() if n < world.count(ALL)} == {world.ann, cat, board}
+    assert counts[board] == world.count(VIC_DONORS.replace("'VIC'", "'QLD'"))
+    assert counts[cat] == world.count(VIC_DONORS.replace("'VIC'", "'NSW'"))
 
 
 def test_it_changes_nothing_and_compare_finds_nothing_after_no_change(
@@ -456,7 +427,7 @@ def test_it_changes_nothing_and_compare_finds_nothing_after_no_change(
     def state() -> list[Any]:
         counts = [
             world.db.scalar(select(func.count()).select_from(t))
-            for t in (AuditLog, Dashboard, DashboardVersion, SemanticModel)
+            for t in (AuditLog, Dashboard, DashboardVersion, WorkspaceModelVersion)
         ]
         views = list(world.db.scalars(select(ShareLink.view_count)))
         world.db.rollback()
@@ -469,14 +440,15 @@ def test_it_changes_nothing_and_compare_finds_nothing_after_no_change(
     assert state() == before
     saved = json.loads(out.read_text(encoding="utf-8"))
     assert saved["format"] == results_digest.FORMAT and saved["today"] == "2026-06-30"
-    assert out.with_suffix(".md").read_text(encoding="utf-8").startswith("# Upgrade report")
+    assert saved["simulated"] is False
+    assert out.with_suffix(".md").read_text(encoding="utf-8").startswith("# Results digest")
 
     # Again, after nothing changed: --compare finds no difference.
     again = tmp_path / "compared.json"
     cli._results_digest(settings, ["--out", str(again), "--compare", str(out)])
     text = again.with_suffix(".md").read_text(encoding="utf-8")
     assert "**No result changed.**" in text and "counting relative dates from 2026-06-30" in text
-    assert json.loads(again.read_text(encoding="utf-8"))["simulated"] is False
+    assert "Predicted, but unchanged" not in text
     assert state() == before
 
     with pytest.raises(SystemExit, match="usage"):
@@ -489,57 +461,68 @@ def test_it_changes_nothing_and_compare_finds_nothing_after_no_change(
         cli._results_digest(settings, ["--compare", str(other)])
 
 
-def test_compare_says_which_changes_were_predicted() -> None:
-    def outcome(digest: str, rows: int = 1) -> dict[str, Any]:
-        return {
-            "hash": digest,
-            "rows": rows,
-            "truncated": False,
-            "totals": {"gifts.row_count": float(rows)},
-        }
+def _outcome(digest: str, rows: int = 1) -> dict[str, Any]:
+    return {"hash": digest, "rows": rows, "truncated": False,
+            "totals": {"gifts.row_count": float(rows)}}  # fmt: skip
 
-    def result(entries: list[dict[str, Any]], snapshot: str) -> dict[str, Any]:
-        return {
-            "createdAt": "2026-11-26T10:00:00+00:00",
-            "today": "2026-11-26",
-            "datasets": {"gifts": {"snapshot": snapshot}},
-            "viewers": {"admin": "an admin", "user:1": "Ann"},
-            "items": entries,
-        }
 
-    def item(name: str, viewer: str, **outcomes: Any) -> dict[str, Any]:
-        return {"dashboard": "d1", "title": "Gifts", "which": "published", "number": 1,
-                "item": name, "itemTitle": name, "viewer": viewer, **outcomes}  # fmt: skip
+def _result(entries: list[dict[str, Any]], snapshot: str, simulated: bool) -> dict[str, Any]:
+    return {
+        "createdAt": "2026-11-26T10:00:00+00:00",
+        "today": "2026-11-26",
+        "simulated": simulated,
+        "datasets": {"gifts": {"snapshot": snapshot}},
+        "viewers": {"admin": "an admin", "user:1": "Ann"},
+        "items": entries,
+    }
 
-    previous = result(
+
+def _item(name: str, viewer: str, **outcomes: Any) -> dict[str, Any]:
+    return {"dashboard": "d1", "title": "Gifts", "which": "published", "number": 1,
+            "item": name, "itemTitle": name, "viewer": viewer, **outcomes}  # fmt: skip
+
+
+def test_compare_with_the_upgrade_report_says_what_it_predicted() -> None:
+    previous = _result(
         [
-            item("same", "user:1", now=outcome("a"), after=outcome("a")),
-            item("predicted", "user:1", now=outcome("b", 3), after=outcome("c", 2)),
-            item("surprise", "admin", now=outcome("d"), after=outcome("d")),
-            item("gone", "admin", now=outcome("e"), after=outcome("e")),
+            _item("same", "user:1", now=_outcome("a"), after=_outcome("a")),
+            _item("predicted", "user:1", now=_outcome("b", 3), after=_outcome("c", 2)),
+            _item("surprise", "admin", now=_outcome("d"), after=_outcome("d")),
+            _item("missed", "user:1", now=_outcome("g", 4), after=_outcome("h", 1)),
+            _item("gone", "admin", now=_outcome("e"), after=_outcome("e")),
         ],
         "s1",
+        simulated=True,
     )
-    current = result(
+    current = _result(
         [
-            item("same", "user:1", now=outcome("a")),
-            item("predicted", "user:1", now=outcome("c", 2)),
-            item("surprise", "admin", now=outcome("x", 5)),
-            item("new", "admin", now=outcome("f")),
+            _item("same", "user:1", now=_outcome("a")),
+            _item("predicted", "user:1", now=_outcome("c", 2)),
+            _item("surprise", "admin", now=_outcome("x", 5)),
+            _item("missed", "user:1", now=_outcome("g", 4)),
+            _item("new", "admin", now=_outcome("f")),
         ],
         "s2",
+        simulated=False,
     )
     found = results_digest.compare(previous, current)
     assert [(c["item"], c["predicted"]) for c in found["changes"]] == [
         ("predicted", True),
         ("surprise", False),
     ]
+    # Said to change, and did not: a rule that should now reach a table and does not.
+    assert [m["item"] for m in found["missed"]] == ["missed"]
     assert [e["item"] for e in found["added"]] == ["new"] and [
         e["item"] for e in found["gone"]
     ] == ["gone"]
     text = results_digest.compare_report(previous, current)
     assert "Refreshed since: gifts." in text
     assert "**2 results changed: 1 as the upgrade report predicted, 1 not.**" in text
+    assert "**1 results did not change, though the upgrade report said they would.**" in text
+    assert (
+        "## Predicted, but unchanged\n\n- Gifts (published, version 1), missed, as Ann: the "
+        "report said 4 rows, then 1;"
+    ) in text
     assert (
         "## Not predicted\n\n- Gifts (published, version 1), surprise, as an admin: 1 rows, then 5;"
         in text
@@ -549,3 +532,15 @@ def test_compare_says_which_changes_were_predicted() -> None:
         in text
     )
     assert "Not compared: 1 results that are new" in text
+
+
+def test_compare_between_two_digests_after_the_upgrade_lists_what_changed() -> None:
+    previous = _result([_item("kpi", "user:1", now=_outcome("a", 3))], "s1", simulated=False)
+    current = _result([_item("kpi", "user:1", now=_outcome("b", 2))], "s1", simulated=False)
+    found = results_digest.compare(previous, current)
+    assert [(c["item"], c["predicted"]) for c in found["changes"]] == [("kpi", None)]
+    assert found["missed"] == []
+    text = results_digest.compare_report(previous, current)
+    assert "**1 results changed.**" in text and "predicted" not in text
+    assert "## Changed\n\n- Gifts (published, version 1), kpi, as Ann: 3 rows, then 2;" in text
+    assert "Refreshed since" not in text

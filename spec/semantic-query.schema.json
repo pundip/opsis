@@ -2,10 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://opsis.invalid/spec/semantic-query.schema.json",
   "title": "Opsis semantic query",
-  "description": "The query shape sent by the UI, the MCP tools and the assistant. The compiler turns it into engine SQL through a sqlglot AST. Field references are always <dataset>.<field> and must resolve to a dimension, measure or segment in the semantic model.",
+  "description": "The query shape sent by the UI, the MCP tools and the assistant. Field references are <table>.<field>: a table of the workspace model, which is the dataset's (or transform's) name, so v1 references keep working. Changes from v1: `dataset` is optional (the compiler picks the base table from the measures), and a filter may be a group of alternatives (`or`), which hierarchy slicers and multi-field selections need.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["dataset"],
   "anyOf": [
     { "required": ["dimensions"] },
     { "required": ["measures"] },
@@ -14,7 +13,7 @@
   "properties": {
     "dataset": {
       "$ref": "#/$defs/identifier",
-      "description": "Base dataset. Fields from other datasets are allowed only when the model defines a join path from this one."
+      "description": "Base table. Optional: when omitted, the base is the table of the measures, or for a query with no measures the one table every dimension's table is reached from. v1 queries name it, and keep their meaning."
     },
     "dimensions": {
       "type": "array",
@@ -24,6 +23,7 @@
     },
     "measures": {
       "type": "array",
+      "description": "Measures may come from more than one table when every grouped dimension reaches each of them; each table's measures are computed apart and joined on the dimensions.",
       "items": { "$ref": "#/$defs/fieldRef" },
       "uniqueItems": true,
       "maxItems": 20
@@ -37,8 +37,10 @@
     },
     "filters": {
       "type": "array",
-      "description": "ANDed together. Filters on measures become HAVING; filters on dimensions become WHERE.",
-      "items": { "$ref": "#/$defs/filter" },
+      "description": "ANDed together. A filter on a field of another table applies through the model's relationships, in their filter direction. Filters on measures become HAVING.",
+      "items": {
+        "oneOf": [{ "$ref": "#/$defs/filter" }, { "$ref": "#/$defs/filterGroup" }]
+      },
       "maxItems": 50
     },
     "sort": {
@@ -63,7 +65,7 @@
     "fieldRef": {
       "type": "string",
       "pattern": "^[a-z_][a-z0-9_]{0,62}\\.[a-z_][a-z0-9_]{0,62}$",
-      "description": "<dataset>.<field>, for example gifts.total_amount."
+      "description": "<table>.<field>, for example gifts.total_amount."
     },
     "grain": {
       "enum": ["day", "week", "month", "quarter", "year", "fiscal_month", "fiscal_quarter", "fiscal_year"],
@@ -74,7 +76,7 @@
       "maxLength": 1000
     },
     "range": {
-      "description": "Either a relative range, resolved in the workspace timezone at query time, or absolute dates. Absolute ranges are inclusive of both ends and either end may be omitted.",
+      "description": "Either a relative range, resolved in the workspace timezone at query time, or absolute dates. Absolute ranges are inclusive of both ends and either end may be omitted (a date slicer's before and after modes).",
       "oneOf": [
         {
           "type": "object",
@@ -111,6 +113,25 @@
           "description": "When set, the result is grouped by the truncated date. When omitted, range only filters."
         },
         "range": { "$ref": "#/$defs/range" }
+      }
+    },
+    "filterGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["or"],
+      "description": "New in v2. Alternatives: a row passes when every filter of at least one inner list matches. A hierarchy slicer's selection [[VIC, Melbourne], [NSW]] becomes {or: [[state eq VIC, city eq Melbourne], [state eq NSW]]}. Inner filters are on dimensions only.",
+      "properties": {
+        "or": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 200,
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": { "$ref": "#/$defs/filter" }
+          }
+        }
       }
     },
     "filter": {

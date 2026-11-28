@@ -2,7 +2,7 @@
 // opsis-test-bench at http://localhost:18083, never your own stack (Compose project
 // "opsis", port 8080). Needs only Node and Docker on the host.
 //
-//   node scripts/benchmark.mjs [--rows 5000000] [--no-build] [--keep]
+//   node scripts/benchmark.mjs [--rows 5000000] [--rule] [--no-build] [--keep]
 //   node scripts/benchmark.mjs --remove     remove a stack that --keep left running
 //
 // What it does:
@@ -15,6 +15,9 @@
 //       target is under 1.5 s warm on 10 million rows.
 //   4. Fires 10 different queries at once, twice, and measures how long /healthz takes
 //      to answer meanwhile (it must stay fast: queries run off the event loop).
+//   4b. With --rule: puts a row-level security rule on bench_donors that applies to
+//       admins too (tier <> 'lapsed'), so every gift is read through the relationship
+//       to its donor (R2 of ADR-032), and runs the queries and the dashboard again.
 //   5. Samples `docker stats` throughout and reports the api container's peak memory.
 //   6. Removes the test stack, data and all, unless --keep is given.
 import { execFileSync, spawn } from "node:child_process";
@@ -27,6 +30,7 @@ const option = (name, fallback) => {
 };
 const ROWS = Number(option("rows", "5000000"));
 const KEEP = args.includes("--keep");
+const RULE = args.includes("--rule");
 const STACK = { files: ["compose.yml"] };
 let stack;
 try {
@@ -343,8 +347,39 @@ async function main() {
         `  /healthz during the burst: ${health.length} checks, median ${health.sort((a, b) => a - b)[Math.floor(health.length / 2)]} ms, max ${Math.max(...health)} ms`,
     );
   }
-  await sleep(1500);
-  console.log(`\nPeak memory during queries: ${JSON.stringify(Object.fromEntries(Object.entries(peak).map(([k, v]) => [k, Math.round(v) + " MB"])))}`);
+  const peakMemory = async () => {
+    await sleep(1500); // the last samples
+    return JSON.stringify(Object.fromEntries(Object.entries(peak).map(([k, v]) => [k, Math.round(v) + " MB"])));
+  };
+  // 4b. The same again, with a rule on donors that the admin is not exempt from.
+  if (RULE) {
+    console.log(`\nPeak memory during the queries above: ${await peakMemory()}`);
+    const count = { dataset: "bench_gifts", measures: ["bench_gifts.row_count"] };
+    const before = (await api("POST", "/api/query", { query: count })).rows[0][0];
+    const rule = { filter: "tier <> 'lapsed'", applies_to_roles: ["viewer", "editor", "admin"] };
+    await api("PATCH", "/api/model", { ops: [{ op: "add", path: "/tables/bench_donors/rls", value: [rule] }] });
+    const after = (await api("POST", "/api/query", { query: count })).rows[0][0];
+    if (!(after < before)) throw new Error(`the rule on donors hid no gifts (${after} of ${before})`);
+    console.log(
+      `\nWith a rule on bench_donors (tier <> 'lapsed', admins included): ${Number(after).toLocaleString()} of ` +
+        `${Number(before).toLocaleString()} gifts visible, each read through its donor`,
+    );
+    resetPeak();
+    console.log("Query                                              cold wall  cold engine  warm wall  rows");
+    for (const [name, query] of Object.entries(QUERIES)) {
+      const cold = await timedQuery(query);
+      const warm = await timedQuery(query);
+      if (cold.cacheHit || !warm.cacheHit) throw new Error(`unexpected cache state for ${name}`);
+      console.log(`${name.padEnd(50)} ${String(cold.wall).padStart(7)} ms ${String(cold.engine).padStart(9)} ms ${String(warm.wall).padStart(7)} ms ${String(cold.rows).padStart(5)}`);
+    }
+    console.log("\nDashboard load, with the rule                      total      slowest item  cached items");
+    for (const [name, state] of loads) {
+      const load = await loadDashboard(made.id, state);
+      console.log(`${name.padEnd(50)} ${String(load.total).padStart(5)} ms ${String(load.slowest).padStart(9)} ms ${String(load.hits).padStart(8)}/${load.items}`);
+    }
+  }
+
+  console.log(`\nPeak memory during ${RULE ? "the queries with the rule" : "queries"}: ${await peakMemory()}`);
 
   sampling = false;
   await sampler;

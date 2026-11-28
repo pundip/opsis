@@ -35,14 +35,9 @@ def _described(
     db: Session, settings: Settings, request: Request, principal: Principal, target: Dataset
 ) -> dict[str, Any]:
     """A dataset's model as the model page shows it, with its warnings."""
-    described = models.describe(db, target)
-    described["warnings"] = model_warnings.check(
-        db,
-        settings,
-        request.app.state.query_runtime,
-        principal,
-        target.name,
-        described["definition"],
+    described = models.describe(db, principal, target)
+    described["warnings"] = model_warnings.check_table(
+        db, settings, request.app.state.query_runtime, principal, target
     )
     return described
 
@@ -67,7 +62,7 @@ def list_models(
     db: Session = Depends(get_db), principal: Principal = Depends(read)
 ) -> list[dict[str, Any]]:
     blocked = access.blocked_datasets(db, principal)
-    return [m for m in models.list_models(db) if m["dataset"] not in blocked]
+    return [m for m in models.list_models(db, principal) if m["dataset"] not in blocked]
 
 
 @router.get("/model-files")
@@ -139,14 +134,14 @@ def save_model(
 def list_model_versions(
     dataset: str, db: Session = Depends(get_db), principal: Principal = Depends(read)
 ) -> list[dict[str, Any]]:
-    return models.list_versions(db, _dataset(db, dataset, principal))
+    return models.list_versions(db, principal, _dataset(db, dataset, principal))
 
 
 @router.get("/models/{dataset}/versions/{version}")
 def get_model_version(
     dataset: str, version: int, db: Session = Depends(get_db), principal: Principal = Depends(read)
 ) -> dict[str, Any]:
-    return models.get_version(db, _dataset(db, dataset, principal), version)
+    return models.get_version(db, principal, _dataset(db, dataset, principal), version)
 
 
 @router.post("/models/{dataset}/versions/{version}/restore")
@@ -176,12 +171,14 @@ def validate_model(
     warnings it would be saved with."""
     target = _dataset(db, dataset, principal)
     definition = models.resolve_input(body.definition, body.yaml)
-    found = models.problems(db, settings, target, definition)
+    found = models.problems(
+        db, settings, principal, target, definition, base_version=body.baseVersion
+    )
     warnings = (
         []
         if found
-        else model_warnings.check(
-            db, settings, request.app.state.query_runtime, principal, target.name, definition
+        else model_warnings.check_table(
+            db, settings, request.app.state.query_runtime, principal, target, definition
         )
     )
     return {"valid": not found, "problems": found, "warnings": warnings}
@@ -204,7 +201,7 @@ def export_model(
     """The model as a YAML file, for version control (models/<dataset>.yml)."""
     target = _dataset(db, dataset, principal)
     return PlainTextResponse(
-        models.describe(db, target)["yaml"],
+        models.describe(db, principal, target)["yaml"],
         media_type="application/yaml",
         headers={"Content-Disposition": f'attachment; filename="{target.name}.yml"'},
     )

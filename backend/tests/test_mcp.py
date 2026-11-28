@@ -23,13 +23,13 @@ from opsis.db.models import (
     AuditLog,
     DashboardShare,
     DashboardVersion,
-    Dataset,
-    SemanticModel,
     User,
+    WorkspaceModel,
 )
 from opsis.errors import ApiError
 from opsis.mcp import tools
 from opsis.services import events, tokens, users
+from tests.test_auth import admin_client, person
 from tests.test_dashboards import SPEC, problems_for
 from tests.test_ingestion import ok, run_jobs, settings_of
 from tests.test_query_api import MODEL_YAML, load
@@ -132,6 +132,8 @@ def test_tools_resources_and_prompt_are_described_for_a_model(client_for: Client
         "patch_semantic_model", "validate_model", "list_dashboards", "get_dashboard",
         "create_dashboard", "patch_dashboard", "validate_spec", "list_versions",
         "restore_version", "publish_dashboard", "trigger_refresh", "get_job_status",
+        "get_workspace_model", "patch_workspace_model", "validate_workspace_model",
+        "suggest_relationships",
     }  # fmt: skip
     assert names[0] == "list_datasets"  # the place to start comes first
     for tool in listed:
@@ -150,7 +152,7 @@ def test_tools_resources_and_prompt_are_described_for_a_model(client_for: Client
     assert resources == {
         "opsis://guide", "opsis://visuals", "opsis://schema/dashboard",
         "opsis://schema/semantic-query", "opsis://schema/semantic-model",
-        "opsis://schema/visual-manifest",
+        "opsis://schema/visual-manifest", "opsis://schema/workspace-model",
     }  # fmt: skip
     schema = mcp.rpc("resources/read", {"uri": "opsis://schema/dashboard"})["contents"][0]
     assert json.loads(schema["text"])["title"]
@@ -616,16 +618,13 @@ def test_row_level_security_holds_through_the_tools(
 
     # A rule that cannot be applied (here: its column has gone) refuses; it never shows
     # raw rows instead.
-    record = db.scalar(
-        select(SemanticModel)
-        .join(Dataset, Dataset.id == SemanticModel.dataset_id)
-        .where(Dataset.name == "gifts")
-    )
-    assert record is not None and record.definition["rls"]
-    record.definition = {
-        **record.definition,
-        "rls": [{"filter": "vanished_column IN {{ user.attributes.regions }}"}],
-    }
+    record = db.scalar(select(WorkspaceModel))
+    assert record is not None and record.definition["tables"]["gifts"]["rls"]
+    broken = copy.deepcopy(record.definition)
+    broken["tables"]["gifts"]["rls"] = [
+        {"filter": "vanished_column IN {{ user.attributes.regions }}"}
+    ]
+    record.definition = broken
     db.commit()
     for tool, arguments in (("preview_dataset", {}), ("profile_column", {"column": "fund"})):
         refused = mcp.fail(tool, dataset="gifts", **arguments)
@@ -639,6 +638,110 @@ def test_row_level_security_holds_through_the_tools(
         ]
         == 2
     )
+
+
+def _agent(client: TestClient) -> Mcp:
+    made = client.post("/api/tokens", json={"name": "agent", "scopes": ["read", "edit"]})
+    return Mcp(client, ok(made, 201)["token"])
+
+
+def test_workspace_model_tools(
+    client_for: ClientFor,
+    source: dict[str, Any],
+    db: Session,  # noqa: F811
+) -> None:
+    client = admin_client(client_for)  # restricting a dataset needs sign-in
+    ids = load(client, source)
+    admin = _agent(client)
+
+    # The whole model, compact: tables with field counts, and the relationships.
+    model = admin.call("get_workspace_model")
+    assert model["version"] == 0 and model["relationships"] == {}
+    tables = {t["table"]: t for t in model["tables"]}
+    assert set(tables) == {"gifts", "donors"}
+    assert (tables["gifts"]["dimensions"], tables["gifts"]["measures"]) == (6, 2)
+    assert tables["gifts"]["starter"] is True and "patch_workspace_model" in model["note"]
+
+    # A relationship and a measure in one patch, checked first.
+    link = {"op": "add", "path": "/relationships/gifts__donors", "value": {
+        "from": {"table": "gifts", "columns": ["donor_id"]},
+        "to": {"table": "donors", "columns": ["id"]}}}  # fmt: skip
+    measure = {"op": "add", "path": "/tables/donors/measures/donor_count",
+               "value": {"agg": "count", "label": "Donors"}}  # fmt: skip
+    checked = admin.call("validate_workspace_model", ops=[link, measure])
+    assert (checked["valid"], checked["problems"]) == (True, [])
+    saved = admin.call(
+        "patch_workspace_model", base_version=0, ops=[link, measure], message="Link gifts to donors"
+    )
+    assert (saved["version"], saved["saved"], saved["warnings"]) == (1, True, [])
+    by_tier = admin.call("run_query", query={
+        "dataset": "gifts", "measures": ["gifts.row_count"], "dimensions": ["donors.tier"]})  # fmt: skip
+    expected = (
+        source["conn"]
+        .execute(
+            "SELECT d.tier, count(*) FROM src.gifts g LEFT JOIN src.donors d ON d.id = g.donor_id "
+            "GROUP BY 1"
+        )
+        .fetchall()
+    )
+    assert sorted(map(tuple, by_tier["rows"]), key=str) == sorted(
+        ((tier, count) for tier, count in expected), key=str
+    )
+    audit = db.scalar(
+        select(AuditLog)
+        .where(AuditLog.action == "agent.patch_workspace_model")
+        .order_by(AuditLog.id.desc())
+    )
+    assert audit is not None
+    assert (audit.target_type, audit.target_id) == ("workspace_model", "workspace")
+    assert audit.detail["version"] == 1 and audit.detail["arguments"]["opCount"] == 2
+
+    # One table in full, with the relationships that touch it.
+    gifts = admin.call("get_workspace_model", table="gifts")
+    assert gifts["table"] == "gifts" and "total_amount" in gifts["definition"]["measures"]
+    assert list(gifts["relationships"]) == ["gifts__donors"]
+    assert "donor_id" in {c["name"] for c in gifts["columns"]}
+    assert '"/tables/gifts/measures/<name>"' in gifts["note"]
+    assert "Did you mean 'gifts'?" in admin.fail("get_workspace_model", table="gift")
+
+    # The same change again changes nothing; a stale change elsewhere is rebased; one in
+    # the same place is refused.
+    again = admin.call("patch_workspace_model", base_version=1, ops=[link])
+    assert (again["version"], again["saved"]) == (1, False)
+    label = {"op": "add", "path": "/tables/gifts/label", "value": "Gifts"}
+    assert admin.call("patch_workspace_model", base_version=1, ops=[label])["version"] == 2
+    renamed = {"op": "replace", "path": "/tables/donors/measures/donor_count/label", "value": "N"}
+    assert admin.call("patch_workspace_model", base_version=1, ops=[renamed])["version"] == 3
+    clash = {"op": "replace", "path": "/tables/gifts/label", "value": "All gifts"}
+    conflict = admin.fail("patch_workspace_model", base_version=1, ops=[clash])
+    assert "Error (version_conflict)" in conflict and "get_workspace_model" in conflict
+
+    # Problems come back by path, and nothing is saved.
+    broken = {"op": "add", "path": "/relationships/gifts__nowhere", "value": {
+        "from": {"table": "gifts", "columns": ["fund"]},
+        "to": {"table": "nowhere", "columns": ["name"]}}}  # fmt: skip
+    refused = admin.fail("patch_workspace_model", base_version=3, ops=[broken])
+    assert "Error (invalid_model)" in refused and "/relationships/gifts__nowhere" in refused
+    assert admin.call("get_workspace_model")["version"] == 3
+    checked = admin.call("validate_workspace_model", ops=[broken])
+    assert checked["valid"] is False
+    assert checked["problems"][0]["path"].startswith("/relationships/gifts__nowhere")
+    assert "not both" in admin.fail("validate_workspace_model")
+    whole = admin.call(
+        "validate_workspace_model",
+        document={"modelVersion": 2, "tables": {}, "relationships": {}},
+    )
+    assert whole["valid"] is True
+
+    # A person who may not use donors sees neither it nor the relationship, and naming
+    # it reads as naming a table that does not exist.
+    ok(client.put(f"/api/datasets/{ids['donors']}/access", json={"restricted": True}))
+    editor = _agent(person(client_for, client, "editor@example.test", "editor")[0])
+    seen = editor.call("get_workspace_model")
+    assert {t["table"] for t in seen["tables"]} == {"gifts"} and seen["relationships"] == {}
+    assert "donors" not in json.dumps(seen)
+    hidden = editor.fail("patch_workspace_model", base_version=3, ops=[link])
+    assert "There is no table called 'donors'" in hidden
 
 
 # ---- JSON Patch -------------------------------------------------------------------------

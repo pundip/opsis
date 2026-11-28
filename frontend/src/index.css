@@ -159,3 +159,57 @@ body {
   outline: 2px solid var(--brand-active);
   outline-offset: 2px;
 }
+
+/* The Model view's canvas (components/model/ModelCanvas.tsx). A field's row is its
+   handle: drag it onto a field of another table to relate them. The small handles
+   at the ends of each row only anchor the edges. */
+.opsis-model {
+  --xy-edge-stroke: light-dark(#71717a, #a1a1aa);
+  --xy-edge-stroke-selected: var(--brand-active);
+}
+.opsis-model .react-flow__handle.model-anchor {
+  pointer-events: none;
+  opacity: 0;
+}
+.opsis-model .react-flow__handle.model-field-handle {
+  inset: 0;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  min-height: 0;
+  transform: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: crosshair;
+}
+.opsis-model .react-flow__handle.model-field-handle::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: -5px;
+  width: 9px;
+  height: 9px;
+  margin-top: -4.5px;
+  border-radius: 9999px;
+  background: var(--brand-active);
+  opacity: 0;
+}
+.opsis-model .react-flow__handle.model-field-handle:hover,
+.opsis-model .react-flow__handle.model-field-handle.connectingto {
+  background: color-mix(in srgb, var(--brand-active) 14%, transparent);
+}
+.opsis-model .react-flow__handle.model-field-handle:hover::after,
+.opsis-model .react-flow__handle.model-field-handle.connectingfrom::after,
+.opsis-model .react-flow__handle.model-field-handle.connectingto::after {
+  opacity: 1;
+}
+.opsis-model .model-edge-end {
+  @apply fill-zinc-700 text-xs font-semibold dark:fill-zinc-200;
+}
+.opsis-model .model-edge-arrow {
+  @apply fill-zinc-500 dark:fill-zinc-400;
+}
+.opsis-model .react-flow__edge.selected .model-edge-arrow {
+  fill: var(--brand-active);
+}

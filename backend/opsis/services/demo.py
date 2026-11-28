@@ -23,7 +23,7 @@ import logging
 import math
 import random
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -32,9 +32,9 @@ from sqlalchemy.orm import Session
 from opsis.auth.principal import Principal, Role
 from opsis.db.models import Connection, Dashboard, Dataset, Job, User
 from opsis.errors import ApiError, JobError
-from opsis.jobs import queue
-from opsis.services import connections, dashboards, datasets, models, refresh, users
-from opsis.services.datasets import REFRESH_JOB
+from opsis.semantic import workspace as ws
+from opsis.semantic.relationships import new_id
+from opsis.services import connections, dashboards, datasets, users, workspace_model
 from opsis.settings import Settings
 
 log = logging.getLogger("opsis.demo")
@@ -292,27 +292,30 @@ def _actor(db: Session, settings: Settings, user_id: uuid.UUID | None) -> Princi
     return users.principal_for(db, user, "demo")
 
 
+def _save_models(db: Session, settings: Settings, actor: Principal, names: tuple[str, ...]) -> None:
+    """The demo tables, where nobody has written them yet, and the relationships
+    between them, as one version of the workspace model."""
+    demo = ws.from_v1_models({name: MODELS[name] for name in names})
+    state = workspace_model.current(db)
+    document = ws.definition_of(state.effective)
+    for name in names:
+        if name not in state.stored["tables"]:
+            document["tables"][name] = demo["tables"][name]
+    relationships = document["relationships"]
+    for rel in demo["relationships"].values():
+        if not any(
+            (r["from"], r["to"]) == (rel["from"], rel["to"]) for r in relationships.values()
+        ):
+            relationships[new_id(relationships, rel["from"]["table"], rel["to"]["table"])] = rel
+    db.rollback()  # `save` locks the model and reads it again
+    workspace_model.save(db, settings, actor, document=document, message="Demo data")
+
+
 def _refresh_now(db: Session, settings: Settings, actor: Principal, dataset: Dataset) -> None:
     """Run the first refresh here and now, recorded as a job like any other."""
-    job = Job(
-        type=REFRESH_JOB,
-        payload={"dataset_id": str(dataset.id)},
-        status="running",
-        locked_by="demo",
-        started_at=datetime.now(UTC),
-        attempts=1,
-        created_by=actor.user_id,
-    )
-    db.add(job)
-    db.commit()
-    try:
-        result = refresh.run_refresh(db, job, settings)
-    except Exception as exc:
-        db.rollback()
-        queue.finish(db, job, error=str(exc)[:500])
-        raise JobError(f"The demo dataset {dataset.name} could not be refreshed: {exc}") from exc
-    queue.finish(db, job, result=result)
-    refresh.prune_snapshots(db, job, settings)
+    job = datasets.refresh_now(db, settings, actor, dataset)
+    if job.error:
+        raise JobError(f"The demo dataset {dataset.name} could not be refreshed: {job.error}")
 
 
 def seed(db: Session, settings: Settings, user_id: uuid.UUID | None = None) -> dict[str, Any]:
@@ -350,9 +353,7 @@ def seed(db: Session, settings: Settings, user_id: uuid.UUID | None = None) -> d
         if dataset.current_snapshot_id is None:
             _refresh_now(db, settings, actor, dataset)
         db.refresh(dataset)
-        record = models.get_record(db, dataset)
-        if record is None or record.is_starter:
-            models.save(db, settings, actor, dataset, MODELS[name], message="Demo data")
+    _save_models(db, settings, actor, names)
     if existing is None:
         try:
             existing = dashboards.create(

@@ -539,7 +539,7 @@ export function ModelDetail({ config, me }: { config: AppConfig; me: Me }) {
       <div className="mx-auto max-w-5xl">
         <ErrorNote error={model.error} />
         <Link to="/models" className="mt-3 inline-block text-sm text-brand underline">
-          Back to semantic models
+          Back to the model tables
         </Link>
       </div>
     );
@@ -548,8 +548,12 @@ export function ModelDetail({ config, me }: { config: AppConfig; me: Me }) {
   return (
     <div className="mx-auto max-w-6xl">
       <p className="mb-2 text-sm">
+        <Link to="/model" className="text-brand underline">
+          Model
+        </Link>
+        <span className="text-zinc-500"> / </span>
         <Link to="/models" className="text-brand underline">
-          Semantic models
+          Tables
         </Link>
         <span className="text-zinc-500"> / {data.dataset.name}</span>
       </p>

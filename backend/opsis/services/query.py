@@ -1,4 +1,7 @@
-"""Run a semantic query: validate, compile with RLS, execute through the cache."""
+"""Run a semantic query: validate, compile with row-level security, execute through
+the cache. Every read of a table on someone's behalf goes through the workspace
+model's security (`opsis.semantic.security`): its own rules and, through
+relationships, the rules of the tables it relates to (ADR-032, R2)."""
 
 from __future__ import annotations
 
@@ -15,7 +18,7 @@ from sqlalchemy.orm import Session
 from sqlglot import exp
 
 from opsis.auth.principal import Permission, Principal, Role
-from opsis.db.models import Dataset, SemanticModel, Snapshot, User
+from opsis.db.models import Dataset, User
 from opsis.errors import ApiError
 from opsis.query.duckdb_engine import ResultCache
 from opsis.query.engine import (
@@ -25,11 +28,10 @@ from opsis.query.engine import (
     QueryResult,
     QueryTimeoutError,
     ResultColumn,
-    TableRef,
 )
 from opsis.semantic import model as semantic
-from opsis.semantic.compiler import Scan, Source, UserContext, compile_query, secured_scan
-from opsis.services import models
+from opsis.semantic.compiler import Scan, Source, UserContext, Workspace, compile_query
+from opsis.services import workspace_model
 from opsis.settings import Settings
 from opsis.storage import snapshots
 
@@ -66,50 +68,42 @@ class QueryRuntime:
         return self.cache.get_or_run(compiled.cache_key(), run)
 
 
-def load_sources(db: Session, settings: Settings, names: set[str]) -> dict[str, Source]:
-    """The model, columns and current snapshot of each named dataset that has data."""
-    if not names:
-        return {}
-    rows = db.execute(
-        select(Dataset, Snapshot, SemanticModel)
-        .join(Snapshot, Snapshot.id == Dataset.current_snapshot_id)
-        .outerjoin(SemanticModel, SemanticModel.dataset_id == Dataset.id)
-        .where(Dataset.name.in_(names))
-    ).all()
-    sources = {}
-    for dataset, snapshot, record in rows:
-        path = snapshots.snapshot_dir(settings, dataset.id, snapshot.id)
-        columns = {c["name"]: c["type"] for c in snapshot.columns}
-        # A dataset refreshed before models existed has none stored: use the starter.
-        definition = record.definition if record else models.starter(dataset, columns)
-        sources[dataset.name] = Source(
-            model=semantic.parse_model(dataset.name, definition),
-            columns=columns,
-            table=TableRef(dataset.name, str(dataset.id), str(snapshot.id), str(path)),
-            timezones={c["name"]: c["tz"] for c in snapshot.columns if c.get("tz")},
-            restricted=dataset.restricted,
-        )
-    return sources
+def load_workspace(db: Session, settings: Settings) -> Workspace:
+    """Every table with data, its model and current snapshot, and the relationships
+    between them."""
+    return workspace_model.load_workspace(db, settings)
 
 
-def load_with_joins(
-    db: Session, settings: Settings, names: set[str], base: str
-) -> dict[str, Source]:
-    """The named datasets, and the ones `base` joins to: a field two joins away is
-    reached through one of those."""
-    sources = load_sources(db, settings, names)
-    if base in sources:
-        hops = {join.to for join in sources[base].model.joins} - set(sources)
-        sources.update(load_sources(db, settings, hops))
-    return sources
-
-
-def referenced_datasets(query: Mapping[str, Any]) -> set[str]:
-    refs = [*(query.get("dimensions") or []), *(query.get("segments") or [])]
-    refs += [f["field"] for f in query.get("filters") or []]
+def referenced_tables(query: Mapping[str, Any]) -> set[str]:
+    """The tables a query names: its `dataset`, if it has one, and its fields' tables."""
+    refs = [
+        *(query.get("dimensions") or []),
+        *(query.get("measures") or []),
+        *(query.get("segments") or []),
+    ]
+    for item in query.get("filters") or []:
+        if isinstance(item, Mapping) and "or" in item:
+            refs += [f["field"] for group in item["or"] for f in group]
+        else:
+            refs.append(item["field"])
     if query.get("timeDimension"):
         refs.append(query["timeDimension"]["field"])
-    return {str(query["dataset"]), *(str(r).partition(".")[0] for r in refs)}
+    named = {str(query["dataset"])} if query.get("dataset") else set()
+    return named | {str(r).partition(".")[0] for r in refs}
+
+
+def require_data(db: Session, workspace: Workspace, names: set[str]) -> None:
+    """404 for a table that does not exist, 409 for one with no data yet."""
+    for name in sorted(names):
+        if name in workspace.sources:
+            continue
+        if db.scalar(select(Dataset.id).where(Dataset.name == name)) is None:
+            raise ApiError(404, "not_found", f"There is no dataset called {name!r}.")
+        raise ApiError(
+            409,
+            "no_data",
+            f"Dataset {name!r} has no data yet. Wait for its first refresh to finish.",
+        )
 
 
 def _json(value: Any) -> Any:
@@ -158,14 +152,19 @@ def user_context(
     return UserContext(role.value, str(preview_as.get("email", "")), attributes)
 
 
-def rls_applies(source: Source, user: UserContext) -> bool:
-    """True when a row-level security rule restricts what this user may see."""
-    return any(user.role in rule.roles or not user.may_be_exempt for rule in source.model.rls)
+def rls_applies(workspace: Workspace, source: Source, user: UserContext) -> bool:
+    """True when this user may see fewer than all of the table's rows: a rule of its
+    own applies to them, or one reaches it through a relationship (or, for a rule
+    that cannot be read, might)."""
+    try:
+        return workspace.security.restricts(source, user)
+    except ApiError:
+        return True
 
 
-def secured_select(source: Source, user: UserContext) -> exp.Subquery:
-    """The dataset's rows as this user may see them, for use as a FROM clause."""
-    scan, _ = secured_scan(source, user)
+def secured_select(workspace: Workspace, source: Source, user: UserContext) -> exp.Subquery:
+    """The table's rows as this user may see them, for use as a FROM clause."""
+    scan, _ = workspace.security.scan(source, user)
     return scan.subquery("t")
 
 
@@ -201,10 +200,20 @@ def run_raw(
 
 
 def secured_preview(
-    settings: Settings, runtime: QueryRuntime, source: Source, user: UserContext, limit: int
+    settings: Settings,
+    runtime: QueryRuntime,
+    workspace: Workspace,
+    source: Source,
+    user: UserContext,
+    limit: int,
 ) -> list[list[Any]]:
-    """The first rows of a dataset with its row-level security applied."""
-    sql = exp.select("*").from_(secured_select(source, user)).limit(limit).sql(dialect="duckdb")
+    """The first rows of a table with its row-level security applied."""
+    sql = (
+        exp.select("*")
+        .from_(secured_select(workspace, source, user))
+        .limit(limit)
+        .sql(dialect="duckdb")
+    )
     return run_raw(settings, runtime, source, sql, limit)
 
 
@@ -229,7 +238,7 @@ def column_dict(column: ResultColumn) -> dict[str, Any]:
 def execute(
     settings: Settings,
     runtime: QueryRuntime,
-    sources: Mapping[str, Source],
+    workspace: Workspace,
     user: UserContext,
     query: Mapping[str, Any],
     *,
@@ -238,12 +247,12 @@ def execute(
     check: Callable[[CompiledQuery], None] | None = None,
     scan: Scan | None = None,
 ) -> tuple[CompiledQuery, dict[str, Any]]:
-    """Compile and run a schema-valid query against already loaded sources.
-    `check` sees the compiled query before it runs, and may refuse it. `scan` reads
-    each dataset for the user (the default applies its own rules, as v1 does)."""
+    """Compile and run a schema-valid query on the workspace. `check` sees the
+    compiled query before it runs, and may refuse it. `scan` reads each table for the
+    user (the default is the workspace's security: R1 and R2)."""
     compiled, columns = compile_query(
         query,
-        sources,
+        workspace,
         user,
         settings.calendar,
         today or settings.today(),
@@ -271,8 +280,8 @@ def execute(
         "truncated": result.truncated,
         "elapsedMs": result.elapsed_ms,
         "cacheHit": result.cache_hit,
-        # True when a row-level security rule exists on a dataset in this query
-        # but does not apply to this user's role. The UI shows it as a badge.
+        # True when a row-level security rule exists on a table this query reads but
+        # does not apply to this user's role. The UI shows it as a badge.
         "rlsBypassed": compiled.rls_bypassed,
         "snapshots": {t.alias: t.snapshot_id for t in compiled.tables},
     }
@@ -292,32 +301,25 @@ def run(
     today: date | None = None,
 ) -> dict[str, Any]:
     check_query(settings, query)
-    names = referenced_datasets(query)
+    names = referenced_tables(query)
     from opsis.services import access  # import here: access imports nothing from queries
 
     access.require_datasets(db, principal, names)
-    base = str(query["dataset"])
-    sources = load_with_joins(db, settings, names, base)
-    if base not in sources:
-        exists = db.scalar(select(Dataset).where(Dataset.name == base))
-        if exists is None:
-            raise ApiError(404, "not_found", f"There is no dataset called {base!r}.")
-        raise ApiError(
-            409,
-            "no_data",
-            f"Dataset {base!r} has no data yet. Wait for its first refresh to finish.",
-        )
+    workspace = load_workspace(db, settings)
+    require_data(db, workspace, names)
+    user = user_context(principal, preview_as, db=db)
     db.rollback()  # nothing to hold open while the query runs
 
     compiled, body = execute(
         settings,
         runtime,
-        sources,
-        user_context(principal, preview_as, db=db),
+        workspace,
+        user,
         query,
         max_rows=max_rows,
         today=today,
-        # A dataset joined through is read too: the caller must be allowed to use it.
+        # Every table the query uses is checked, the ones joined through too; a table
+        # read only by row-level security to filter another is not a use of it.
         check=lambda made: access.require_datasets(db, principal, {t.alias for t in made.tables}),
     )
     if include_sql and principal.can(Permission.MODELS_EDIT):

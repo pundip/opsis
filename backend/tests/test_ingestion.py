@@ -164,6 +164,7 @@ def connect(client: TestClient, connector: str, config: dict[str, Any], name: st
 
 def test_registry_finds_builtin_and_dropin_connectors(tmp_path: Path) -> None:
     assert {c.id for c in ConnectorRegistry().all()} == {
+        "date",
         "file",
         "gsheets",
         "mysql",
@@ -214,7 +215,7 @@ def test_secret_encryption(tmp_path: Path) -> None:
 
 def test_connectors_endpoint_lists_schemas(client_for: ClientFor) -> None:
     connectors = {c["id"]: c for c in ok(client_for().get("/api/connectors"))}
-    assert set(connectors) == {"file", "gsheets", "mysql", "postgres", "salesforce"}
+    assert set(connectors) == {"date", "file", "gsheets", "mysql", "postgres", "salesforce"}
     assert connectors["mysql"]["configSchema"]["properties"]["password"]["x-secret"] is True
     assert connectors["file"]["configSchema"]["properties"]["file"]["x-upload"] is True
 

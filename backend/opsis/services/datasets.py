@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -69,8 +70,13 @@ def samples_hidden_from(
     }
     blocked = access.blocked_datasets(db, principal)
     user = queries.user_context(principal, None)
-    sources = queries.load_sources(db, settings, set(names.values()) - blocked)
-    limited = {name for name, source in sources.items() if queries.rls_applies(source, user)}
+    workspace = queries.load_workspace(db, settings)
+    limited = {
+        name
+        for name in set(names.values()) - blocked
+        if name in workspace.sources
+        and queries.rls_applies(workspace, workspace.sources[name], user)
+    }
     return {i for i, name in names.items() if name in blocked or name in limited}
 
 
@@ -311,6 +317,34 @@ def request_refresh(db: Session, actor: Principal, dataset: Dataset, *, full: bo
     )
 
 
+def refresh_now(db: Session, settings: Settings, actor: Principal, dataset: Dataset) -> Job:
+    """Run a refresh here and now, recorded as a job like any other (for data the app
+    makes itself: the demo data and a date table). The job is returned finished, failed
+    or not: its `error` says what went wrong."""
+    from opsis.services import refresh  # it reads datasets through the connections
+
+    job = Job(
+        type=REFRESH_JOB,
+        payload={"dataset_id": str(dataset.id)},
+        status="running",
+        locked_by="inline",
+        started_at=datetime.now(UTC),
+        attempts=1,
+        created_by=actor.user_id,
+    )
+    db.add(job)
+    db.commit()
+    try:
+        result = refresh.run_refresh(db, job, settings)
+    except Exception as exc:
+        db.rollback()
+        queue.finish(db, job, error=str(exc)[:500])
+        return job
+    queue.finish(db, job, result=result)
+    refresh.prune_snapshots(db, job, settings)
+    return job
+
+
 def set_overrides(
     db: Session, actor: Principal, dataset: Dataset, submitted: dict[str, Any]
 ) -> Job | None:
@@ -399,6 +433,13 @@ def delete(db: Session, settings: Settings, actor: Principal, dataset: Dataset) 
         detail={"name": dataset.name},
     )
     schedules.forget(db, dataset_id)
+    from opsis.services import workspace_model  # avoids an import cycle
+
+    # Its table and relationships go too, so a new dataset of the same name starts
+    # afresh.
+    workspace_model.remove_tables(
+        db, [dataset.name], f"Removed {dataset.name}: the dataset was deleted"
+    )
     db.delete(dataset)
     db.commit()
     snapshots.remove_dataset(settings, dataset_id)
@@ -424,9 +465,10 @@ def preview(
 ) -> dict[str, Any]:
     """The first rows of the current snapshot.
 
-    With a `principal`, row-level security is applied: when a rule of the
-    dataset's model restricts that user, the rows are read through the same
-    filtered scan as every query, so a preview never shows a hidden row.
+    With a `principal`, row-level security is applied: when a rule restricts that
+    user (the table's own, or one reaching it through a relationship), the rows are
+    read through the same filtered scan as every query, so a preview never shows a
+    hidden row.
     """
     limit = max(1, min(limit, MAX_PREVIEW_ROWS))
     snapshot = (
@@ -442,13 +484,14 @@ def preview(
     if principal is not None:
         from opsis.services import query as queries  # avoids an import cycle
 
-        source = queries.load_sources(db, settings, {dataset.name}).get(dataset.name)
+        workspace = queries.load_workspace(db, settings)
+        source = workspace.sources.get(dataset.name)
         user = queries.user_context(principal, None)
-        if source is not None and queries.rls_applies(source, user):
+        if source is not None and queries.rls_applies(workspace, source, user):
             if runtime is None:
                 raise ApiError(403, "forbidden", "Row-level security applies to this dataset.")
             db.rollback()
-            rows = queries.secured_preview(settings, runtime, source, user, limit)
+            rows = queries.secured_preview(settings, runtime, workspace, source, user, limit)
             restricted = True
     return {
         "snapshotId": str(snapshot.id),

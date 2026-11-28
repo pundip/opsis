@@ -18,6 +18,9 @@ get_dashboard then patch_dashboard with base_version.
 those. A version_conflict means: get_dashboard again, then retry with the new version.
 5. Dashboards you create are drafts. Publish only when the user asks. Always give the user the \
 editUrl or viewUrl from the result.
+6. Tables are linked by relationships: get_workspace_model lists them. A visual on one table may \
+use the fields of the tables it reaches through them (describe_dataset lists those as \
+dimensionsFromJoinedDatasets).
 """
 
 # The reference part of the guide: words, the spec, items and filters. The in-app
@@ -32,6 +35,9 @@ SPEC_GUIDE = """\
 - **Measure**: a ready-made number (`gifts.total_amount`). Do not write aggregations yourself; \
 pick a measure. If the one you need is missing, add it with patch_semantic_model.
 - **Field ref**: always `dataset.field`. Take refs from describe_dataset.
+- **Relationship**: links two tables, from the many side to the one side (`gifts.donor_id` to \
+`donors.id`). A visual on gifts may group by `donors.region` through it. get_workspace_model \
+lists the relationships.
 
 ## A dashboard spec
 ```json
@@ -93,6 +99,19 @@ get_dashboard gives the spec and its `version`. Call patch_dashboard with that v
 - change a title: `{"op": "replace", "path": "/items/0/title", "value": "New title"}`
 - remove the item with index 2: `{"op": "remove", "path": "/items/2"}`
 On `version_conflict`, call get_dashboard again and retry with the new version.
+
+## Changing the model
+get_workspace_model gives the tables, the relationships and the model's `version`; with \
+`{"table": "gifts"}` it gives one table in full. Call patch_workspace_model with that version as \
+`base_version`:
+- link two tables: `{"op": "add", "path": "/relationships/gifts__donors", "value": {"from": \
+{"table": "gifts", "columns": ["donor_id"]}, "to": {"table": "donors", "columns": ["id"]}}}` \
+(`from` is the many side; the key in `to` should be unique)
+- add a measure: `{"op": "add", "path": "/tables/gifts/measures/avg_amount", "value": \
+{"agg": "avg", "column": "amount", "label": "Average gift"}}`
+validate_workspace_model checks a change without saving it. Tell the user about any `warnings`.
+suggest_relationships proposes relationships with a confidence and the evidence, and applies \
+nothing: add only the ones the user confirms.
 """
 )
 

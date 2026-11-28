@@ -20,7 +20,7 @@ import contextlib
 import difflib
 import json
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,10 +41,12 @@ from opsis.services import (
     dashboards,
     datasets,
     links,
+    model_suggestions,
     model_warnings,
     models,
 )
 from opsis.services import query as queries
+from opsis.services import workspace_model as wm
 from opsis.services.query import QueryRuntime
 from opsis.settings import Settings
 
@@ -58,6 +60,7 @@ SCHEMAS = {
     "semantic-query": "semantic-query.schema.json",
     "semantic-model": "semantic-model.schema.json",
     "visual-manifest": "visual-manifest.schema.json",
+    "workspace-model": "workspace-model.schema.json",
 }
 
 
@@ -112,22 +115,22 @@ class ToolFailure(Exception):
 
 GENERAL_HINTS = {
     "version_conflict": (
-        "Someone else saved in between. Read the latest version (get_dashboard or "
-        "get_semantic_model), apply your change to that, and call again with base_version set "
-        "to the current version number given above."
+        "Someone else saved in between. Read the latest version (get_dashboard, "
+        "get_workspace_model or get_semantic_model), apply your change to that, and call again "
+        "with base_version set to the current version number given above."
     ),
     "invalid_spec": (
         "Nothing was saved. Fix each problem at its path and call again. describe_dataset "
         "lists the valid field names; list_visuals lists each visual's roles and config options."
     ),
     "invalid_patch": (
-        "Nothing was saved. Read the current document first (get_dashboard or "
-        "get_semantic_model) and build paths from what is really there. To append to a list "
-        'use a path ending in "/-", for example "/items/-".'
+        "Nothing was saved. Read the current document first (get_dashboard, "
+        "get_workspace_model or get_semantic_model) and build paths from what is really there. "
+        'To append to a list use a path ending in "/-", for example "/items/-".'
     ),
     "invalid_model": (
-        "Nothing was saved. Fix each problem at its path and call again. describe_dataset "
-        "lists the dataset's columns."
+        "Nothing was saved. Fix each problem at its path and call again. get_workspace_model "
+        "with a `table` lists that table's columns and relationships."
     ),
     "invalid_query": (
         "Fix each problem at its path. Field names are written dataset.field, exactly as "
@@ -252,15 +255,16 @@ def _urls(settings: Settings, dashboard_id: Any) -> dict[str, str]:
     }
 
 
-def _raw_source(ctx: ToolContext, db: Session, dataset: Dataset) -> Any:
-    """The dataset's snapshot, for tools that read rows rather than run a
-    semantic query. Rows are always read through `queries.secured_select`, so
-    row-level security applies to them exactly as it does to a query."""
-    sources = queries.load_sources(db, ctx.settings, {dataset.name})
-    source = sources.get(dataset.name)
+def _raw_source(ctx: ToolContext, db: Session, dataset: Dataset) -> tuple[Any, Any]:
+    """The workspace and the dataset's table, for tools that read rows rather than
+    run a semantic query. Rows are always read through `queries.secured_select`, so
+    row-level security applies to them exactly as it does to a query (its own rules,
+    and those that reach it through relationships)."""
+    workspace = queries.load_workspace(db, ctx.settings)
+    source = workspace.sources.get(dataset.name)
     if source is None:
         raise _fail("no_data", f"Dataset {dataset.name!r} has no data yet.")
-    return source
+    return workspace, source
 
 
 # ---- discovery --------------------------------------------------------------------
@@ -285,7 +289,7 @@ def list_datasets(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     by_name = {row["name"]: row for row in datasets.list_datasets(db)}
     blocked = access.blocked_datasets(db, ctx.principal)
     result = []
-    for entry in models.list_models(db):
+    for entry in models.list_models(db, ctx.principal):
         if entry["dataset"] in blocked:
             continue
         row = by_name.get(entry["dataset"], {})
@@ -308,9 +312,9 @@ def list_datasets(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     }
 
 
-def _sample_values(ctx: ToolContext, source: Any) -> dict[str, list[Any]]:
+def _sample_values(ctx: ToolContext, workspace: Any, source: Any) -> dict[str, list[Any]]:
     user = queries.user_context(ctx.principal, None)
-    rows = queries.secured_preview(ctx.settings, ctx.runtime, source, user, SAMPLE_ROWS)
+    rows = queries.secured_preview(ctx.settings, ctx.runtime, workspace, source, user, SAMPLE_ROWS)
     names = list(source.columns)
     samples: dict[str, list[Any]] = {}
     for position, name in enumerate(names):
@@ -328,7 +332,7 @@ def _sample_values(ctx: ToolContext, source: Any) -> dict[str, list[Any]]:
 
 def describe_dataset(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     dataset = _dataset(ctx, db, args["dataset"])
-    described = models.describe(db, dataset)
+    described = models.describe(db, ctx.principal, dataset)
     detail = datasets.detail(db, dataset)
     snapshot = detail.get("snapshot") or {}
     job = detail.get("lastJob") or {}
@@ -337,11 +341,13 @@ def describe_dataset(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any
     sample_note = None
     restricted = False
     if described["dataset"]["hasData"]:
-        source = queries.load_sources(db, ctx.settings, {dataset.name}).get(dataset.name)
+        workspace = queries.load_workspace(db, ctx.settings)
+        source = workspace.sources.get(dataset.name)
         if source is not None:
-            restricted = queries.rls_applies(source, queries.user_context(ctx.principal, None))
+            user = queries.user_context(ctx.principal, None)
+            restricted = queries.rls_applies(workspace, source, user)
             db.rollback()
-            samples = _sample_values(ctx, source)
+            samples = _sample_values(ctx, workspace, source)
             if restricted:
                 sample_note = (
                     "Row-level security applies to you: sample values come only from the rows "
@@ -444,21 +450,23 @@ def _first_time(dimensions: list[dict[str, Any]], dataset: str) -> str:
     return next((d["ref"] for d in dimensions if d["type"] == "time"), f"{dataset}.some_date")
 
 
-def _warnings(ctx: ToolContext, db: Session, dataset: str, definition: Any) -> Any:
+def _warnings(ctx: ToolContext, db: Session, dataset: Dataset, definition: Any = None) -> Any:
     """What a model saves with but may surprise: see services.model_warnings."""
-    return model_warnings.check(db, ctx.settings, ctx.runtime, ctx.principal, dataset, definition)
+    return model_warnings.check_table(
+        db, ctx.settings, ctx.runtime, ctx.principal, dataset, definition
+    )
 
 
 def get_semantic_model(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     dataset = _dataset(ctx, db, args["dataset"])
     name = dataset.name
-    described = models.describe(db, dataset)
+    described = models.describe(db, ctx.principal, dataset)
     return {
         "dataset": name,
         "version": described["version"],
         "isGeneratedStarter": described["isStarter"],
         "definition": described["definition"],
-        "warnings": _warnings(ctx, db, name, described["definition"]),
+        "warnings": _warnings(ctx, db, dataset),
         "note": (
             "To change it, call patch_semantic_model with base_version set to this `version` "
             "and JSON Patch paths into `definition`, for example "
@@ -561,7 +569,8 @@ def list_visuals(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     if dataset_name:
         dataset = _dataset(ctx, db, dataset_name)
         dataset_name = dataset.name
-        fields = [f for f in models.describe(db, dataset)["fields"] if f["kind"] != "segment"]
+        described = models.describe(db, ctx.principal, dataset)
+        fields = [f for f in described["fields"] if f["kind"] != "segment"]
     visuals = []
     for manifest in dashboards.manifests(ctx.settings).values():
         entry: dict[str, Any] = {
@@ -723,7 +732,7 @@ def _profile_sql(source: exp.Subquery, column: str, top: bool) -> str:
 
 def profile_column(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     dataset = _dataset(ctx, db, args["dataset"])
-    source = _raw_source(ctx, db, dataset)
+    workspace, source = _raw_source(ctx, db, dataset)
     wanted = str(args["column"]).strip()
     # Accept a field ref ("gifts.fund") for a dimension that reads one column.
     if wanted.startswith(f"{dataset.name}."):
@@ -741,7 +750,7 @@ def profile_column(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
     def run(top: bool) -> list[list[Any]]:
         # Row-level security is inside the scan, so the figures cover only visible rows.
-        sql = _profile_sql(queries.secured_select(source, user), wanted, top)
+        sql = _profile_sql(queries.secured_select(workspace, source, user), wanted, top)
         return queries.run_raw(ctx.settings, ctx.runtime, source, sql, TOP_VALUES, numbers=True)
 
     rows, non_null, distinct, low, high = run(False)[0]
@@ -757,7 +766,7 @@ def profile_column(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
         "mostCommon": [{"value": value, "rows": count} for value, count in run(True)],
         **(
             {"note": "Row-level security applies to you: these figures cover only your rows."}
-            if queries.rls_applies(source, user)
+            if queries.rls_applies(workspace, source, user)
             else {}
         ),
     }
@@ -768,29 +777,35 @@ def profile_column(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
 
 def validate_model(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     dataset = _dataset(ctx, db, args["dataset"])
-    name = dataset.name
     definition = ctx.lists("semantic-model.schema.json", args["definition"], "validate_model")
-    found = models.problems(db, ctx.settings, dataset, definition)
-    warnings = [] if found else _warnings(ctx, db, name, definition)
+    found = models.problems(db, ctx.settings, ctx.principal, dataset, definition)
+    warnings = [] if found else _warnings(ctx, db, dataset, definition)
     return {"valid": not found, "problems": found[:50], "warnings": warnings}
 
 
 def patch_semantic_model(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
     dataset = _dataset(ctx, db, args["dataset"])
-    described = models.describe(db, dataset)
     base = int(args["base_version"])
-    if base != described["version"]:
+    # The operations were written against the model at base_version, so they apply to
+    # that. A stale change is then rebased by what it changed: refused (409) only when
+    # someone changed the same part of the model since.
+    start = models.definition_at(db, ctx.principal, dataset, base)
+    try:
+        applied = patches.apply(start, args["ops"])
+    except ApiError as exc:
+        now = wm.current(db).version
+        if exc.code != "invalid_patch" or base == now:
+            raise
         raise _fail(
             "version_conflict",
-            f"The model of {dataset.name!r} is at version {described['version']}, not {base}.",
-            [{"path": "/base_version", "message": f"Current version is {described['version']}."}],
-        )
+            f"The model has changed since version {base} (it is now version {now}), and "
+            f"these operations do not fit version {base}.",
+            exc.details,
+        ) from None
     patched = ctx.lists(
-        "semantic-model.schema.json",
-        patches.apply(described["definition"], args["ops"]),
-        "patch_semantic_model (the patched model)",
+        "semantic-model.schema.json", applied, "patch_semantic_model (the patched model)"
     )
-    record = models.save(
+    state = models.save(
         db,
         ctx.settings,
         ctx.principal,
@@ -800,8 +815,8 @@ def patch_semantic_model(ctx: ToolContext, db: Session, args: dict[str, Any]) ->
         message=args.get("message"),
         author_type=ctx.author_type,
     )
-    name, version = dataset.name, record.version
-    warnings = _warnings(ctx, db, name, record.definition)
+    name, version = dataset.name, state.version
+    warnings = _warnings(ctx, db, dataset)
     note = "Dashboards that use this dataset pick up the change on their next load."
     if warnings:
         note = (
@@ -814,6 +829,218 @@ def patch_semantic_model(ctx: ToolContext, db: Session, args: dict[str, Any]) ->
         "saved": True,
         "warnings": warnings,
         "note": note,
+    }
+
+
+# ---- the workspace model (V2) -------------------------------------------------------
+
+MAX_TABLES_LISTED = 200
+MAX_RELATIONSHIPS_LISTED = 200
+MAX_PROBLEMS = 50
+MAX_WARNINGS = 25
+
+
+def _model_warnings(
+    ctx: ToolContext,
+    db: Session,
+    document: Mapping[str, Any] | None = None,
+    only: Collection[str] | None = None,
+) -> list[dict[str, Any]]:
+    """What the model saves with but may surprise (services.model_warnings), as the
+    caller may see it. Ends the database transaction."""
+    found = model_warnings.check(db, ctx.settings, ctx.runtime, ctx.principal, document, only=only)
+    return found[:MAX_WARNINGS]
+
+
+def _pointer(path: str) -> list[str]:
+    """A JSON Pointer's parts, unescaped."""
+    return [part.replace("~1", "/").replace("~0", "~") for part in path.split("/")[1:]]
+
+
+def _touches(path: str, table: str, relationships: Collection[str]) -> bool:
+    parts = _pointer(path)
+    return parts[:2] == ["tables", table] or (
+        len(parts) >= 2 and parts[0] == "relationships" and parts[1] in relationships
+    )
+
+
+def get_workspace_model(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
+    described = wm.describe(db, ctx.settings, ctx.principal)
+    document = described["document"]
+    tables = document["tables"]
+    about = {t["name"]: t for t in described["tables"]}
+    version = described["version"]
+    if args.get("table") is None:
+        listed = []
+        for name, entry in list(tables.items())[:MAX_TABLES_LISTED]:
+            info = about.get(name, {})
+            row: dict[str, Any] = {
+                "table": name,
+                "label": entry.get("label") or info.get("label") or name,
+                "hasData": info.get("hasData", False),
+                "dimensions": len(entry.get("dimensions") or {}),
+                "measures": len(entry.get("measures") or {}),
+                "segments": len(entry.get("segments") or {}),
+            }
+            if entry.get("rls"):
+                row["securityRules"] = len(entry["rls"])
+            if info.get("primaryKey"):
+                row["primaryKey"] = info["primaryKey"]
+            if entry.get("dateTable"):
+                row["dateTable"] = entry["dateTable"]["column"]
+            if entry.get("hidden"):
+                row["hidden"] = True
+            if info.get("generated"):
+                row["starter"] = True
+            listed.append(row)
+        relationships = document["relationships"]
+        result: dict[str, Any] = {
+            "version": version,
+            "tables": listed,
+            "relationships": dict(list(relationships.items())[:MAX_RELATIONSHIPS_LISTED]),
+            "problems": described["problems"][:MAX_PROBLEMS],
+            "warnings": _model_warnings(ctx, db),
+            "note": (
+                "Fields are written table.field. A query or visual on one table may use the "
+                "fields of every table it reaches along active relationships, from the many side "
+                "(`from`) to the one side (`to`). For one table in full, call get_workspace_model "
+                'with {"table": "<name>"}. To change the model, call patch_workspace_model with '
+                "base_version set to this `version`; paths are /tables/<table>/... and "
+                "/relationships/<id>. A table marked `starter` was generated from its columns: "
+                "patching it saves it as written."
+            ),
+        }
+        if len(tables) > MAX_TABLES_LISTED:
+            result["tablesShown"] = f"{MAX_TABLES_LISTED} of {len(tables)}"
+        if len(relationships) > MAX_RELATIONSHIPS_LISTED:
+            result["relationshipsShown"] = f"{MAX_RELATIONSHIPS_LISTED} of {len(relationships)}"
+        return result
+
+    dataset = _dataset(ctx, db, args["table"])
+    name = dataset.name
+    if name not in tables:
+        raise _fail(
+            "no_data", f"The dataset {name!r} has no data yet, so it is not a table in the model."
+        )
+    info = about.get(name, {})
+    touching = {
+        rid: rel
+        for rid, rel in document["relationships"].items()
+        if name in (rel["from"]["table"], rel["to"]["table"])
+    }
+    return {
+        "version": version,
+        "table": name,
+        "definition": tables[name],
+        "starter": bool(info.get("generated")),
+        "columns": info.get("columns", []),
+        "primaryKey": info.get("primaryKey", []),
+        "relationships": touching,
+        "problems": [p for p in described["problems"] if _touches(p["path"], name, touching)][
+            :MAX_PROBLEMS
+        ],
+        "warnings": _model_warnings(ctx, db, only=set(touching)) if touching else [],
+        "note": (
+            f"`definition` is at /tables/{name} in the model: in patch_workspace_model, a new "
+            f'measure\'s path is "/tables/{name}/measures/<name>". Pass this `version` as '
+            "base_version."
+        ),
+    }
+
+
+def _relationships_changed(ops: Sequence[Mapping[str, Any]], state: wm.State) -> set[str]:
+    """The relationships a patch may have changed, for its warnings."""
+    every = set(state.effective["relationships"])
+    found: set[str] = set()
+    for op in ops:
+        for key in ("path", "from"):
+            if key not in op:
+                continue
+            parts = _pointer(str(op[key]))
+            if not parts or parts == [""] or parts == ["relationships"]:
+                found |= every
+            elif parts[0] == "relationships":
+                found.add(parts[1])
+    return found & every
+
+
+def patch_workspace_model(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
+    before = wm.current(db).version
+    # A stale base_version is rebased: refused (409) only when someone changed the
+    # same part of the model since.
+    state = wm.save(
+        db,
+        ctx.settings,
+        ctx.principal,
+        ops=args["ops"],
+        base_version=int(args["base_version"]),
+        message=args.get("message"),
+        author_type=ctx.author_type,
+    )
+    changed = _relationships_changed(args["ops"], state)
+    warnings = _model_warnings(ctx, db, only=changed) if changed else []
+    saved = state.version != before
+    note = (
+        "Dashboards pick up the change on their next load."
+        if saved
+        else "Nothing changed: the model was already like that."
+    )
+    if warnings:
+        note = (
+            "Saved, but tell the user what `warnings` says: numbers or access may not be what "
+            f"they expect. {note}"
+        )
+    return {"version": state.version, "saved": saved, "warnings": warnings, "note": note}
+
+
+def suggest_relationships(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
+    tables = args.get("tables")
+    if tables is not None:
+        tables = [_dataset(ctx, db, str(name)).name for name in tables]
+    found = model_suggestions.suggest(db, ctx.settings, ctx.runtime, ctx.principal, tables)
+    more = found["note"].removeprefix(model_suggestions.NOTE)  # pairs left unread
+    found["note"] = (
+        "Nothing was applied. Show the user each proposal with its confidence and evidence, "
+        "and add only the ones they confirm, with patch_workspace_model: "
+        '{"op": "add", "path": "/relationships/<id>", "value": <relationship>}. '
+        "`inactiveBecause` says why a proposal starts inactive." + more
+    )
+    return found
+
+
+def validate_workspace_model(ctx: ToolContext, db: Session, args: dict[str, Any]) -> Any:
+    document, ops = args.get("document"), args.get("ops")
+    if (document is None) == (ops is None):
+        raise _fail(
+            "invalid_arguments",
+            "Send `ops` (JSON Patch operations on the current model) or `document` (a whole "
+            "model), not both and not neither.",
+            hint='For example {"ops": [{"op": "add", "path": "/tables/gifts/measures/avg_amount", '
+            '"value": {"agg": "avg", "column": "amount"}}]}.',
+        )
+    if document is not None:
+        document = ctx.lists("workspace-model.schema.json", document, "validate_workspace_model")
+    base = args.get("base_version")
+    checked, full = wm.validate(
+        db,
+        ctx.settings,
+        ctx.principal,
+        document=document,
+        ops=ops,
+        base_version=None if base is None else int(base),
+    )
+    warnings = checked["warnings"]
+    if full is not None:
+        warnings = _model_warnings(ctx, db, full)
+    return {
+        "valid": checked["valid"],
+        "problems": checked["problems"][:MAX_PROBLEMS],
+        "existing": checked["existing"][:MAX_PROBLEMS],
+        "warnings": warnings[:MAX_WARNINGS],
+        "note": (
+            "`problems` would stop a save. `existing` are problems the model already has: they "
+            "do not stop one. Tell the user about `warnings`."
+        ),
     }
 
 
@@ -1291,8 +1518,9 @@ TOOLS: tuple[Tool, ...] = (
         "measure. First call get_semantic_model, then pass its `version` as `base_version`; "
         "paths point into its `definition`. The result is validated and saved as a new "
         "version, or nothing is saved and the problems are listed. After a save, tell the user "
-        "about any `warnings` (for example a join key on more than one row). If the version "
-        "has moved on you get a version_conflict error: read the model again and retry. "
+        "about any `warnings` (for example a join key on more than one row). If someone "
+        "changed the same part since your version you get a version_conflict error: read the "
+        "model again and retry. "
         'Example input: {"dataset": "gifts", "base_version": 3, "ops": [{"op": "add", '
         '"path": "/measures/avg_amount", "value": {"agg": "avg", "column": "amount", '
         '"label": "Average gift"}}], "message": "Add average gift"}',
@@ -1309,6 +1537,113 @@ TOOLS: tuple[Tool, ...] = (
         "edit",
         Permission.MODELS_EDIT,
         writes=True,
+    ),
+    Tool(
+        "get_workspace_model",
+        "Get the workspace model",
+        "Get the workspace model: every table you may use with how many dimensions, measures "
+        "and segments it has, the relationships between the tables (each from the many side to "
+        "the one side), and the model's `version`. A query or visual on one table may use the "
+        "fields of the tables it reaches along active relationships. Pass `table` to get one "
+        "table in full: its dimensions, measures, segments and row-level security rules, its "
+        "columns, and the relationships that touch it. Call it before patch_workspace_model. "
+        'Example input: {"table": "gifts"}',
+        _schema(
+            {
+                "table": {
+                    "type": "string",
+                    "description": 'Optional. A table (dataset) name, for example "gifts".',
+                }
+            }
+        ),
+        get_workspace_model,
+        "read",
+        EDIT,
+    ),
+    Tool(
+        "patch_workspace_model",
+        "Change the workspace model",
+        "Change the workspace model with JSON Patch operations: add, change or remove a "
+        "relationship between two tables, or a table's dimensions, measures and segments. First "
+        "call get_workspace_model and pass its `version` as `base_version`. Paths are "
+        '"/relationships/<id>" (an id is written <from table>__<to table>) and '
+        '"/tables/<table>/measures/<name>" and so on. A relationship goes from the many side to '
+        "the one side, for example from gifts.donor_id to donors.id. The result is validated "
+        "and saved as a new version, or nothing is saved and the problems are listed. If "
+        "someone changed the same part since your version you get a version_conflict error: "
+        "read the model again and retry. After a save, tell the user about any `warnings`. "
+        'Example input: {"base_version": 4, "ops": [{"op": "add", "path": '
+        '"/relationships/gifts__donors", "value": {"from": {"table": "gifts", "columns": '
+        '["donor_id"]}, "to": {"table": "donors", "columns": ["id"]}}}], '
+        '"message": "Link gifts to donors"}',
+        _schema(
+            {
+                "base_version": {"type": "integer", "minimum": 0},
+                "ops": _OPS,
+                "message": _MESSAGE,
+            },
+            ["base_version", "ops"],
+        ),
+        patch_workspace_model,
+        "edit",
+        Permission.MODELS_EDIT,
+        writes=True,
+    ),
+    Tool(
+        "validate_workspace_model",
+        "Validate a workspace model change",
+        "Check a change to the workspace model without saving it: JSON Patch `ops` on the "
+        "current model, as patch_workspace_model takes them, or a whole `document`. Returns "
+        "`valid`, the `problems` that would stop a save (each with the path of what to fix), "
+        "`existing` problems the model already has (they do not stop a save), and `warnings` to "
+        "tell the user about, such as a relationship whose one-side key is on more than one row. "
+        'Example input: {"ops": [{"op": "add", "path": "/tables/gifts/measures/avg_amount", '
+        '"value": {"agg": "avg", "column": "amount", "label": "Average gift"}}]}',
+        _schema(
+            {
+                "ops": _OPS,
+                "document": {
+                    "type": "object",
+                    "description": (
+                        "Instead of `ops`: a whole model (modelVersion 2, tables, relationships). "
+                        "A table left out goes back to its starter definition."
+                    ),
+                },
+                "base_version": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional. The version your change starts from.",
+                },
+            }
+        ),
+        validate_workspace_model,
+        "read",
+        EDIT,
+    ),
+    Tool(
+        "suggest_relationships",
+        "Suggest relationships",
+        "Propose relationships the workspace model does not have yet, found from column "
+        "names, types and how many values match (read as the user may see them; restricted "
+        "datasets are left out). Each proposal has an `id`, the `relationship` as the model "
+        'stores it, a `confidence` from 0 to 1 and the `evidence`, for example "98% of '
+        'gifts.donor_id values exist in donors.id". Nothing is applied: show the user the '
+        "proposals and add the ones they confirm with patch_workspace_model. Pass `tables` "
+        "to look only at relationships that touch them. "
+        'Example input: {"tables": ["gifts"]}',
+        _schema(
+            {
+                "tables": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 20,
+                    "description": 'Optional. Table names, for example ["gifts", "donors"].',
+                }
+            }
+        ),
+        suggest_relationships,
+        "read",
+        EDIT,
     ),
     Tool(
         "list_dashboards",
@@ -1607,6 +1942,15 @@ def _summary(args: Mapping[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def _target_type(tool: Tool) -> str:
+    """What the audit row of a call that writes names as its target."""
+    if "workspace_model" in tool.name:
+        return "workspace_model"
+    if any(word in tool.name for word in ("dashboard", "version", "share")):
+        return "dashboard"
+    return "dataset"
+
+
 def call(ctx: ToolContext, name: str, arguments: Mapping[str, Any] | None) -> Any:
     """Run a tool. Returns its JSON-ready result, or raises ToolFailure with text
     written for the model that made the call."""
@@ -1641,10 +1985,10 @@ def call(ctx: ToolContext, name: str, arguments: Mapping[str, Any] | None) -> An
                     action=f"agent.{tool.name}",
                     actor=ctx.principal,
                     actor_type=ctx.author_type,
-                    target_type="dashboard"
-                    if any(word in tool.name for word in ("dashboard", "version", "share"))
-                    else "dataset",
-                    target_id=str(result.get("id") or result.get("dataset") or "")[:100] or None,
+                    target_type=_target_type(tool),
+                    target_id="workspace"
+                    if _target_type(tool) == "workspace_model"
+                    else str(result.get("id") or result.get("dataset") or "")[:100] or None,
                     detail={
                         "tool": tool.name,
                         "arguments": _summary(args),

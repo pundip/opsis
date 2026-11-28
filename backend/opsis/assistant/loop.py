@@ -50,7 +50,10 @@ T = TypeVar("T")
 
 # The MCP tools the assistant may use, in this order. Left out: creating,
 # publishing and sharing dashboards (the person does those with the editor's
-# buttons), and tools that are no use from inside one dashboard.
+# buttons), tools that are no use from inside one dashboard, and changes to the
+# workspace model's relationships (people make those in the Model view: they change
+# every dashboard and where row-level security reaches). It reads the model, and can
+# suggest relationships for the user to add there.
 TOOL_NAMES = (
     "list_datasets",
     "describe_dataset",
@@ -61,6 +64,8 @@ TOOL_NAMES = (
     "profile_column",
     "get_semantic_model",
     "patch_semantic_model",
+    "get_workspace_model",
+    "suggest_relationships",
     "list_dashboards",
     "get_dashboard",
     "validate_spec",

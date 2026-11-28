@@ -2,7 +2,7 @@
 
 A self-hosted, AI-native business intelligence platform. Open source, Docker-based, and built so that a person and an AI agent edit the same dashboards.
 
-**Status:** version 1 is feature-complete and in its final install checks. You can connect to CSV or Excel files, PostgreSQL, MySQL, Google Sheets and Salesforce, pull tables into local storage on demand or on a schedule, define a semantic model for each dataset (dimensions, measures, joins, row-level security), build dashboards with a drag-and-drop editor, let an AI agent do the same through the built-in MCP server or the assistant in the editor, and, on a server, sign in (local accounts and Google), share dashboards, publish read-only share links, have dashboards emailed, and take nightly backups. See [PROGRESS.md](PROGRESS.md).
+**Status:** version 1 is feature-complete and in its final install checks. You can connect to CSV or Excel files, PostgreSQL, MySQL, Google Sheets and Salesforce, pull tables into local storage on demand or on a schedule, define one model of your datasets (tables, measures, relationships, and row-level security that follows them), build dashboards with a drag-and-drop editor, let an AI agent do the same through the built-in MCP server or the assistant in the editor, and, on a server, sign in (local accounts and Google), share dashboards, publish read-only share links, have dashboards emailed, and take nightly backups. See [PROGRESS.md](PROGRESS.md).
 
 **How to use it:** the [user guide](docs/guide/README.md) walks through connections, datasets, joins, semantic models, dashboards, sharing, AI agents and running an install, with screenshots. A running Opsis shows it too: **Help** in the menu, at `<your address>/docs/guide` (for example http://localhost:8080/docs/guide). It works offline, and with sign-in on only signed-in people can read it.
 
@@ -27,7 +27,7 @@ To have something to look at straight away, open **Settings** and choose **Load 
 docker compose exec api python -m opsis seed-demo
 ```
 
-It makes three datasets of made-up giving data (`demo_gifts`, `demo_donors`, `demo_regions`, joined to each other), their semantic models, and a published dashboard, **Giving overview (demo)**. To remove it, delete the dashboard and the three datasets.
+It makes three datasets of made-up giving data (`demo_gifts`, `demo_donors`, `demo_regions`, related to each other in the model), and a published dashboard, **Giving overview (demo)**. To remove it, delete the dashboard and the three datasets.
 
 ### Your own data
 
@@ -68,43 +68,55 @@ With a service account instead: in the Google Cloud console, under IAM and admin
 3. In Opsis, a new **Salesforce** connection: your My Domain URL (Setup, My Domain, for example `https://acme.my.salesforce.com`), sign in with `client_credentials`, the key and the secret. Optionally list the objects to offer, such as `Account, Opportunity, Donation__c`. **Test** shows the org's name and edition. A username, password and security token also work (`password`).
 4. For a dataset, choose **Merge** as the refresh mode: each refresh then reads only the records changed since the last one (by `SystemModstamp`) and merges them by `Id`. Records deleted in Salesforce stay until a **Full rebuild** on the dataset page.
 
-### Semantic models
+### The model
 
-Every dataset gets a generated model on its first refresh. Open **Semantic models**, choose a dataset, and you can:
+All your datasets share one model: a table for each dataset, and relationships between the tables. A dataset gets a generated table on its first refresh. Open **Model** to see the tables as cards on a canvas, and:
 
-- **Try a query:** tick measures and dimensions, choose a date field with a grain (including financial quarter and year) and a range such as "Last financial year", and run it. The generated SQL is shown under the result.
-- **Edit the model as YAML:** rename fields, add measures such as `avg_gift: {expr: "{total_amount} / NULLIF({gift_count}, 0)"}`, join to another dataset, or add row-level security. Check reports every problem with its location; Save stores it.
-- **Test row-level security:** as an admin, set "Run as" to a viewer and give that user's attributes as JSON.
-- **Read the warnings:** they never stop a save. A joined dataset that lists a key twice counts the matching rows twice, and security rules on a joined dataset do not limit the rows of this one ([user guide](docs/guide/05-joins.md#repeated-keys)).
+- **Relate two tables:** drag a field of one table onto the matching field of another, for example `donor_id` of gifts onto `id` of donors. Opsis checks the keys, says which side is the many side, and shows the settings it guessed; **Add relationship** saves it. **Add a relationship** does the same from a form, and **Suggest relationships** proposes some from names, types and matching values, with the evidence.
+- **Edit a table:** **Edit** on its card sets its label, its fields (label, format, hidden) and its measures.
+- **Edit the model as YAML:** the **YAML** tab holds the whole model. **Check** reports every problem with its location; **Save model** stores it as a version. **History** shows what each version changed and can restore one.
+- **Generate a date table:** one row per day with calendar and financial-year columns, refreshed daily, with relationships from your date columns offered.
+- **Read the warnings:** they never stop a save. A relationship whose one side lists a key twice counts the matching rows twice ([user guide](docs/guide/05-joins.md#repeated-keys)).
 
-A model with a join and a security rule:
+The **tables** link on the Model page lists the tables, with **Export all** and **Import** for the model as files. Each table's page lets you try a query and, as an admin, test row-level security ("Run as" a viewer, with that user's attributes as JSON).
+
+A model with a relationship and a security rule:
 
 ```yaml
-dataset: gifts
-dimensions:
-  fund_name: {column: fund_name, type: string, label: Fund}
-  gift_date: {column: gift_date, type: time}
-measures:
-  total_amount: {agg: sum, column: amount, format: currency_aud}
-  gift_count: {agg: count}
-  avg_gift: {expr: "{total_amount} / NULLIF({gift_count}, 0)", format: currency_aud}
-joins:
-  - to: donors
-    on: {donor_id: id}
-    relationship: many_to_one
-rls:
-  - filter: "fund_name IN {{ user.attributes.funds }}"
+modelVersion: 2
+tables:
+  gifts:
+    source: {dataset: gifts}
+    dimensions:
+      fund_name: {column: fund_name, type: string, label: Fund}
+      gift_date: {column: gift_date, type: time}
+    measures:
+      total_amount: {agg: sum, column: amount, format: currency_aud}
+      gift_count: {agg: count}
+      avg_gift: {expr: "{total_amount} / NULLIF({gift_count}, 0)", format: currency_aud}
+  donors:
+    source: {dataset: donors}
+    dimensions:
+      region: {column: region, type: string}
+    rls:
+      - filter: "region IN {{ user.attributes.regions }}"
+relationships:
+  gifts__donors:
+    from: {table: gifts, columns: [donor_id]}
+    to: {table: donors, columns: [id]}
 ```
 
-The rule above lets viewers and editors see only the funds listed in their `funds` attribute. A user with no such attribute sees no rows. The full format is in [spec/semantic-model.schema.json](spec/semantic-model.schema.json).
+The rule lets viewers and editors see only the donors in their `regions` attribute, and through the relationship only those donors' gifts. A user with no such attribute sees no rows. The full format is in [spec/workspace-model.schema.json](spec/workspace-model.schema.json).
 
 More that a model can say:
 
 - **Conditional measures:** `online_amount: {agg: sum, column: amount, filter: "channel = 'online'"}` counts only matching rows. A segment can be used by name: `filter: "{large} AND region = 'VIC'"`.
 - **Timezones:** timestamps that carry an offset in the source are stored as instants and shown in `WORKSPACE_TIMEZONE`. A timestamp without one is taken as workspace-local time; if the source keeps it in another zone, say so on the dimension: `created: {column: created, type: time, timezone: UTC}`.
-- **Version history:** every save is a version, with who and when. The model page lists them and can restore any of them.
-- **Two joins away:** a model can use a dimension of a dataset its joined dataset joins to, for example gifts to donors to regions. Every join on the way must be many-to-one or one-to-one, and a path never goes through a restricted dataset.
-- **All models as files:** on **Semantic models**, **Export all** downloads a zip of `models/<dataset>.yml` for version control, and **Import** takes such a zip (or `.yml` files) back. Every file is checked first and nothing is saved unless all of them are valid; each model that changes gets a new version.
+- **Fields of related tables:** a query on gifts can use fields of any table it reaches along many-to-one relationships, any number of steps (gifts to donors to regions). The shortest path wins, two as short are an error that names both, and a path never goes through a restricted dataset.
+- **Inactive relationships:** a second relationship between the same tables (gifts' `referrer_id` to donors) is inactive, drawn dashed. A measure uses it by name: `referred: {agg: count, relationship: gifts__donors_2}`.
+- **Filters and security both ways:** `crossFilter: both` lets a filter on gifts reach donors, and `securityFilter: both` lets a rule on gifts limit donors too.
+- **Version history:** every save is a version of the whole model, with who and when.
+- **The model as files:** on the tables page, **Export all** downloads a zip of `models/<table>.yml` and `models/workspace-model.yml` (the relationships) for version control, and **Import** takes such a zip (or v1 `models/<dataset>.yml` files) back. Every file is checked first and nothing is saved unless all of them are valid.
 
 ### Dashboards
 
@@ -329,7 +341,7 @@ The only tools needed on the host are Docker and Node.js (for the frontend tests
 | `npm run test:scripts` | The guard that keeps tests off your stack (see below) |
 | `npm run smoke` | Playwright browser tests at http://localhost:18080, then behind nginx at http://localhost:18088/opsis/, then in server mode at http://localhost:18089/opsis/ with sign-in, a fake Google, share links and access tokens. Add `-- --no-build` to skip the image rebuild, `-- --root`, `-- --subpath` or `-- --server` for one stage, or `-- --dry-run` to check the test stacks' settings and start nothing |
 | `npm run lock:backend` | Regenerate `backend/uv.lock` after editing `pyproject.toml` |
-| `node scripts/benchmark.mjs --rows 10000000` | Start a test stack of its own (http://localhost:18083), load a synthetic dataset, time ingestion, queries and a typical dashboard, then remove the stack. `--keep` leaves it running; `--remove` removes it later |
+| `node scripts/benchmark.mjs --rows 10000000` | Start a test stack of its own (http://localhost:18083), load a synthetic dataset, time ingestion, queries and a typical dashboard, then remove the stack. `--rule` times them again with a row-level security rule on the donors that reaches the gifts through their relationship; `--keep` leaves it running; `--remove` removes it later |
 
 Run `npm install` inside `frontend/` once before the frontend commands. The smoke tests install their own dependencies and a Chromium browser the first time (in `e2e/`).
 

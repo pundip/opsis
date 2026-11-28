@@ -555,7 +555,7 @@ def test_fields_two_joins_away(sources: dict[str, Source], tmp_path: Path) -> No
         1 for g in GIFTS if donor_region.get(g["donor_id"]) == "VIC"
     )
 
-    # Two ways there: a direct join has to say which.
+    # Two ways there, as short as each other: refused, with both named.
     agents = Source(
         semantic.parse_model("agents", {"dimensions": {}, "joins": [to_regions]}),
         {"id": "integer", "region": "string"},
@@ -567,17 +567,17 @@ def test_fields_two_joins_away(sources: dict[str, Source], tmp_path: Path) -> No
         GIFT_COLUMNS, sources["gifts"].table,
     )  # fmt: skip
     ways = problems({**three, "gifts": gifts_two, "agents": agents}, query)["/dimensions/0"]
-    assert "through 'donors' and through 'agents'" in ways and "direct join" in ways
+    assert "two paths as short as each other" in ways
+    assert "gifts → donors → regions" in ways and "gifts → agents → regions" in ways
 
-    # Never through a restricted dataset, nor over a join that would fan out.
+    # Never through a restricted dataset, nor along a relationship the other way (a v1
+    # one_to_many join becomes an inactive relationship from regions to donors).
     hidden = problems({**three, "donors": donors_with(to_regions, restricted=True)}, query)
     assert "restricted" in hidden["/dimensions/0"]
     fan_out = {**to_regions, "relationship": "one_to_many"}
-    assert (
-        "double-count"
-        in problems({**three, "donors": donors_with(fan_out)}, query)["/dimensions/0"]
-    )
-    # Three joins away is too far.
+    turned = problems({**three, "donors": donors_with(fan_out)}, query)["/dimensions/0"]
+    assert "does not reach through active many-to-one relationships" in turned
+    # Three steps away (v2 has no limit on the number of steps).
     far = {**three, "regions": Source(
         semantic.parse_model("regions", {"dimensions": {}, "joins": [
             {"to": "countries", "on": {"code": "region"}, "relationship": "many_to_one"}]}),
@@ -586,8 +586,9 @@ def test_fields_two_joins_away(sources: dict[str, Source], tmp_path: Path) -> No
         semantic.parse_model("countries", {"dimensions": {"name": {"column": "name", "type": "string"}}}),
         {"name": "string", "region": "string"}, TableRef("countries", "d5", "s5", str(tmp_path / "c")),
     )}  # fmt: skip
-    too_far = problems(far, {"dataset": "gifts", "dimensions": ["countries.name"]})
-    assert "no join to, directly or through a dataset it joins to" in too_far["/dimensions/0"]
+    three_steps = compiled(far, {"dataset": "gifts", "dimensions": ["countries.name"]}).sql
+    assert three_steps.count("LEFT JOIN") == 3
+    assert '"regions"."code" = "countries"."region"' in three_steps
 
 
 def test_unsafe_or_missing_joins_are_refused(sources: dict[str, Source]) -> None:
@@ -595,11 +596,13 @@ def test_unsafe_or_missing_joins_are_refused(sources: dict[str, Source]) -> None
         sources,
         {"dataset": "donors", "dimensions": ["gifts.fund"], "measures": ["donors.donor_count"]},
     )
-    assert "double-count" in fan_out["/dimensions/0"]
+    assert "on the many side of 'donors'" in fan_out["/dimensions/0"]
+    assert "more than once" in fan_out["/dimensions/0"]
     no_join = problems(sources, {"dataset": "donors", "dimensions": ["events.name"]})
-    assert "no join to" in no_join["/dimensions/0"]
-    other_measure = problems(sources, {"dataset": "gifts", "measures": ["donors.donor_count"]})
-    assert "own dataset" in other_measure["/measures/0"]
+    assert "not a table of the model" in no_join["/dimensions/0"]
+    # A measure of another table is computed from its own table (v2).
+    other_measure = run(sources, {"dataset": "gifts", "measures": ["donors.donor_count"]})
+    assert other_measure == [{"donors.donor_count": len(DONORS)}]
     assert "/dimensions/0" in problems(
         sources, {"dataset": "gifts", "dimensions": ["gifts.total_amount"]}
     )
@@ -730,15 +733,17 @@ def test_rls_rules_roles_user_fields_and_joined_datasets(tmp_path: Path) -> None
         g["fund"] != "Sport" for g in GIFTS
     )
 
-    # A rule on a joined dataset hides that dataset's rows, not the base rows.
+    # A rule on a related table hides its rows and, through the relationship, the rows
+    # that relate to them (R2, ADR-032): only O'Brien's gifts are left, and a gift whose
+    # donor is missing matches no visible donor.
     joined = build([], [{"filter": "name = {{ user.email }}"}])
     rows = run(
         joined,
         {"dataset": "gifts", "dimensions": ["donors.name"], "measures": ["gifts.gift_count"]},
         UserContext("viewer", email="O'Brien"),
     )
-    assert {r["donors.name"] for r in rows} == {"O'Brien", None}
-    assert sum(r["gifts.gift_count"] for r in rows) == 400
+    assert {r["donors.name"] for r in rows} == {"O'Brien"}
+    assert sum(r["gifts.gift_count"] for r in rows) == sum(g["donor_id"] == 3 for g in GIFTS)
 
 
 def test_a_broken_rls_rule_blocks_the_dataset_instead_of_failing_open(tmp_path: Path) -> None:
